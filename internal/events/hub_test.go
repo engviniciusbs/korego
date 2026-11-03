@@ -106,3 +106,16 @@ func TestHub_SourceStartsAndStops(t *testing.T) {
 		t.Fatal("fonte não foi cancelada")
 	}
 }
+
+func TestHub_CancelClosesChannel(t *testing.T) {
+	h := events.NewHub()
+	ch, cancel := h.Subscribe("a")
+	h.Publish("a", 1)
+	cancel()
+	cancel()
+	ev, ok := <-ch // evento em buffer ainda é entregue
+	require.True(t, ok)
+	assert.Equal(t, 1, ev.Data)
+	_, ok = <-ch
+	assert.False(t, ok, "canal deve fechar após cancel")
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -134,4 +135,52 @@ func TestWS_ClosesWhenSessionRevoked(t *testing.T) {
 	err = wsjson.Read(ctx, conn, &m)
 	require.Error(t, err)
 	assert.Equal(t, websocket.StatusCode(4401), websocket.CloseStatus(err))
+}
+
+func TestWS_UnsubscribeStopsEventsAndGoroutines(t *testing.T) {
+	hub := events.NewHub()
+	hub.RegisterSource("t", func(ctx context.Context, _ string, publish func(any)) {
+		tk := time.NewTicker(5 * time.Millisecond)
+		defer tk.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tk.C:
+				publish("x")
+			}
+		}
+	})
+	_, srv, c := wsEnv(t, api.Deps{Hub: hub})
+	conn, _, err := dial(t, srv, c, nil)
+	require.NoError(t, err)
+
+	sendMsg(t, conn, map[string]string{"type": "subscribe", "topic": "t"})
+	assert.Equal(t, "event", readMsg(t, conn)["type"])
+	sendMsg(t, conn, map[string]string{"type": "unsubscribe", "topic": "t"})
+	// Um erro sentinela vem depois do unsubscribe (mesmo leitor, em ordem).
+	sendMsg(t, conn, map[string]string{"type": "nada"})
+	for readMsg(t, conn)["type"] != "error" {
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	var m map[string]any
+	assert.Error(t, wsjson.Read(ctx, conn, &m), "não deve chegar evento após unsubscribe")
+}
+
+func TestWS_SubscribeUnsubscribeDoesNotLeakGoroutines(t *testing.T) {
+	hub := events.NewHub()
+	_, srv, c := wsEnv(t, api.Deps{Hub: hub})
+	conn, _, err := dial(t, srv, c, nil)
+	require.NoError(t, err)
+	base := runtime.NumGoroutine()
+	for i := 0; i < 200; i++ {
+		sendMsg(t, conn, map[string]string{"type": "subscribe", "topic": "t"})
+		sendMsg(t, conn, map[string]string{"type": "unsubscribe", "topic": "t"})
+	}
+	sendMsg(t, conn, map[string]string{"type": "nada"})
+	for readMsg(t, conn)["type"] != "error" {
+	}
+	require.Eventually(t, func() bool { return runtime.NumGoroutine() <= base+5 },
+		2*time.Second, 20*time.Millisecond)
 }

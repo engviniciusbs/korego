@@ -78,13 +78,15 @@ func (h wsHandlers) serve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		mu   sync.Mutex
-		subs = map[string]func(){}
-		wg   sync.WaitGroup
+		mu     sync.Mutex
+		closed bool
+		subs   = map[string]func(){}
+		wg     sync.WaitGroup
 	)
 	defer func() {
 		cancel()
 		mu.Lock()
+		closed = true
 		for _, unsub := range subs {
 			unsub()
 		}
@@ -95,11 +97,15 @@ func (h wsHandlers) serve(w http.ResponseWriter, r *http.Request) {
 	subscribe := func(topic string) {
 		mu.Lock()
 		defer mu.Unlock()
+		if closed {
+			return
+		}
 		if _, dup := subs[topic]; dup || len(subs) >= maxTopicsPerConn {
 			return
 		}
 		ch, unsub := h.hub.Subscribe(topic)
-		subs[topic] = unsub
+		stop := make(chan struct{})
+		subs[topic] = func() { unsub(); close(stop) }
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -107,9 +113,16 @@ func (h wsHandlers) serve(w http.ResponseWriter, r *http.Request) {
 				select {
 				case <-ctx.Done():
 					return
+				case <-stop:
+					return
 				case ev, ok := <-ch:
 					if !ok {
 						return
+					}
+					select {
+					case <-stop:
+						return
+					default:
 					}
 					send(wsEventMsg{Type: "event", Topic: ev.Topic, Data: ev.Data})
 				}

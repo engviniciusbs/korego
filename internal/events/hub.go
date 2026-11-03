@@ -107,6 +107,7 @@ func (h *Hub) Subscribe(topic string) (<-chan Event, func()) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			delete(ts.subs, sub)
+			close(sub.ch) // seguro: Publish envia sob o mesmo lock
 			if len(ts.subs) == 0 {
 				if h.topics[topic] == ts {
 					delete(h.topics, topic)
