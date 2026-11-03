@@ -1,0 +1,40 @@
+version: 2
+
+project_name: korego
+
+before:
+  hooks:
+    - make web
+
+builds:
+  - id: korego
+    main: ./cmd/korego
+    binary: korego
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/engviniciusbs/korego/internal/version.Version={{.Version}}
+
+archives:
+  - id: korego
+    formats:
+      - tar.gz
+    name_template: "korego_{{ .Version }}_linux_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+release:
+  extra_files:
+    - glob: scripts/install.sh
+
+changelog:
+  disable: true

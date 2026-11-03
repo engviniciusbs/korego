@@ -1,0 +1,15 @@
+[Unit]
+Description=KoreGO - gerenciador de VPS
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/korego serve --config /etc/korego/config.toml
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
