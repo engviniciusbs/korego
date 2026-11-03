@@ -34,13 +34,15 @@ func (h setupHandlers) status(w http.ResponseWriter, r *http.Request) {
 
 func (h setupHandlers) begin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		SetupToken string `json:"setupToken"`
+		Email      string `json:"email"`
+		Password   string `json:"password"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	ch, err := h.svc.BeginSetup(r.Context(), req.Email, req.Password)
+	ip, _ := clientInfo(r)
+	ch, err := h.svc.BeginSetup(r.Context(), req.SetupToken, req.Email, req.Password, ip)
 	switch {
 	case err == nil:
 		WriteJSON(w, http.StatusOK, map[string]string{
@@ -48,6 +50,12 @@ func (h setupHandlers) begin(w http.ResponseWriter, r *http.Request) {
 		})
 	case errors.Is(err, store.ErrSetupDone):
 		setupDone(w)
+	case errors.Is(err, auth.ErrRateLimited):
+		rateLimited(w)
+	case errors.Is(err, auth.ErrSetupTokenRequired):
+		WriteError(w, http.StatusForbidden, "SETUP_TOKEN_REQUIRED", "Token de setup inválido. Veja o arquivo setup-token no servidor.")
+	case errors.Is(err, auth.ErrBusy):
+		serverBusy(w)
 	case errors.Is(err, auth.ErrWeakPassword):
 		WriteError(w, http.StatusBadRequest, "WEAK_PASSWORD", "A senha deve ter pelo menos 12 caracteres.")
 	case errors.Is(err, auth.ErrInvalidEmail):
@@ -88,6 +96,10 @@ func (h setupHandlers) confirm(w http.ResponseWriter, r *http.Request) {
 
 func setupDone(w http.ResponseWriter) {
 	WriteError(w, http.StatusConflict, "SETUP_ALREADY_DONE", "A configuração inicial já foi concluída.")
+}
+
+func serverBusy(w http.ResponseWriter) {
+	WriteError(w, http.StatusServiceUnavailable, "SERVER_BUSY", "Servidor ocupado. Tente novamente em instantes.")
 }
 
 func rateLimited(w http.ResponseWriter) {

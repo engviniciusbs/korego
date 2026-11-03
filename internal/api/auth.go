@@ -32,6 +32,8 @@ func (h authHandlers) login(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "E-mail, senha ou código inválidos.")
 	case errors.Is(err, auth.ErrRateLimited):
 		rateLimited(w)
+	case errors.Is(err, auth.ErrBusy):
+		serverBusy(w)
 	default:
 		internalError(w, err)
 	}

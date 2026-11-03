@@ -44,3 +44,22 @@ func TestLimiter_Reset(t *testing.T) {
 	l.Reset("203.0.113.10")
 	require.False(t, l.Blocked("203.0.113.10", t0))
 }
+
+func TestLimiter_Attempt(t *testing.T) {
+	l := NewLimiter(5, time.Minute, 15*time.Minute)
+	t0 := time.Unix(1_800_000_000, 0)
+	for i := 0; i < 5; i++ {
+		require.True(t, l.Attempt("203.0.113.10", t0), "tentativa %d", i+1)
+	}
+	require.False(t, l.Attempt("203.0.113.10", t0))
+	require.True(t, l.Blocked("203.0.113.10", t0))
+	require.True(t, l.Attempt("203.0.113.11", t0))
+	require.True(t, l.Attempt("203.0.113.10", t0.Add(15*time.Minute+time.Second)))
+
+	l.Reset("203.0.113.10")
+	for i := 0; i < 4; i++ {
+		require.True(t, l.Attempt("203.0.113.10", t0.Add(16*time.Minute)))
+	}
+	l.Reset("203.0.113.10")
+	require.True(t, l.Attempt("203.0.113.10", t0.Add(16*time.Minute)))
+}

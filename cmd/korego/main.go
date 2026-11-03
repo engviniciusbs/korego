@@ -79,12 +79,26 @@ func serve(args []string) error {
 		return err
 	}
 
+	tokenPath := filepath.Join(cfg.ConfigDir, "setup-token")
+	var setupToken string
+	if users == 0 {
+		setupToken, err = loadOrCreateSetupToken(tokenPath)
+		if err != nil {
+			return err
+		}
+		log.Printf("Setup pendente. Token de setup: %s (também em %s)", setupToken, tokenPath)
+	} else if err := os.Remove(tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("remover token de setup antigo %s: %v", tokenPath, err)
+	}
+
 	svc := &auth.Service{
-		DB:       db,
-		Box:      box,
-		Sessions: &auth.Sessions{DB: db},
-		Limiter:  auth.NewLimiter(5, time.Minute, 15*time.Minute),
-		Audit:    &audit.Logger{DB: db},
+		DB:             db,
+		Box:            box,
+		Sessions:       &auth.Sessions{DB: db},
+		Limiter:        auth.NewLimiter(5, time.Minute, 15*time.Minute),
+		Audit:          &audit.Logger{DB: db},
+		SetupToken:     setupToken,
+		SetupTokenFile: tokenPath,
 	}
 
 	srv := &http.Server{

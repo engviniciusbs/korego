@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,11 +28,13 @@ const (
 	email    = "admin@exemplo.com"
 	password = "senha-forte-de-teste"
 	remoteIP = "203.0.113.10"
+	setupTok = "token-de-setup-de-teste"
 )
 
 type env struct {
-	h   http.Handler
-	now *time.Time
+	h         http.Handler
+	now       *time.Time
+	tokenFile string
 }
 
 func newEnv(t *testing.T) *env {
@@ -44,14 +48,17 @@ func newEnv(t *testing.T) *env {
 	now := time.Unix(1_800_000_015, 0)
 	clock := func() time.Time { return now }
 	svc := &auth.Service{
-		DB:       db,
-		Box:      box,
-		Sessions: &auth.Sessions{DB: db, Now: clock},
-		Limiter:  auth.NewLimiter(5, time.Minute, 15*time.Minute),
-		Audit:    &audit.Logger{DB: db, Now: clock},
-		Now:      clock,
+		DB:             db,
+		Box:            box,
+		Sessions:       &auth.Sessions{DB: db, Now: clock},
+		Limiter:        auth.NewLimiter(5, time.Minute, 15*time.Minute),
+		Audit:          &audit.Logger{DB: db, Now: clock},
+		Now:            clock,
+		SetupToken:     setupTok,
+		SetupTokenFile: filepath.Join(t.TempDir(), "setup-token"),
 	}
-	return &env{h: api.NewRouter(api.Deps{Auth: svc}), now: &now}
+	require.NoError(t, os.WriteFile(svc.SetupTokenFile, []byte(setupTok), 0o600))
+	return &env{h: api.NewRouter(api.Deps{Auth: svc}), now: &now, tokenFile: svc.SetupTokenFile}
 }
 
 type reqOpt func(*http.Request)
@@ -109,7 +116,7 @@ func sessionCookie(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
 // setup runs the setup flow and returns the TOTP secret, cookie and CSRF token.
 func (e *env) setup(t *testing.T) (string, *http.Cookie, string) {
 	t.Helper()
-	w := e.do(t, http.MethodPost, "/api/setup", map[string]string{"email": email, "password": password})
+	w := e.do(t, http.MethodPost, "/api/setup", map[string]string{"setupToken": setupTok, "email": email, "password": password})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	ch := decode(t, w)
 	secret := ch["secret"].(string)
@@ -134,7 +141,7 @@ func TestSetupFlow_HappyPath(t *testing.T) {
 	w := e.do(t, http.MethodGet, "/api/setup/status", nil)
 	assert.JSONEq(t, `{"needsSetup":true}`, w.Body.String())
 
-	w = e.do(t, http.MethodPost, "/api/setup", map[string]string{"email": email, "password": password})
+	w = e.do(t, http.MethodPost, "/api/setup", map[string]string{"setupToken": setupTok, "email": email, "password": password})
 	require.Equal(t, http.StatusOK, w.Code)
 	ch := decode(t, w)
 	w = e.do(t, http.MethodPost, "/api/setup/confirm",
@@ -156,6 +163,8 @@ func TestSetupFlow_HappyPath(t *testing.T) {
 
 	w = e.do(t, http.MethodGet, "/api/setup/status", nil)
 	assert.JSONEq(t, `{"needsSetup":false}`, w.Body.String())
+	_, err := os.Stat(e.tokenFile)
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func keys(m map[string]any) []string {
@@ -168,23 +177,24 @@ func keys(m map[string]any) []string {
 
 func TestSetup_Errors(t *testing.T) {
 	e := newEnv(t)
-	w := e.do(t, http.MethodPost, "/api/setup", map[string]string{"email": email, "password": "curta"})
+	w := e.do(t, http.MethodPost, "/api/setup", map[string]string{"setupToken": setupTok, "email": email, "password": "curta"})
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), `"WEAK_PASSWORD"`)
 
-	w = e.do(t, http.MethodPost, "/api/setup", map[string]string{"email": "Fulano <a@exemplo.com>", "password": password})
+	w = e.do(t, http.MethodPost, "/api/setup", map[string]string{"setupToken": setupTok, "email": "Fulano <a@exemplo.com>", "password": password})
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), `"VALIDATION_ERROR"`)
 
-	w = e.do(t, http.MethodPost, "/api/setup", map[string]any{"email": email, "password": password, "role": "x"})
+	w = e.do(t, http.MethodPost, "/api/setup", map[string]any{"setupToken": setupTok, "email": email, "password": password, "role": "x"})
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), `"VALIDATION_ERROR"`)
 
-	w = e.do(t, http.MethodPost, "/api/setup/confirm", map[string]string{"token": "nada", "code": "123456"})
+	w = e.do(t, http.MethodPost, "/api/setup/confirm", map[string]string{"token": "nada", "code": "123456"},
+		withRemote("198.51.100.9:1000"))
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), `"SETUP_TOKEN_INVALID"`)
 
-	w = e.do(t, http.MethodPost, "/api/setup", map[string]string{"email": email, "password": password})
+	w = e.do(t, http.MethodPost, "/api/setup", map[string]string{"setupToken": setupTok, "email": email, "password": password})
 	tok := decode(t, w)["token"].(string)
 	w = e.do(t, http.MethodPost, "/api/setup/confirm", map[string]string{"token": tok, "code": "abc"})
 	require.Equal(t, http.StatusBadRequest, w.Code)
@@ -194,7 +204,7 @@ func TestSetup_Errors(t *testing.T) {
 func TestSetup_AfterDone_409(t *testing.T) {
 	e := newEnv(t)
 	e.setup(t)
-	w := e.do(t, http.MethodPost, "/api/setup", map[string]string{"email": "outro@exemplo.com", "password": password})
+	w := e.do(t, http.MethodPost, "/api/setup", map[string]string{"setupToken": setupTok, "email": "outro@exemplo.com", "password": password})
 	require.Equal(t, http.StatusConflict, w.Code)
 	require.Contains(t, w.Body.String(), `"SETUP_ALREADY_DONE"`)
 }
@@ -392,4 +402,32 @@ func TestMalformedBody(t *testing.T) {
 	e.h.ServeHTTP(w, r)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), `"VALIDATION_ERROR"`)
+}
+
+func TestSetup_RequiresSetupToken(t *testing.T) {
+	e := newEnv(t)
+	const want = `{"error":{"code":"SETUP_TOKEN_REQUIRED","message":"Token de setup inválido. Veja o arquivo setup-token no servidor."}}`
+	w := e.do(t, http.MethodPost, "/api/setup", map[string]string{"email": email, "password": password})
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.JSONEq(t, want, w.Body.String())
+
+	w = e.do(t, http.MethodPost, "/api/setup",
+		map[string]string{"setupToken": setupTok + "x", "email": email, "password": password})
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.JSONEq(t, want, w.Body.String())
+
+	_, err := os.Stat(e.tokenFile)
+	require.NoError(t, err)
+}
+
+func TestSetup_BadTokenCountsTowardRateLimit(t *testing.T) {
+	e := newEnv(t)
+	for range 5 {
+		w := e.do(t, http.MethodPost, "/api/setup", map[string]string{"setupToken": "x", "email": email, "password": password})
+		require.Equal(t, http.StatusForbidden, w.Code)
+	}
+	w := e.do(t, http.MethodPost, "/api/setup",
+		map[string]string{"setupToken": setupTok, "email": email, "password": password})
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	require.Contains(t, w.Body.String(), `"RATE_LIMITED"`)
 }

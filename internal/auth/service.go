@@ -2,11 +2,14 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/mail"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -19,9 +22,10 @@ import (
 )
 
 const (
-	setupTTL      = 15 * time.Minute
-	maxEmailLen   = 254
-	auditEmailLen = 254
+	setupTTL         = 15 * time.Minute
+	maxPendingSetups = 16
+	maxEmailLen      = 254
+	auditEmailLen    = 254
 )
 
 var (
@@ -33,6 +37,8 @@ var (
 	ErrInvalidEmail = errors.New("e-mail inválido")
 	// ErrSetupTokenInvalid is returned for an unknown or expired setup token.
 	ErrSetupTokenInvalid = errors.New("token de configuração inválido ou expirado")
+	// ErrSetupTokenRequired is returned when the one-time setup token is wrong.
+	ErrSetupTokenRequired = errors.New("token de setup inválido")
 	// ErrInvalidTOTP is returned when the setup confirmation code is wrong.
 	ErrInvalidTOTP = errors.New("código TOTP inválido")
 )
@@ -74,8 +80,12 @@ type Service struct {
 	Limiter  *Limiter
 	Audit    *audit.Logger
 	Now      func() time.Time
+	// SetupToken is the one-time token required by BeginSetup (empty rejects
+	// every setup). SetupTokenFile, if set, is removed once setup completes.
+	SetupToken     string
+	SetupTokenFile string
 
-	mu      sync.Mutex
+	mu      sync.Mutex // guards pending and SetupToken after construction
 	pending map[string]pendingSetup
 }
 
@@ -95,15 +105,25 @@ func (s *Service) NeedsSetup(ctx context.Context) (bool, error) {
 	return n == 0, nil
 }
 
-// BeginSetup validates the admin credentials and keeps them, already hashed,
-// in memory for setupTTL together with a new TOTP secret.
-func (s *Service) BeginSetup(ctx context.Context, email, password string) (SetupChallenge, error) {
+// BeginSetup checks the one-time setup token, validates the admin credentials
+// and keeps them, already hashed, in memory for setupTTL together with a new
+// TOTP secret.
+func (s *Service) BeginSetup(ctx context.Context, setupToken, email, password, ip string) (SetupChallenge, error) {
+	if !s.Limiter.Attempt(ip, s.now()) {
+		return SetupChallenge{}, ErrRateLimited
+	}
 	need, err := s.NeedsSetup(ctx)
 	if err != nil {
 		return SetupChallenge{}, err
 	}
 	if !need {
 		return SetupChallenge{}, store.ErrSetupDone
+	}
+	s.mu.Lock()
+	want := s.SetupToken
+	s.mu.Unlock()
+	if want == "" || subtle.ConstantTimeCompare([]byte(setupToken), []byte(want)) != 1 {
+		return SetupChallenge{}, ErrSetupTokenRequired
 	}
 	email, err = normalizeEmail(email)
 	if err != nil {
@@ -112,7 +132,7 @@ func (s *Service) BeginSetup(ctx context.Context, email, password string) (Setup
 	if err := ValidatePasswordPolicy(password); err != nil {
 		return SetupChallenge{}, err
 	}
-	hash, err := HashPassword(password)
+	hash, err := HashPasswordCtx(ctx, password)
 	if err != nil {
 		return SetupChallenge{}, err
 	}
@@ -133,6 +153,9 @@ func (s *Service) BeginSetup(ctx context.Context, email, password string) (Setup
 	if s.pending == nil {
 		s.pending = map[string]pendingSetup{}
 	}
+	for len(s.pending) >= maxPendingSetups {
+		s.evictOldestPending()
+	}
 	s.pending[token] = pendingSetup{email: email, passwordHash: hash, secret: secret, expires: now.Add(setupTTL)}
 	return SetupChallenge{Token: token, Secret: secret, OTPAuthURL: url}, nil
 }
@@ -146,11 +169,24 @@ func (s *Service) prunePending(now time.Time) {
 	}
 }
 
+// evictOldestPending drops the pending setup that expires first (all share the
+// same TTL, so it is the oldest). Caller holds s.mu.
+func (s *Service) evictOldestPending() {
+	var oldest string
+	var at time.Time
+	for tok, p := range s.pending {
+		if oldest == "" || p.expires.Before(at) {
+			oldest, at = tok, p.expires
+		}
+	}
+	delete(s.pending, oldest)
+}
+
 // ConfirmSetup checks the TOTP code for a pending setup, creates the admin and
 // returns a session plus the plaintext recovery codes (shown only once).
 func (s *Service) ConfirmSetup(ctx context.Context, token, code, ip, ua string) (LoginResult, []string, error) {
 	now := s.now()
-	if s.Limiter.Blocked(ip, now) {
+	if !s.Limiter.Attempt(ip, now) {
 		return LoginResult{}, nil, ErrRateLimited
 	}
 	s.mu.Lock()
@@ -158,12 +194,10 @@ func (s *Service) ConfirmSetup(ctx context.Context, token, code, ip, ua string) 
 	p, ok := s.pending[token]
 	s.mu.Unlock()
 	if !ok {
-		s.Limiter.Fail(ip, now)
 		return LoginResult{}, nil, ErrSetupTokenInvalid
 	}
 	step, ok := CheckTOTP(p.secret, stripSpaces(code), now, 0)
 	if !ok {
-		s.Limiter.Fail(ip, now)
 		return LoginResult{}, nil, ErrInvalidTOTP
 	}
 	enc, err := s.Box.Encrypt([]byte(p.secret))
@@ -184,10 +218,18 @@ func (s *Service) ConfirmSetup(ctx context.Context, token, code, ip, ua string) 
 	if err != nil {
 		return LoginResult{}, nil, err
 	}
-	// Setup is done: no pending setup may be confirmed anymore.
+	// Setup is done: no pending setup may be confirmed and the setup token
+	// is spent.
 	s.mu.Lock()
 	s.pending = nil
+	s.SetupToken = ""
 	s.mu.Unlock()
+	if s.SetupTokenFile != "" {
+		if err := os.Remove(s.SetupTokenFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("remover %s: %v", s.SetupTokenFile, err)
+		}
+	}
+	s.Limiter.Reset(ip)
 
 	s.record(ctx, audit.Entry{UserID: &id, Action: "auth.setup", IP: ip})
 	res, err := s.startSession(ctx, id, ip, ua)
@@ -200,7 +242,7 @@ func (s *Service) ConfirmSetup(ctx context.Context, token, code, ip, ua string) 
 // Login authenticates with e-mail, password and a TOTP or recovery code.
 func (s *Service) Login(ctx context.Context, email, password, code, ip, ua string) (LoginResult, error) {
 	now := s.now()
-	if s.Limiter.Blocked(ip, now) {
+	if !s.Limiter.Attempt(ip, now) {
 		return LoginResult{}, ErrRateLimited
 	}
 	email = strings.ToLower(strings.TrimSpace(email))
@@ -213,27 +255,28 @@ func (s *Service) Login(ctx context.Context, email, password, code, ip, ua strin
 	if found {
 		hash = u.PasswordHash
 	}
-	pwOK, err := VerifyPassword(hash, password)
+	pwOK, err := VerifyPasswordCtx(ctx, hash, password)
 	if err != nil {
 		return LoginResult{}, err
 	}
 	if !found || !pwOK {
-		return LoginResult{}, s.loginFailed(ctx, ip, email, now)
+		return LoginResult{}, s.loginFailed(ctx, ip, email)
 	}
 	codeOK, err := s.checkCode(ctx, u, code, now)
 	if err != nil {
 		return LoginResult{}, err
 	}
 	if !codeOK {
-		return LoginResult{}, s.loginFailed(ctx, ip, email, now)
+		return LoginResult{}, s.loginFailed(ctx, ip, email)
 	}
 	s.Limiter.Reset(ip)
 	s.record(ctx, audit.Entry{UserID: &u.ID, Action: "auth.login", IP: ip})
 	return s.startSession(ctx, u.ID, ip, ua)
 }
 
-func (s *Service) loginFailed(ctx context.Context, ip, email string, now time.Time) error {
-	s.Limiter.Fail(ip, now)
+// loginFailed audits a failed login; the attempt was already counted by
+// Limiter.Attempt.
+func (s *Service) loginFailed(ctx context.Context, ip, email string) error {
 	if len(email) > auditEmailLen {
 		email = email[:auditEmailLen]
 	}

@@ -50,6 +50,29 @@ func (l *Limiter) Fail(ip string, now time.Time) {
 	}
 }
 
+// Attempt atomically checks and records an attempt for ip. It returns false
+// if ip is blocked; otherwise the attempt counts toward max (possibly starting
+// a block) and it returns true. Call Reset after a successful attempt.
+func (l *Limiter) Attempt(ip string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.prune(now)
+	e := l.m[ip]
+	if e == nil {
+		e = &limitEntry{}
+		l.m[ip] = e
+	}
+	if now.Before(e.blockedUntil) {
+		return false
+	}
+	e.fails = append(e.fails, now)
+	if len(e.fails) >= l.max {
+		e.blockedUntil = now.Add(l.block)
+		e.fails = nil
+	}
+	return true
+}
+
 // Reset clears all state for ip.
 func (l *Limiter) Reset(ip string) {
 	l.mu.Lock()
