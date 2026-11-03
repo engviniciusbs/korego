@@ -29,7 +29,7 @@ export function Input({
       aria-invalid={invalid || undefined}
       className={cn(
         "block w-full min-w-0 border border-line-strong bg-surface text-fg placeholder:text-fg-subtle",
-        "outline-none motion-safe:transition-colors motion-safe:duration-100",
+        "outline-hidden motion-safe:transition-colors motion-safe:duration-100",
         "hover:border-fg-subtle focus-visible:border-accent-text focus-visible:bg-surface-2",
         "focus-visible:shadow-[inset_2px_0_0_0_var(--color-accent-text)]",
         "aria-invalid:border-danger aria-invalid:focus-visible:shadow-[inset_2px_0_0_0_var(--color-danger)]",

@@ -18,6 +18,9 @@ importers:
         specifier: 19.3.0
         version: 19.3.0(react@19.3.0)
     devDependencies:
+      '@tailwindcss/node':
+        specifier: 4.3.4
+        version: 4.3.4
       '@tailwindcss/turbopack':
         specifier: ^4
         version: 4.3.4
