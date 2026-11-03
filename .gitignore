@@ -1,0 +1,31 @@
+# Go
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Frontend
+web/node_modules/
+web/.next/
+web/out/
+
+# Embedded frontend build output
+internal/webui/dist/
+
+# Local data / secrets
+*.db
+*.db-*
+.env
+.env.*
+!.env.example
+master.key
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local-only notes (sensitive: real servers, IPs, domains)
+docs/local/
