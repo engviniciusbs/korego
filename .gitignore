@@ -30,3 +30,7 @@ Thumbs.db
 
 # Local-only notes (sensitive: real servers, IPs, domains)
 docs/local/
+
+# Playwright
+web/test-results/
+web/playwright-report/
