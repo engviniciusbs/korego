@@ -10,11 +10,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/engviniciusbs/korego/internal/api"
+	"github.com/engviniciusbs/korego/internal/audit"
+	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/config"
+	"github.com/engviniciusbs/korego/internal/secrets"
+	"github.com/engviniciusbs/korego/internal/store"
 	"github.com/engviniciusbs/korego/internal/version"
 )
 
@@ -47,14 +52,56 @@ func serve(args []string) error {
 		return err
 	}
 
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
+		return fmt.Errorf("criar diretório de dados %s: %w", cfg.DataDir, err)
+	}
+	db, err := store.Open(filepath.Join(cfg.DataDir, "korego.db"))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	users, err := db.CountUsers(context.Background())
+	if err != nil {
+		return fmt.Errorf("contar usuários: %w", err)
+	}
+	keyPath := filepath.Join(cfg.ConfigDir, "master.key")
+	key, err := secrets.LoadOrCreateKey(keyPath, users == 0)
+	if errors.Is(err, secrets.ErrKeyMissing) {
+		return fmt.Errorf("a chave mestra %s não existe, mas o banco já possui usuários; "+
+			"restaure o arquivo original da chave (sem ela os segredos não podem ser decifrados)", keyPath)
+	}
+	if err != nil {
+		return err
+	}
+	box, err := secrets.NewBox(key)
+	if err != nil {
+		return err
+	}
+
+	svc := &auth.Service{
+		DB:       db,
+		Box:      box,
+		Sessions: &auth.Sessions{DB: db},
+		Limiter:  auth.NewLimiter(5, time.Minute, 15*time.Minute),
+		Audit:    &audit.Logger{DB: db},
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.NewRouter(api.Deps{}),
+		Handler:           api.NewRouter(api.Deps{Auth: svc}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		cleanupSessions(ctx, db)
+	}()
+	defer func() { stop(); <-cleanupDone }()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
@@ -71,4 +118,20 @@ func serve(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// cleanupSessions removes expired sessions every hour until ctx is canceled.
+func cleanupSessions(ctx context.Context, db *store.DB) {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := db.DeleteExpiredSessions(ctx, time.Now()); err != nil && ctx.Err() == nil {
+				log.Printf("limpar sessões expiradas: %v", err)
+			}
+		}
+	}
 }

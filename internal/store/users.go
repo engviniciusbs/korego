@@ -23,7 +23,9 @@ type User struct {
 func normEmail(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
 
 // CreateAdminIfNone inserts the first admin and its recovery code hashes in an
-// immediate write transaction. It returns ErrSetupDone if any user exists.
+// immediate write transaction (TOTPLastStep is stored as given, so the code
+// used to confirm setup cannot be replayed). It returns ErrSetupDone if any
+// user exists.
 func (d *DB) CreateAdminIfNone(ctx context.Context, u User, recoveryHashes []string) (int64, error) {
 	conn, err := d.sql.Conn(ctx)
 	if err != nil {
@@ -55,8 +57,8 @@ func (d *DB) CreateAdminIfNone(ctx context.Context, u User, recoveryHashes []str
 	}
 	res, err := conn.ExecContext(ctx,
 		`INSERT INTO users (email, password_hash, role, totp_secret_enc, totp_last_step, created_at)
-		 VALUES (?, ?, ?, ?, 0, ?)`,
-		normEmail(u.Email), u.PasswordHash, role, u.TOTPSecretEnc, time.Now().Unix())
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		normEmail(u.Email), u.PasswordHash, role, u.TOTPSecretEnc, u.TOTPLastStep, time.Now().Unix())
 	if err != nil {
 		return 0, fmt.Errorf("inserir usuário: %w", err)
 	}
