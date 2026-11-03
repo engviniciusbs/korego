@@ -18,6 +18,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/audit"
 	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/config"
+	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/secrets"
 	"github.com/engviniciusbs/korego/internal/store"
 	"github.com/engviniciusbs/korego/internal/version"
@@ -103,7 +104,7 @@ func serve(args []string) error {
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.NewRouter(api.Deps{Auth: svc}),
+		Handler:           api.NewRouter(api.Deps{Auth: svc, Node: node.NewLocal()}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

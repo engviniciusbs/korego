@@ -20,6 +20,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/api"
 	"github.com/engviniciusbs/korego/internal/audit"
 	"github.com/engviniciusbs/korego/internal/auth"
+	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/secrets"
 	"github.com/engviniciusbs/korego/internal/store"
 )
@@ -37,7 +38,9 @@ type env struct {
 	tokenFile string
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T) *env { return newEnvWithNode(t, nil) }
+
+func newEnvWithNode(t *testing.T, n node.Node) *env {
 	t.Helper()
 	db := store.OpenMemory(t)
 	key := make([]byte, 32)
@@ -58,7 +61,7 @@ func newEnv(t *testing.T) *env {
 		SetupTokenFile: filepath.Join(t.TempDir(), "setup-token"),
 	}
 	require.NoError(t, os.WriteFile(svc.SetupTokenFile, []byte(setupTok), 0o600))
-	return &env{h: api.NewRouter(api.Deps{Auth: svc}), now: &now, tokenFile: svc.SetupTokenFile}
+	return &env{h: api.NewRouter(api.Deps{Auth: svc, Node: n}), now: &now, tokenFile: svc.SetupTokenFile}
 }
 
 type reqOpt func(*http.Request)
