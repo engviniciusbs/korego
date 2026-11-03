@@ -29,6 +29,25 @@ type updateHandlers struct {
 	cached  update.Release
 	cacheAt time.Time
 	hasRel  bool
+
+	// stateMu guarda state: idle -> applying -> applied. "applied" só é
+	// limpo por um reinício do processo.
+	stateMu sync.Mutex
+	state   updateState
+}
+
+type updateState int
+
+const (
+	updateIdle updateState = iota
+	updateApplying
+	updateApplied
+)
+
+func (h *updateHandlers) setState(s updateState) {
+	h.stateMu.Lock()
+	h.state = s
+	h.stateMu.Unlock()
 }
 
 // latest devolve a release em cache (1h) ou consulta de novo. Erros não são cacheados.
@@ -74,18 +93,30 @@ func (h *updateHandlers) apply(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusConflict, "NO_UPDATE", "Nenhuma atualização disponível.")
 		return
 	}
+	h.stateMu.Lock()
+	if h.state != updateIdle {
+		h.stateMu.Unlock()
+		WriteError(w, http.StatusConflict, "UPDATE_IN_PROGRESS", "Uma atualização já está em andamento.")
+		return
+	}
+	h.state = updateApplying
+	h.stateMu.Unlock()
+
 	if err := h.up.Apply(r.Context(), rel); err != nil {
+		h.setState(updateIdle)
 		WriteError(w, http.StatusBadGateway, "UPDATE_FAILED", "Falha ao atualizar: "+err.Error())
 		return
 	}
+	if err := h.up.StartFinish(); err != nil {
+		h.setState(updateIdle)
+		WriteError(w, http.StatusBadGateway, "UPDATE_FAILED", "Atualização instalada, mas não foi possível reiniciar o serviço: "+err.Error())
+		return
+	}
+	h.setState(updateApplied)
 	ip, _ := clientInfo(r)
 	h.svc.Record(r.Context(), audit.Entry{
 		UserID: &u.ID, Action: "system.update", IP: ip,
 		Metadata: map[string]any{"from": cur, "to": rel.Version},
 	})
-	if err := h.up.StartFinish(); err != nil {
-		WriteError(w, http.StatusBadGateway, "UPDATE_FAILED", "Atualização instalada, mas não foi possível reiniciar o serviço: "+err.Error())
-		return
-	}
 	WriteJSON(w, http.StatusAccepted, map[string]string{"status": "updating", "from": cur, "to": rel.Version})
 }

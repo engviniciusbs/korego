@@ -131,7 +131,7 @@ func serve(args []string) error {
 	}
 	handler := api.NewRouter(api.Deps{
 		Auth: svc, Node: nd, Hub: hub, Web: web,
-		Updater: &update.System{ExePath: exe},
+		Updater: &update.System{ExePath: exe, ConfigPath: *cfgPath},
 	})
 	if cfg.DevProxy == "" {
 		handler = api.SecurityHeaders(handler)
@@ -186,35 +186,47 @@ func cleanupSessions(ctx context.Context, db *store.DB) {
 	}
 }
 
+// healthURL deriva a URL de /api/health a partir do endereço de escuta:
+// host vazio, 0.0.0.0 ou :: viram 127.0.0.1.
+func healthURL(listenAddr string) (string, error) {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return "", fmt.Errorf("endereço de escuta inválido %q: %w", listenAddr, err)
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/api/health", nil
+}
+
 // updateFinish reinicia o serviço após uma atualização e reverte o binário se
-// o novo não responder em /api/health.
+// o novo não responder em /api/health. Roda a partir do binário anterior.
 func updateFinish(args []string) error {
 	fs := flag.NewFlagSet("update-finish", flag.ExitOnError)
 	cfgPath := fs.String("config", "/etc/korego/config.toml", "caminho do arquivo de configuração")
+	exe := fs.String("exe", "", "caminho do binário instalado (obrigatório)")
 	_ = fs.Parse(args)
+	if *exe == "" {
+		return errors.New("--exe é obrigatório")
+	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		return err
 	}
-	exe, err := os.Executable()
+	url, err := healthURL(cfg.ListenAddr)
 	if err != nil {
-		return fmt.Errorf("localizar executável: %w", err)
+		return err
 	}
-	_, port, err := net.SplitHostPort(cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("endereço de escuta inválido %q: %w", cfg.ListenAddr, err)
-	}
-	healthURL := "http://" + net.JoinHostPort("127.0.0.1", port) + "/api/health"
 	httpc := &http.Client{Timeout: 3 * time.Second}
 
 	f := &update.Finisher{
-		ExePath: exe,
+		ExePath: *exe,
 		Timeout: 30 * time.Second,
 		Restart: func(ctx context.Context) error {
 			return exec.CommandContext(ctx, "systemctl", "restart", "korego").Run()
 		},
 		Health: func(ctx context.Context) error {
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 			if err != nil {
 				return err
 			}

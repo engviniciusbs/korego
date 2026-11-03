@@ -36,18 +36,23 @@ func Apply(ctx context.Context, rel Release, exePath string, httpc *http.Client)
 		httpc = http.DefaultClient
 	}
 	dir := filepath.Dir(exePath)
-	newPath := exePath + ".new"
 
 	tmp, err := os.CreateTemp(dir, ".korego-dl-*")
 	if err != nil {
 		return fmt.Errorf("criar arquivo temporário: %w", err)
 	}
+	newTmp, err := os.CreateTemp(dir, ".korego-new-*")
+	if err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("criar arquivo temporário: %w", err)
+	}
+	newPath := newTmp.Name()
+	_ = newTmp.Close()
 	defer func() {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
-		if err != nil {
-			_ = os.Remove(newPath)
-		}
+		_ = os.Remove(newPath) // some após o rename; resta só em caso de erro
 	}()
 
 	sum, err := download(ctx, httpc, rel.TarballURL, tmp, maxTarballSize)
@@ -75,17 +80,57 @@ func Apply(ctx context.Context, rel Release, exePath string, httpc *http.Client)
 		return err
 	}
 
-	if err = os.Remove(exePath + ".prev"); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remover .prev antigo: %w", err)
-	}
-	if err = os.Rename(exePath, exePath+".prev"); err != nil {
+	// .prev é um hard link (ou cópia) do binário atual; a troca é um único
+	// rename atômico, então exePath nunca fica ausente.
+	if err = linkOrCopy(exePath, exePath+".prev"); err != nil {
 		return fmt.Errorf("guardar binário atual: %w", err)
 	}
 	if err = os.Rename(newPath, exePath); err != nil {
-		_ = os.Rename(exePath+".prev", exePath)
 		return fmt.Errorf("instalar novo binário: %w", err)
 	}
+	syncDir(dir)
 	return nil
+}
+
+// linkOrCopy cria dst como hard link de src (substituindo dst); se o link
+// falhar, copia o conteúdo com fsync.
+func linkOrCopy(src, dst string) error {
+	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	return out.Close()
+}
+
+// syncDir faz fsync do diretório; o erro é ignorado (não suportado no Windows).
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 // download copia a resposta de u para w, limitada a limit bytes, e devolve o

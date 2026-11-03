@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -30,28 +31,43 @@ func (f *Finisher) Run(ctx context.Context) error {
 	if interval <= 0 {
 		interval = time.Second
 	}
-	if err := f.Restart(ctx); err != nil {
-		return fmt.Errorf("reiniciar serviço: %w", err)
-	}
-	if f.waitHealthy(ctx, timeout, interval) {
-		return nil
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
+	restartErr := f.Restart(ctx)
+	if restartErr == nil {
+		if f.waitHealthy(ctx, timeout, interval) {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 	}
 
-	failed := f.ExePath + ".failed"
-	_ = os.Remove(failed)
-	if err := os.Rename(f.ExePath, failed); err != nil {
-		return fmt.Errorf("guardar binário com falha: %w", err)
-	}
-	if err := os.Rename(f.ExePath+".prev", f.ExePath); err != nil {
-		return fmt.Errorf("restaurar binário anterior: %w", err)
+	if err := f.rollback(); err != nil {
+		return err
 	}
 	if err := f.Restart(ctx); err != nil {
 		return fmt.Errorf("reiniciar após rollback: %w", err)
 	}
+	if restartErr != nil {
+		return fmt.Errorf("%w (reinício falhou: %v)", ErrRolledBack, restartErr)
+	}
 	return ErrRolledBack
+}
+
+// rollback restaura .prev em ExePath de forma atômica, guardando o binário
+// com falha em .failed. Sem .prev, não toca em ExePath.
+func (f *Finisher) rollback() error {
+	prev := f.ExePath + ".prev"
+	if _, err := os.Stat(prev); err != nil {
+		return fmt.Errorf("binário anterior %s indisponível, rollback impossível: %w", prev, err)
+	}
+	if err := linkOrCopy(f.ExePath, f.ExePath+".failed"); err != nil {
+		return fmt.Errorf("guardar binário com falha: %w", err)
+	}
+	if err := os.Rename(prev, f.ExePath); err != nil {
+		return fmt.Errorf("restaurar binário anterior: %w", err)
+	}
+	syncDir(filepath.Dir(f.ExePath))
+	return nil
 }
 
 func (f *Finisher) waitHealthy(ctx context.Context, timeout, interval time.Duration) bool {

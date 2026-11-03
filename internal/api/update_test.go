@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
@@ -20,6 +21,7 @@ type fakeUpdater struct {
 	latest             string
 	checkErr, applyErr error
 	applies, finishes  int
+	entered, release   chan struct{} // opcionais: seguram Apply
 }
 
 func (f *fakeUpdater) Current() string { return f.current }
@@ -30,6 +32,13 @@ func (f *fakeUpdater) Apply(context.Context, update.Release) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.applies++
+	entered, release := f.entered, f.release
+	f.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+		<-release
+	}
+	f.mu.Lock()
 	return f.applyErr
 }
 func (f *fakeUpdater) StartFinish() error {
@@ -103,4 +112,32 @@ func TestUpdateAPI_ApplyFailure502(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, w.Code)
 	assert.Equal(t, "UPDATE_FAILED", decode(t, w)["error"].(map[string]any)["code"])
 	assert.Equal(t, 0, u.finishes)
+}
+
+func TestUpdateAPI_InProgressGuard(t *testing.T) {
+	u := &fakeUpdater{
+		current: "0.1.0", latest: "v0.2.0",
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	e, cookie, csrf := updateEnv(t, u)
+	post := func() *httptest.ResponseRecorder {
+		return e.do(t, "POST", "/api/update", nil, withCookie(cookie), withHeader("X-CSRF-Token", csrf))
+	}
+
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() { first <- post() }()
+	<-u.entered // primeiro POST está dentro de Apply
+
+	w := post() // concorrente
+	require.Equal(t, http.StatusConflict, w.Code)
+	assert.Equal(t, "UPDATE_IN_PROGRESS", decode(t, w)["error"].(map[string]any)["code"])
+
+	close(u.release)
+	assert.Equal(t, http.StatusAccepted, (<-first).Code)
+
+	w = post() // sequencial, após 202
+	require.Equal(t, http.StatusConflict, w.Code)
+	assert.Equal(t, "UPDATE_IN_PROGRESS", decode(t, w)["error"].(map[string]any)["code"])
+	assert.Equal(t, 1, u.applies)
+	assert.Equal(t, 1, u.finishes)
 }
