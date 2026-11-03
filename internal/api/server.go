@@ -20,6 +20,8 @@ type Deps struct {
 	WSPingInterval time.Duration
 	// Web atende tudo fora de /api (nil = 404 simples).
 	Web http.Handler
+	// Updater consulta e aplica atualizações (nil desativa /api/update).
+	Updater Updater
 }
 
 // NewRouter monta o roteador principal, com a API sob /api.
@@ -28,6 +30,8 @@ func NewRouter(d Deps) http.Handler {
 	authH := authHandlers{svc: d.Auth}
 	auditH := auditHandlers{svc: d.Auth}
 	systemH := systemHandlers{node: d.Node}
+
+	updateH := &updateHandlers{svc: d.Auth, up: d.Updater}
 
 	if d.Hub == nil {
 		d.Hub = events.NewHub()
@@ -53,6 +57,10 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/audit", auditH.list)
 			r.Get("/system", systemH.info)
 			r.Get("/ws", wsH.serve)
+			if d.Updater != nil {
+				r.Get("/update", updateH.status)
+				r.Post("/update", updateH.apply)
+			}
 		})
 
 		r.NotFound(func(w http.ResponseWriter, _ *http.Request) {

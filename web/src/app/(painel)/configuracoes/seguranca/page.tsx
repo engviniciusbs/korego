@@ -41,6 +41,7 @@ const actionLabels: Record<string, { label: string; tone: "neutral" | "success" 
   "auth.login_failed": { label: "Falha de login", tone: "danger" },
   "auth.logout": { label: "Logout", tone: "neutral" },
   "auth.session_revoked": { label: "Sessão revogada", tone: "warning" },
+  "system.update": { label: "Atualização do sistema", tone: "warning" },
 };
 
 const th = "px-4 py-2 text-left font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-fg-subtle";

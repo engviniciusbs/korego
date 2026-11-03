@@ -26,7 +26,10 @@ const items: NavItem[] = [
     label: "Configurações",
     href: "/configuracoes/seguranca/",
     match: "/configuracoes/",
-    children: [{ label: "Segurança", href: "/configuracoes/seguranca/" }],
+    children: [
+      { label: "Segurança", href: "/configuracoes/seguranca/" },
+      { label: "Atualização", href: "/configuracoes/atualizacao/" },
+    ],
   },
 ];
 

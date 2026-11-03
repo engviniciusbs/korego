@@ -7,8 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -22,6 +24,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/secrets"
 	"github.com/engviniciusbs/korego/internal/store"
+	"github.com/engviniciusbs/korego/internal/update"
 	"github.com/engviniciusbs/korego/internal/version"
 	"github.com/engviniciusbs/korego/internal/webui"
 )
@@ -39,8 +42,12 @@ func main() {
 		}
 	case "version":
 		fmt.Println(version.Version)
+	case "update-finish":
+		if err := updateFinish(args); err != nil {
+			log.Fatalf("erro: %v", err)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "comando desconhecido: %s\nuso: korego [serve|version]\n", cmd)
+		fmt.Fprintf(os.Stderr, "comando desconhecido: %s\nuso: korego [serve|version|update-finish]\n", cmd)
 		os.Exit(2)
 	}
 }
@@ -118,7 +125,14 @@ func serve(args []string) error {
 	} else {
 		web = webui.NewHandler(webui.Dist())
 	}
-	handler := api.NewRouter(api.Deps{Auth: svc, Node: nd, Hub: hub, Web: web})
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("localizar executável: %w", err)
+	}
+	handler := api.NewRouter(api.Deps{
+		Auth: svc, Node: nd, Hub: hub, Web: web,
+		Updater: &update.System{ExePath: exe},
+	})
 	if cfg.DevProxy == "" {
 		handler = api.SecurityHeaders(handler)
 	}
@@ -170,4 +184,55 @@ func cleanupSessions(ctx context.Context, db *store.DB) {
 			}
 		}
 	}
+}
+
+// updateFinish reinicia o serviço após uma atualização e reverte o binário se
+// o novo não responder em /api/health.
+func updateFinish(args []string) error {
+	fs := flag.NewFlagSet("update-finish", flag.ExitOnError)
+	cfgPath := fs.String("config", "/etc/korego/config.toml", "caminho do arquivo de configuração")
+	_ = fs.Parse(args)
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("localizar executável: %w", err)
+	}
+	_, port, err := net.SplitHostPort(cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("endereço de escuta inválido %q: %w", cfg.ListenAddr, err)
+	}
+	healthURL := "http://" + net.JoinHostPort("127.0.0.1", port) + "/api/health"
+	httpc := &http.Client{Timeout: 3 * time.Second}
+
+	f := &update.Finisher{
+		ExePath: exe,
+		Timeout: 30 * time.Second,
+		Restart: func(ctx context.Context) error {
+			return exec.CommandContext(ctx, "systemctl", "restart", "korego").Run()
+		},
+		Health: func(ctx context.Context) error {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+			if err != nil {
+				return err
+			}
+			resp, err := httpc.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("health retornou %d", resp.StatusCode)
+			}
+			return nil
+		},
+	}
+	err = f.Run(context.Background())
+	if errors.Is(err, update.ErrRolledBack) {
+		log.Printf("%v", err)
+		return nil
+	}
+	return err
 }
