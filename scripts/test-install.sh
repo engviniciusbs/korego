@@ -61,6 +61,15 @@ if sh /repo/scripts/install.sh; then ok "segunda execucao terminou com sucesso";
 after=$(cksum </etc/korego/config.toml)
 [ "$before" = "$after" ] && ok "config.toml preservado" || fail "config.toml foi sobrescrito"
 
+
+echo "==> unit vem do script real, nunca do diretorio corrente"
+rm -f /etc/systemd/system/korego.service
+mkdir -p /bogus && echo 'ExecStart=/bin/evil' >/bogus/korego.service
+if (cd /bogus && sh /repo/scripts/install.sh >/dev/null 2>&1); then ok "install.sh a partir de outro diretorio"; else fail "install.sh falhou a partir de outro diretorio"; fi
+cmp -s /repo/scripts/korego.service /etc/systemd/system/korego.service && ok "unit instalado e o do repositorio" || fail "unit instalado difere do repositorio"
+rm -f /etc/systemd/system/korego.service
+if (cd /bogus && sh </repo/scripts/install.sh >/dev/null 2>&1); then fail "execucao via pipe nao deveria achar unit"; else ok "via pipe sem pacote: aborta"; fi
+[ ! -e /etc/systemd/system/korego.service ] && ok "via pipe nao instalou unit do diretorio corrente" || fail "unit foi instalado via pipe"
 if [ "$fails" -ne 0 ]; then echo "$fails verificacao(oes) falharam"; exit 1; fi
 echo "todas as verificacoes passaram"
 INNER

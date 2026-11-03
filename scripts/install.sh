@@ -20,7 +20,17 @@ info() { printf '==> %s\n' "$*"; }
 warn() { printf 'aviso: %s\n' "$*" >&2; }
 die() { printf 'erro: %s\n' "$*" >&2; exit 1; }
 
-script_dir() { cd "$(dirname "$0")" && pwd; }
+# Diretorio do proprio script; vazio quando executado via pipe (curl | sh),
+# para nunca ler arquivos do diretorio corrente.
+script_dir() {
+	case "$0" in
+	*.sh) ;;
+	*) return 0 ;;
+	esac
+	if [ -f "$0" ]; then
+		cd "$(dirname "$0")" && pwd
+	fi
+}
 
 # --- 1. root, sistema e arquitetura ---------------------------------------
 [ "$(id -u)" -eq 0 ] || die "execute como root (ex.: sudo sh install.sh)."
@@ -91,6 +101,7 @@ else
 fi
 
 # --- 4. binario ------------------------------------------------------------
+UNIT_SRC=
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -98,6 +109,8 @@ if [ -n "${KOREGO_LOCAL_BINARY:-}" ]; then
 	[ -f "$KOREGO_LOCAL_BINARY" ] || die "KOREGO_LOCAL_BINARY nao existe: $KOREGO_LOCAL_BINARY"
 	info "usando binario local $KOREGO_LOCAL_BINARY"
 	SRC_BIN=$KOREGO_LOCAL_BINARY
+	SD=$(script_dir)
+	[ -n "$SD" ] && UNIT_SRC=$SD/korego.service
 else
 	command -v curl >/dev/null 2>&1 || die "curl e necessario para baixar o KoreGO."
 	command -v sha256sum >/dev/null 2>&1 || die "sha256sum e necessario para conferir o download."
@@ -122,10 +135,12 @@ else
 	[ "$expected" = "$actual" ] || die "SHA-256 nao confere para $ARCHIVE."
 	info "SHA-256 conferido."
 
-	tar -xzf "$TMP/$ARCHIVE" -C "$TMP" korego || die "falha ao extrair o binario."
+	tar -xzf "$TMP/$ARCHIVE" -C "$TMP" korego korego.service || die "falha ao extrair o binario e o korego.service do pacote."
 	SRC_BIN=$TMP/korego
+	UNIT_SRC=$TMP/korego.service
 fi
 
+[ -f "$UNIT_SRC" ] || die "korego.service nao encontrado (esperado no pacote ou ao lado de install.sh)."
 install -m 0755 "$SRC_BIN" "$BIN_PATH"
 info "binario instalado em $BIN_PATH"
 
@@ -148,37 +163,16 @@ CFG
 fi
 
 # --- 6. servico systemd ----------------------------------------------------
-UNIT_SRC="$(script_dir)/korego.service"
 SERVICE_STARTED=0
-if [ -f "$UNIT_SRC" ]; then
-	install -m 0644 "$UNIT_SRC" "$UNIT_PATH"
-else
-	cat >"$UNIT_PATH" <<UNIT
-[Unit]
-Description=KoreGO - gerenciador de VPS
-After=network-online.target docker.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=$BIN_PATH serve --config $CONFIG_FILE
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-	chmod 0644 "$UNIT_PATH"
-fi
+install -m 0644 "$UNIT_SRC" "$UNIT_PATH"
 
 if [ "${KOREGO_SKIP_SERVICE:-}" = 1 ]; then
 	info "KOREGO_SKIP_SERVICE=1: servico nao habilitado."
 else
 	command -v systemctl >/dev/null 2>&1 || die "systemctl nao encontrado."
 	systemctl daemon-reload
-	systemctl enable --now korego
+	systemctl enable korego
+	systemctl restart korego
 	SERVICE_STARTED=1
 fi
 

@@ -27,6 +27,10 @@ archives:
     formats:
       - tar.gz
     name_template: "korego_{{ .Version }}_linux_{{ .Arch }}"
+    files:
+      - src: scripts/korego.service
+        dst: .
+        strip_parent: true
 
 checksum:
   name_template: checksums.txt

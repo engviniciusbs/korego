@@ -56,3 +56,36 @@ jobs:
         with:
           go-version-file: go.mod
       - run: sh scripts/test-install.sh
+
+  release-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean
+      - name: Conferir artefatos
+        run: |
+          ls -l dist
+          test -s dist/checksums.txt
+          n=0
+          for f in dist/korego_*_linux_*.tar.gz; do
+            n=$((n + 1))
+            tar -tzf "$f" | grep -qx korego
+            tar -tzf "$f" | grep -qx korego.service
+          done
+          test "$n" -eq 2
