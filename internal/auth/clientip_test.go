@@ -22,7 +22,7 @@ func TestClientIP_IgnoresXFFFromRemote(t *testing.T) {
 }
 
 func TestClientIP_TrustsXFFFromLoopback(t *testing.T) {
-	require.Equal(t, "198.51.100.7", ClientIP(reqWith("127.0.0.1:5000", "198.51.100.7, 10.0.0.1")))
+	require.Equal(t, "10.0.0.1", ClientIP(reqWith("127.0.0.1:5000", "198.51.100.7, 10.0.0.1")))
 	require.Equal(t, "198.51.100.7", ClientIP(reqWith("[::1]:5000", " 198.51.100.7 ")))
 }
 
@@ -30,4 +30,8 @@ func TestClientIP_Fallbacks(t *testing.T) {
 	require.Equal(t, "127.0.0.1", ClientIP(reqWith("127.0.0.1:5000", "not-an-ip")))
 	require.Equal(t, "127.0.0.1", ClientIP(reqWith("127.0.0.1:5000", "")))
 	require.Equal(t, "203.0.113.10", ClientIP(reqWith("203.0.113.10", "")))
+}
+
+func TestClientIP_IgnoresSpoofedLeftmost(t *testing.T) {
+	require.Equal(t, "198.51.100.7", ClientIP(reqWith("127.0.0.1:5000", "6.6.6.6, 198.51.100.7")))
 }
