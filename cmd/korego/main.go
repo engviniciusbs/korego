@@ -23,6 +23,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/secrets"
 	"github.com/engviniciusbs/korego/internal/store"
 	"github.com/engviniciusbs/korego/internal/version"
+	"github.com/engviniciusbs/korego/internal/webui"
 )
 
 func main() {
@@ -107,9 +108,24 @@ func serve(args []string) error {
 	hub := events.NewHub()
 	hub.RegisterSource("system", api.SystemSource(nd, 5*time.Second))
 
+	var web http.Handler
+	if cfg.DevProxy != "" {
+		web, err = webui.NewDevProxy(cfg.DevProxy)
+		if err != nil {
+			return err
+		}
+		log.Printf("Modo dev: frontend via proxy para %s", cfg.DevProxy)
+	} else {
+		web = webui.NewHandler(webui.Dist())
+	}
+	handler := api.NewRouter(api.Deps{Auth: svc, Node: nd, Hub: hub, Web: web})
+	if cfg.DevProxy == "" {
+		handler = api.SecurityHeaders(handler)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.NewRouter(api.Deps{Auth: svc, Node: nd, Hub: hub}),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

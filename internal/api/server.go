@@ -18,6 +18,8 @@ type Deps struct {
 	Hub  *events.Hub
 	// WSPingInterval é o intervalo de ping do WebSocket (0 = 30s).
 	WSPingInterval time.Duration
+	// Web atende tudo fora de /api (nil = 404 simples).
+	Web http.Handler
 }
 
 // NewRouter monta o roteador principal, com a API sob /api.
@@ -59,6 +61,13 @@ func NewRouter(d Deps) http.Handler {
 		r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
 			WriteError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Método não permitido.")
 		})
+	})
+	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
+		if d.Web == nil {
+			http.NotFound(w, req)
+			return
+		}
+		d.Web.ServeHTTP(w, req)
 	})
 	return r
 }
