@@ -57,12 +57,8 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
-      - name: Compilar o frontend e embutir no bin·rio
-        run: |
-          cd web
-          pnpm install --frozen-lockfile
-          pnpm build
-          node ../scripts/copy-web.mjs
+      - name: Compilar o frontend e embutir no bin√°rio
+        run: make web
       - run: go build -o bin/korego ./cmd/korego
       - name: Instalar o Chromium do Playwright
         working-directory: web
