@@ -33,6 +33,7 @@ const (
 )
 
 type env struct {
+	svc       *auth.Service
 	h         http.Handler
 	now       *time.Time
 	tokenFile string
@@ -40,7 +41,9 @@ type env struct {
 
 func newEnv(t *testing.T) *env { return newEnvWithNode(t, nil) }
 
-func newEnvWithNode(t *testing.T, n node.Node) *env {
+func newEnvWithNode(t *testing.T, n node.Node) *env { return newEnvDeps(t, api.Deps{Node: n}) }
+
+func newEnvDeps(t *testing.T, d api.Deps) *env {
 	t.Helper()
 	db := store.OpenMemory(t)
 	key := make([]byte, 32)
@@ -61,7 +64,8 @@ func newEnvWithNode(t *testing.T, n node.Node) *env {
 		SetupTokenFile: filepath.Join(t.TempDir(), "setup-token"),
 	}
 	require.NoError(t, os.WriteFile(svc.SetupTokenFile, []byte(setupTok), 0o600))
-	return &env{h: api.NewRouter(api.Deps{Auth: svc, Node: n}), now: &now, tokenFile: svc.SetupTokenFile}
+	d.Auth = svc
+	return &env{svc: svc, h: api.NewRouter(d), now: &now, tokenFile: svc.SetupTokenFile}
 }
 
 type reqOpt func(*http.Request)

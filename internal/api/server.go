@@ -2,8 +2,10 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/engviniciusbs/korego/internal/auth"
+	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/version"
 	"github.com/go-chi/chi/v5"
@@ -13,6 +15,9 @@ import (
 type Deps struct {
 	Auth *auth.Service
 	Node node.Node
+	Hub  *events.Hub
+	// WSPingInterval é o intervalo de ping do WebSocket (0 = 30s).
+	WSPingInterval time.Duration
 }
 
 // NewRouter monta o roteador principal, com a API sob /api.
@@ -21,6 +26,11 @@ func NewRouter(d Deps) http.Handler {
 	authH := authHandlers{svc: d.Auth}
 	auditH := auditHandlers{svc: d.Auth}
 	systemH := systemHandlers{node: d.Node}
+
+	if d.Hub == nil {
+		d.Hub = events.NewHub()
+	}
+	wsH := wsHandlers{svc: d.Auth, hub: d.Hub, pingInterval: d.WSPingInterval}
 
 	r := chi.NewRouter()
 	r.Route("/api", func(r chi.Router) {
@@ -40,6 +50,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Post("/auth/logout", authH.logout)
 			r.Get("/audit", auditH.list)
 			r.Get("/system", systemH.info)
+			r.Get("/ws", wsH.serve)
 		})
 
 		r.NotFound(func(w http.ResponseWriter, _ *http.Request) {

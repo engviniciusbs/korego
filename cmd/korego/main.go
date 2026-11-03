@@ -18,6 +18,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/audit"
 	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/config"
+	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/secrets"
 	"github.com/engviniciusbs/korego/internal/store"
@@ -102,9 +103,13 @@ func serve(args []string) error {
 		SetupTokenFile: tokenPath,
 	}
 
+	nd := node.NewLocal()
+	hub := events.NewHub()
+	hub.RegisterSource("system", api.SystemSource(nd, 5*time.Second))
+
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.NewRouter(api.Deps{Auth: svc, Node: node.NewLocal()}),
+		Handler:           api.NewRouter(api.Deps{Auth: svc, Node: nd, Hub: hub}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
