@@ -41,7 +41,7 @@ func (f *Finisher) Run(ctx context.Context) error {
 		}
 	}
 
-	if err := f.rollback(); err != nil {
+	if err := Restore(f.ExePath); err != nil {
 		return err
 	}
 	if err := f.Restart(ctx); err != nil {
@@ -53,20 +53,20 @@ func (f *Finisher) Run(ctx context.Context) error {
 	return ErrRolledBack
 }
 
-// rollback restaura .prev em ExePath de forma atômica, guardando o binário
-// com falha em .failed. Sem .prev, não toca em ExePath.
-func (f *Finisher) rollback() error {
-	prev := f.ExePath + ".prev"
+// Restore restaura exePath+".prev" em exePath de forma atômica, guardando o
+// binário com falha em .failed. Sem .prev, não toca em exePath.
+func Restore(exePath string) error {
+	prev := exePath + ".prev"
 	if _, err := os.Stat(prev); err != nil {
 		return fmt.Errorf("binário anterior %s indisponível, rollback impossível: %w", prev, err)
 	}
-	if err := linkOrCopy(f.ExePath, f.ExePath+".failed"); err != nil {
+	if err := linkOrCopy(exePath, exePath+".failed"); err != nil {
 		return fmt.Errorf("guardar binário com falha: %w", err)
 	}
-	if err := os.Rename(prev, f.ExePath); err != nil {
+	if err := os.Rename(prev, exePath); err != nil {
 		return fmt.Errorf("restaurar binário anterior: %w", err)
 	}
-	syncDir(filepath.Dir(f.ExePath))
+	syncDir(filepath.Dir(exePath))
 	return nil
 }
 

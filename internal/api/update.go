@@ -19,6 +19,8 @@ type Updater interface {
 	Check(ctx context.Context) (update.Release, error)
 	Apply(ctx context.Context, rel update.Release) error
 	StartFinish() error
+	// Restore devolve o binário anterior quando a finalização não pôde ser agendada.
+	Restore() error
 }
 
 type updateHandlers struct {
@@ -108,8 +110,15 @@ func (h *updateHandlers) apply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.up.StartFinish(); err != nil {
+		if rerr := h.up.Restore(); rerr != nil {
+			// exe continua sendo o binário novo: mantém "applied" para bloquear novas tentativas.
+			h.setState(updateApplied)
+			WriteError(w, http.StatusBadGateway, "UPDATE_FAILED",
+				"Falha ao agendar a finalização e ao restaurar o binário anterior; intervenção manual necessária: "+err.Error()+"; "+rerr.Error())
+			return
+		}
 		h.setState(updateIdle)
-		WriteError(w, http.StatusBadGateway, "UPDATE_FAILED", "Atualização instalada, mas não foi possível reiniciar o serviço: "+err.Error())
+		WriteError(w, http.StatusBadGateway, "UPDATE_FAILED", "Falha ao agendar a finalização da atualização: "+err.Error())
 		return
 	}
 	h.setState(updateApplied)

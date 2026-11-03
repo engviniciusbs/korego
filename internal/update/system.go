@@ -66,3 +66,6 @@ func (s *System) StartFinish() error {
 	}
 	return nil
 }
+
+// Restore devolve o binário anterior (.prev) ao lugar de ExePath.
+func (s *System) Restore() error { return Restore(s.ExePath) }

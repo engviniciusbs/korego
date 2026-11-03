@@ -68,3 +68,16 @@ func TestSystem_StartFinishArgv(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unit ja existe")
 }
+
+func TestRestore(t *testing.T) {
+	exe := newExe(t)
+	require.Error(t, update.Restore(exe))
+	got, _ := os.ReadFile(exe)
+	assert.Equal(t, "binario-antigo", string(got))
+
+	require.NoError(t, os.WriteFile(exe+".prev", []byte("binario-anterior"), 0o755))
+	require.NoError(t, update.Restore(exe))
+	got, _ = os.ReadFile(exe)
+	assert.Equal(t, "binario-anterior", string(got))
+	assert.NoFileExists(t, exe+".prev")
+}

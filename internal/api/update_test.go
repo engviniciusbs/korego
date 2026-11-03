@@ -16,12 +16,14 @@ import (
 )
 
 type fakeUpdater struct {
-	mu                 sync.Mutex
-	current            string
-	latest             string
-	checkErr, applyErr error
-	applies, finishes  int
-	entered, release   chan struct{} // opcionais: seguram Apply
+	mu                    sync.Mutex
+	current               string
+	latest                string
+	checkErr, applyErr    error
+	applies, finishes     int
+	finishErr, restoreErr error
+	restores              int
+	entered, release      chan struct{} // opcionais: seguram Apply
 }
 
 func (f *fakeUpdater) Current() string { return f.current }
@@ -45,7 +47,13 @@ func (f *fakeUpdater) StartFinish() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.finishes++
-	return nil
+	return f.finishErr
+}
+func (f *fakeUpdater) Restore() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.restores++
+	return f.restoreErr
 }
 
 func updateEnv(t *testing.T, u *fakeUpdater) (*env, *http.Cookie, string) {
@@ -140,4 +148,41 @@ func TestUpdateAPI_InProgressGuard(t *testing.T) {
 	assert.Equal(t, "UPDATE_IN_PROGRESS", decode(t, w)["error"].(map[string]any)["code"])
 	assert.Equal(t, 1, u.applies)
 	assert.Equal(t, 1, u.finishes)
+}
+
+func TestUpdateAPI_FinishFailureRestoresAndRetries(t *testing.T) {
+	u := &fakeUpdater{current: "0.1.0", latest: "v0.2.0", finishErr: errors.New("systemd-run falhou")}
+	e, cookie, csrf := updateEnv(t, u)
+	post := func() *httptest.ResponseRecorder {
+		return e.do(t, "POST", "/api/update", nil, withCookie(cookie), withHeader("X-CSRF-Token", csrf))
+	}
+	w := post()
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Equal(t, "UPDATE_FAILED", decode(t, w)["error"].(map[string]any)["code"])
+	assert.Equal(t, 1, u.restores)
+
+	u.mu.Lock()
+	u.finishErr = nil
+	u.mu.Unlock()
+	require.Equal(t, http.StatusAccepted, post().Code)
+	assert.Equal(t, 2, u.applies)
+}
+
+func TestUpdateAPI_FinishAndRestoreFailureBlocks(t *testing.T) {
+	u := &fakeUpdater{
+		current: "0.1.0", latest: "v0.2.0",
+		finishErr: errors.New("systemd-run falhou"), restoreErr: errors.New("sem .prev"),
+	}
+	e, cookie, csrf := updateEnv(t, u)
+	post := func() *httptest.ResponseRecorder {
+		return e.do(t, "POST", "/api/update", nil, withCookie(cookie), withHeader("X-CSRF-Token", csrf))
+	}
+	w := post()
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Contains(t, w.Body.String(), "intervenção manual necessária")
+
+	w = post()
+	require.Equal(t, http.StatusConflict, w.Code)
+	assert.Equal(t, "UPDATE_IN_PROGRESS", decode(t, w)["error"].(map[string]any)["code"])
+	assert.Equal(t, 1, u.applies)
 }
