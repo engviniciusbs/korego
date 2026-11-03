@@ -12,7 +12,9 @@ import { useAuth, type SetupResult } from "@/lib/auth-context";
 import { cn } from "@/lib/cn";
 
 const MIN_PASSWORD = 12;
+// Textos locais usados só quando o servidor não envia mensagem.
 const TOKEN_REQUIRED_MSG = "Token de setup inválido. Veja o arquivo setup-token no servidor.";
+const INVALID_TOTP_MSG = "Código do autenticador inválido.";
 
 type Step = 1 | 2 | 3;
 
@@ -39,7 +41,7 @@ function genericMessage(err: unknown): string {
   if (err instanceof ApiError) {
     switch (err.code) {
       case "RATE_LIMITED":
-        return "Muitas tentativas. Tente novamente mais tarde.";
+        return err.message || "Muitas tentativas. Tente novamente mais tarde.";
       case "SERVER_BUSY":
         return "Servidor ocupado. Tente novamente em instantes.";
       case "NETWORK_ERROR":
@@ -167,14 +169,14 @@ export default function SetupPage() {
             router.replace("/login/");
             return;
           case "SETUP_TOKEN_REQUIRED":
-            setErrors({ setupToken: TOKEN_REQUIRED_MSG });
+            setErrors({ setupToken: err.message || TOKEN_REQUIRED_MSG });
             document.getElementById(id("setupToken"))?.focus();
             return;
           case "WEAK_PASSWORD":
-            setErrors({ password: err.message });
+            setErrors({ password: err.message || `A senha deve ter pelo menos ${MIN_PASSWORD} caracteres.` });
             return;
           case "VALIDATION_ERROR":
-            setFormError(err.message);
+            setFormError(err.message || "Dados inválidos. Revise os campos.");
             return;
         }
       }
@@ -209,7 +211,7 @@ export default function SetupPage() {
       if (err instanceof ApiError) {
         switch (err.code) {
           case "INVALID_TOTP":
-            setCodeError("Código do autenticador inválido.");
+            setCodeError(err.message || INVALID_TOTP_MSG);
             document.getElementById(id("code"))?.focus();
             return;
           case "SETUP_ALREADY_DONE":

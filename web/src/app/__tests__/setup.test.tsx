@@ -81,21 +81,16 @@ describe("Setup", () => {
     expect(f).not.toHaveBeenCalled();
   });
 
-  it("mostra a mensagem de SETUP_TOKEN_REQUIRED (403)", async () => {
+  it("mostra a mensagem do servidor para SETUP_TOKEN_REQUIRED (403)", async () => {
     stubFetch(() =>
       json(403, {
-        error: {
-          code: "SETUP_TOKEN_REQUIRED",
-          message: "Token de setup inválido. Veja o arquivo setup-token no servidor.",
-        },
+        error: { code: "SETUP_TOKEN_REQUIRED", message: "Mensagem do servidor para token" },
       }),
     );
     render(<SetupPage />);
     fillStep1();
-    expect(
-      await screen.findByText("Token de setup inválido. Veja o arquivo setup-token no servidor."),
-    ).toBeInTheDocument();
-    expect(screen.getByLabelText(/^Token de setup/)).toBeInTheDocument();
+    expect(await screen.findByText("Mensagem do servidor para token")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Token de setup/)).toHaveAttribute("aria-invalid", "true");
   });
 
   it("avança com senha >= 12 e confirmação igual, enviando o setupToken", async () => {
@@ -150,7 +145,7 @@ describe("Setup", () => {
     stubFetch((url) =>
       url === "/api/setup"
         ? json(200, { token: "ch", secret: "S", otpauthUrl: "otpauth://totp/x" })
-        : json(400, { error: { code: "INVALID_TOTP", message: "Código do autenticador inválido." } }),
+        : json(400, { error: { code: "INVALID_TOTP", message: "Mensagem do servidor para TOTP" } }),
     );
     render(<SetupPage />);
     fillStep1();
@@ -158,7 +153,7 @@ describe("Setup", () => {
       target: { value: "000000" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Confirmar" }));
-    expect(await screen.findByText("Código do autenticador inválido.")).toBeInTheDocument();
+    expect(await screen.findByText("Mensagem do servidor para TOTP")).toBeInTheDocument();
     expect(completeSetup).not.toHaveBeenCalled();
   });
 
