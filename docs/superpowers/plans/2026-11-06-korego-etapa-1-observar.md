@@ -591,5 +591,5 @@ test("aba Stats só assina o tópico enquanto está aberta")
 
 ## Depois desta etapa
 
-- Publicar `v0.2.0` e atualizar a VPS pelo próprio painel (Configurações → Atualização), conferindo os projetos `mikos` e `viniciusbsarmento` como grupos Compose, o container parado como **externo** e o `bot-discord` no bloco PM2.
+- Publicar `v0.2.0` e atualizar a VPS pelo próprio painel (Configurações → Atualização), conferindo os projetos Compose existentes como grupos, os containers que o KoreGO não criou como **externos** e os processos do PM2 no bloco próprio (dados reais da VPS só em `docs/local/`).
 - Escrever o plano da **Etapa 2 (Publicar)**.
