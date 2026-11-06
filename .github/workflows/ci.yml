@@ -61,10 +61,9 @@ jobs:
       - name: Compilar o frontend e embutir no binário
         run: make web
       - run: go build -o bin/korego ./cmd/korego
-      - name: Instalar o Chromium do Playwright
-        working-directory: web
-        timeout-minutes: 5
-        run: pnpm exec playwright install --with-deps chromium
+      # Usa o Google Chrome que já vem no runner: baixar o Chromium e as
+      # dependências pelo apt às vezes leva mais de 5 minutos.
+      - run: google-chrome --version
       - name: Teste ponta a ponta
         working-directory: web
         run: pnpm test:e2e

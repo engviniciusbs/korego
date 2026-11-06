@@ -19,7 +19,7 @@ export default defineConfig({
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
   use: {
     baseURL: `http://localhost:${PORT}`,
-    channel: process.env.CI ? undefined : "chrome",
+    channel: "chrome",
     trace: "retain-on-failure",
   },
   webServer: {
