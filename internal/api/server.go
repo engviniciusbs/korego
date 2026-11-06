@@ -7,6 +7,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/node"
+	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/store"
 	"github.com/engviniciusbs/korego/internal/version"
 	"github.com/go-chi/chi/v5"
@@ -39,6 +40,7 @@ func NewRouter(d Deps) http.Handler {
 	systemH := systemHandlers{node: d.Node}
 
 	metricsH := metricsHandlers{latest: d.Metrics, db: d.DB, now: d.Now}
+	containersH := containerHandlers{svc: d.Auth, node: d.Node}
 	updateH := &updateHandlers{svc: d.Auth, up: d.Updater}
 
 	if d.Hub == nil {
@@ -66,6 +68,14 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/system", systemH.info)
 			r.Get("/metrics/current", metricsH.current)
 			r.Get("/metrics/history", metricsH.history)
+			r.Get("/containers", containersH.list)
+			r.Get("/containers/{id}", containersH.details)
+			r.Delete("/containers/{id}", containersH.remove)
+			r.Post("/containers/{id}/start", containersH.action("start", docker.Client.Start))
+			r.Post("/containers/{id}/stop", containersH.action("stop", docker.Client.Stop))
+			r.Post("/containers/{id}/restart", containersH.action("restart", docker.Client.Restart))
+			r.Get("/containers/{id}/logs", containersH.logs)
+			r.Get("/containers/{id}/logs/download", containersH.download)
 			r.Get("/ws", wsH.serve)
 			if d.Updater != nil {
 				r.Get("/update", updateH.status)
