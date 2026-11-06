@@ -100,9 +100,44 @@ describe("LogViewer", () => {
     await act(async () => resolveTail([L(1), L(2), L(3)]));
     await waitFor(() => expect(shown()).toEqual(["linha-1", "linha-2", "linha-3", "linha-4"]));
 
-    // Ao vivo: repetidas são descartadas.
-    push({ lines: [L(4), L(5)] });
+    // Ao vivo: o que repete o tail é descartado; o resto entra como veio.
+    push({ lines: [L(3), L(5)] });
     expect(shown()).toEqual(["linha-1", "linha-2", "linha-3", "linha-4", "linha-5"]);
+  });
+
+  it("LogViewer mantém linhas fora de ordem e com o mesmo ts", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await renderLoaded([L(5, "a")]);
+    // stderr com ts anterior ao do último stdout e duas linhas com o mesmo ts.
+    push({ lines: [L(4, "b", "stderr"), L(6, "c"), L(6, "d")] });
+    expect(shown()).toEqual(["a", "b", "c", "d"]);
+    // Chaves do React únicas: sem aviso de chave repetida.
+    expect(errSpy.mock.calls.flat().join(" ")).not.toMatch(/same key/);
+    errSpy.mockRestore();
+  });
+
+  it("LogViewer busca o tail de novo ao reconectar e junta sem duplicar", async () => {
+    render(<LogViewer containerId={ID} containerName="web" />);
+    act(() => FakeWS.instances[0].open());
+    await act(async () => resolveTail([L(1), L(2)]));
+    push({ lines: [L(3)] });
+    await waitFor(() => expect(shown()).toEqual(["linha-1", "linha-2", "linha-3"]));
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    // Queda: as linhas 4 e 5 se perdem enquanto o WebSocket está fora.
+    act(() => FakeWS.instances[0].close());
+    await waitFor(() => expect(FakeWS.instances).toHaveLength(2), { timeout: 3000 });
+    act(() => FakeWS.instances[1].open());
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+
+    // A fonte reiniciada reenvia as últimas linhas antes de o tail novo chegar.
+    push({ lines: [L(4), L(5), L(6)] });
+    await act(async () => resolveTail([L(2), L(3), L(4), L(5)]));
+    await waitFor(() =>
+      expect(shown()).toEqual(["linha-1", "linha-2", "linha-3", "linha-4", "linha-5", "linha-6"]),
+    );
+    push({ lines: [L(7)] });
+    expect(shown()).toHaveLength(7);
   });
 
   it("LogViewer pausado não rola e conta as linhas novas", async () => {

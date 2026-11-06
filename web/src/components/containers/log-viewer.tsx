@@ -6,8 +6,8 @@ import { focusRing } from "@/components/ui/focus";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import type { ContainerLogsResponse } from "@/lib/containers";
-import { LogBuffer, stripAnsi, type LogLine } from "@/lib/logs";
-import { useLiveStream } from "@/lib/ws";
+import { LogBuffer, stripAnsi, type BufferedLine, type LogLine } from "@/lib/logs";
+import { getLiveSocket, useLiveStream } from "@/lib/ws";
 
 const TAIL = 500;
 /** Distância do fim (px) abaixo da qual a lista acompanha as linhas novas. */
@@ -34,7 +34,7 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const clean = (lines: LogLine[]): LogLine[] => lines.map((l) => ({ ...l, text: stripAnsi(l.text) }));
 
-const LogRow = memo(function LogRow({ line, re }: { line: LogLine; re: RegExp | null }) {
+const LogRow = memo(function LogRow({ line, re }: { line: BufferedLine; re: RegExp | null }) {
   const err = line.stream === "stderr";
   const d = tsDate(line.ts);
   const valid = !Number.isNaN(d.getTime());
@@ -79,20 +79,25 @@ type TailState = { status: "loading" } | { status: "ready" } | { status: "error"
 
 /**
  * Logs ao vivo. Junção sem duplicar: assina `container-logs:<id>` primeiro e
- * guarda o que chegar, busca o tail pela REST, `setTail` e `append` do que foi
- * guardado; depois disso as linhas ao vivo vão direto para o buffer.
+ * guarda o que chegar, busca o tail pela REST e chama `setTail` com o que foi
+ * guardado; depois disso as linhas ao vivo vão direto para o buffer. Quando o
+ * WebSocket reconecta, volta a guardar, busca o tail de novo e junta com
+ * `mergeTail` (cobre as linhas perdidas na queda).
  */
 export function LogViewer({ containerId, containerName, active = true }: LogViewerProps) {
   const buffer = useRef(new LogBuffer());
   // Linhas recebidas antes do tail; null depois da junção.
   const pending = useRef<LogLine[] | null>([]);
+  // Verdadeiro depois da primeira junção: os tails seguintes usam mergeTail.
+  const joined = useRef(false);
   const scroller = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
 
-  const [lines, setLines] = useState<LogLine[]>([]);
-  const [frozen, setFrozen] = useState<LogLine[] | null>(null);
+  const [lines, setLines] = useState<BufferedLine[]>([]);
+  const [frozen, setFrozen] = useState<BufferedLine[] | null>(null);
   const [tail, setTail] = useState<TailState>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
+  const [reconnects, setReconnects] = useState(0);
   const [ended, setEnded] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -124,14 +129,34 @@ export function LogViewer({ containerId, containerName, active = true }: LogView
     publish();
   });
 
+  // Reconexão (open depois de closed): o que chegou na queda se perdeu.
+  // Volta a guardar as linhas ao vivo e busca o tail de novo.
+  useEffect(() => {
+    const socket = getLiveSocket();
+    let opened = socket.status === "open";
+    let dropped = false;
+    return socket.onStatus((s) => {
+      if (s === "closed") dropped = true;
+      if (s !== "open") return;
+      if (opened && dropped) {
+        pending.current ??= [];
+        setReconnects((n) => n + 1);
+      }
+      opened = true;
+      dropped = false;
+    });
+  }, []);
+
   // Declarado depois do useLiveStream: a assinatura acontece antes da busca.
   useEffect(() => {
     let cancelled = false;
     api<ContainerLogsResponse>(`/api/containers/${containerId}/logs?tail=${TAIL}`)
       .then((r) => {
         if (cancelled) return;
-        buffer.current.setTail(clean(r.lines ?? []));
-        buffer.current.append(pending.current ?? []);
+        const tailLines = clean(r.lines ?? []);
+        if (joined.current) buffer.current.mergeTail(tailLines, pending.current ?? []);
+        else buffer.current.setTail(tailLines, pending.current ?? []);
+        joined.current = true;
         pending.current = null;
         publish();
         setTail({ status: "ready" });
@@ -143,14 +168,14 @@ export function LogViewer({ containerId, containerName, active = true }: LogView
     return () => {
       cancelled = true;
     };
-  }, [containerId, attempt, publish]);
+  }, [containerId, attempt, reconnects, publish]);
 
   const paused = frozen !== null;
   const view = frozen ?? lines;
   const newCount = useMemo(() => {
     if (!frozen) return 0;
-    const last = frozen.at(-1)?.ts ?? "";
-    return lines.filter((l) => l.ts > last).length;
+    const last = frozen.at(-1)?.seq ?? 0;
+    return lines.filter((l) => l.seq > last).length;
   }, [frozen, lines]);
 
   const q = query.trim();
@@ -297,7 +322,7 @@ export function LogViewer({ containerId, containerName, active = true }: LogView
         ) : visible.length === 0 ? (
           <p className="px-3 py-2 text-fg-subtle">Nenhuma linha com “{q}”.</p>
         ) : (
-          visible.map((l) => <LogRow key={l.ts} line={l} re={re} />)
+          visible.map((l) => <LogRow key={l.seq} line={l} re={re} />)
         )}
       </div>
     </section>
