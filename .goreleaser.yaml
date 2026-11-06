@@ -28,6 +28,7 @@ archives:
       - tar.gz
     name_template: "korego_{{ .Version }}_linux_{{ .Arch }}"
     files:
+      - LICENSE
       - src: scripts/korego.service
         dst: .
         strip_parent: true

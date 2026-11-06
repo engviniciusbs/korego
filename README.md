@@ -85,4 +85,4 @@ O teste ponta a ponta sobe o binário em `:18000` com dados temporários e perco
 
 ## Licença
 
-A definir.
+Apache License 2.0. Veja [LICENSE](LICENSE).
