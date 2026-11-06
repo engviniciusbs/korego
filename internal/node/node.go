@@ -6,6 +6,7 @@ import (
 
 	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/node/metrics"
+	"github.com/engviniciusbs/korego/internal/node/pm2"
 )
 
 // HostInfo descreve o host.
@@ -28,4 +29,6 @@ type Node interface {
 	Metrics() metrics.Source
 	// Docker devolve o cliente Docker do node.
 	Docker() docker.Client
+	// PM2 devolve o leitor (somente leitura) do PM2.
+	PM2() pm2.Reader
 }

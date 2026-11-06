@@ -41,6 +41,7 @@ func NewRouter(d Deps) http.Handler {
 
 	metricsH := metricsHandlers{latest: d.Metrics, db: d.DB, now: d.Now}
 	containersH := containerHandlers{svc: d.Auth, node: d.Node}
+	pm2H := pm2Handlers{node: d.Node}
 	updateH := &updateHandlers{svc: d.Auth, up: d.Updater}
 
 	if d.Hub == nil {
@@ -68,6 +69,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/system", systemH.info)
 			r.Get("/metrics/current", metricsH.current)
 			r.Get("/metrics/history", metricsH.history)
+			r.Get("/pm2", pm2H.snapshot)
 			r.Get("/containers", containersH.list)
 			r.Get("/containers/{id}", containersH.details)
 			r.Delete("/containers/{id}", containersH.remove)

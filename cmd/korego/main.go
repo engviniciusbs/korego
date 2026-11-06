@@ -112,7 +112,7 @@ func serve(args []string) error {
 		SetupTokenFile: tokenPath,
 	}
 
-	nd := node.NewLocal()
+	nd := node.NewLocal(cfg.PM2Path)
 	hub := events.NewHub()
 	hub.RegisterSource("system", api.SystemSource(nd, 5*time.Second))
 	hub.RegisterSource("containers", monitor.ContainerEventsSource(nd.Docker(), 5*time.Second))

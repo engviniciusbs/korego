@@ -6,6 +6,7 @@ import (
 
 	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/node/metrics"
+	"github.com/engviniciusbs/korego/internal/node/pm2"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/mem"
@@ -15,11 +16,12 @@ import (
 type Local struct {
 	metrics *metrics.Local
 	docker  *docker.Local
+	pm2     *pm2.Local
 }
 
-// NewLocal cria o Node local.
-func NewLocal() *Local {
-	return &Local{metrics: metrics.NewLocal(), docker: docker.NewLocal()}
+// NewLocal cria o Node local. pm2Path vazio procura o pm2 no PATH.
+func NewLocal(pm2Path string) *Local {
+	return &Local{metrics: metrics.NewLocal(), docker: docker.NewLocal(), pm2: pm2.NewLocal(pm2Path)}
 }
 
 var _ Node = (*Local)(nil)
@@ -29,6 +31,9 @@ func (l *Local) Metrics() metrics.Source { return l.metrics }
 
 // Docker devolve o cliente do Docker local.
 func (l *Local) Docker() docker.Client { return l.docker }
+
+// PM2 devolve o leitor do PM2 local.
+func (l *Local) PM2() pm2.Reader { return l.pm2 }
 
 // Info lê as informações do host local.
 func (l *Local) Info(ctx context.Context) (HostInfo, error) {
