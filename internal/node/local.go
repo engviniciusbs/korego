@@ -19,9 +19,10 @@ type Local struct {
 	pm2     *pm2.Local
 }
 
-// NewLocal cria o Node local. pm2Path vazio procura o pm2 no PATH.
-func NewLocal(pm2Path string) *Local {
-	return &Local{metrics: metrics.NewLocal(), docker: docker.NewLocal(), pm2: pm2.NewLocal(pm2Path)}
+// NewLocal cria o Node local. pm2Path vazio procura o pm2 no PATH; pm2Home
+// vazio usa $PM2_HOME e, sem ela, $HOME/.pm2.
+func NewLocal(pm2Path, pm2Home string) *Local {
+	return &Local{metrics: metrics.NewLocal(), docker: docker.NewLocal(), pm2: pm2.NewLocal(pm2Path, pm2Home)}
 }
 
 var _ Node = (*Local)(nil)

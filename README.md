@@ -42,6 +42,17 @@ Depois do setup, o login passa a exigir senha e código do autenticador (ou um c
 - **Containers**: todos os containers do Docker, agrupados por projeto Compose (os sem projeto ficam em "Avulsos"). Cada um mostra o selo **gerenciado** ou **externo**, e dá para iniciar, parar, reiniciar e remover (remover só com o container parado; toda ação pede confirmação). O detalhe traz logs ao vivo (busca, pausa e download) e stats de CPU e RAM sob demanda. Das variáveis de ambiente, só os nomes aparecem.
 - **PM2**: lista somente leitura dos processos (status, CPU, RAM, reinícios e diretório), atualizada a cada 10 s.
 
+### PM2 de outro usuário
+
+O serviço roda como `root`, então por padrão o KoreGO procura o PM2 no `PATH` e o daemon em `/root/.pm2`. Se o PM2 roda com outro usuário, informe o binário e o `PM2_HOME` dele em `/etc/korego/config.toml` (exemplo com um usuário `deploy`):
+
+```toml
+pm2_path = "/home/deploy/.nvm/versions/node/v22.11.0/bin/pm2"
+pm2_home = "/home/deploy/.pm2"
+```
+
+Também valem as variáveis `KOREGO_PM2_PATH` e `KOREGO_PM2_HOME`. Sem `pm2_home`, vale o `PM2_HOME` do ambiente e, sem ele, `$HOME/.pm2`. O KoreGO só executa o `pm2 jlist` quando o daemon desse `PM2_HOME` está ativo, para nunca iniciar um daemon novo.
+
 Se o Docker estiver parado, as métricas e o login continuam funcionando e as telas de containers mostram "Docker indisponível".
 
 ## Desenvolvimento local
@@ -65,7 +76,7 @@ make web     # compila o frontend e copia para internal/webui/dist
 make build   # go build -o bin/korego ./cmd/korego
 ```
 
-Variáveis de ambiente: `KOREGO_LISTEN` (padrão `:8000`), `KOREGO_DATA_DIR` e `KOREGO_CONFIG_DIR`.
+Variáveis de ambiente: `KOREGO_LISTEN` (padrão `:8000`), `KOREGO_DATA_DIR`, `KOREGO_CONFIG_DIR`, `KOREGO_PM2_PATH` e `KOREGO_PM2_HOME`.
 
 ## Testes
 

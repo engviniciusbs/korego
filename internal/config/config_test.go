@@ -11,7 +11,7 @@ import (
 )
 
 func TestLoad_Defaults(t *testing.T) {
-	for _, k := range []string{"KOREGO_LISTEN", "KOREGO_DATA_DIR", "KOREGO_CONFIG_DIR", "KOREGO_DEV_PROXY", "KOREGO_PM2_PATH"} {
+	for _, k := range []string{"KOREGO_LISTEN", "KOREGO_DATA_DIR", "KOREGO_CONFIG_DIR", "KOREGO_DEV_PROXY", "KOREGO_PM2_PATH", "KOREGO_PM2_HOME"} {
 		t.Setenv(k, "")
 	}
 	c, err := config.Load(filepath.Join(t.TempDir(), "nao-existe.toml"))
@@ -21,6 +21,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "/etc/korego", c.ConfigDir)
 	assert.Equal(t, "", c.DevProxy)
 	assert.Equal(t, "", c.PM2Path)
+	assert.Equal(t, "", c.PM2Home)
 }
 
 func TestLoad_FileThenEnvOverride(t *testing.T) {
@@ -29,8 +30,9 @@ func TestLoad_FileThenEnvOverride(t *testing.T) {
 	t.Setenv("KOREGO_CONFIG_DIR", "")
 	t.Setenv("KOREGO_DEV_PROXY", "")
 	t.Setenv("KOREGO_PM2_PATH", "")
+	t.Setenv("KOREGO_PM2_HOME", "")
 	p := filepath.Join(t.TempDir(), "config.toml")
-	require.NoError(t, os.WriteFile(p, []byte("listen = \":9000\"\ndata_dir = \"/d\"\ndev_proxy = \"http://localhost:3000\"\npm2_path = \"/opt/pm2\"\n"), 0o600))
+	require.NoError(t, os.WriteFile(p, []byte("listen = \":9000\"\ndata_dir = \"/d\"\ndev_proxy = \"http://localhost:3000\"\npm2_path = \"/opt/pm2\"\npm2_home = \"/home/deploy/.pm2\"\n"), 0o600))
 
 	c, err := config.Load(p)
 	require.NoError(t, err)
@@ -40,13 +42,16 @@ func TestLoad_FileThenEnvOverride(t *testing.T) {
 	assert.Equal(t, "http://localhost:3000", c.DevProxy)
 
 	assert.Equal(t, "/opt/pm2", c.PM2Path)
+	assert.Equal(t, "/home/deploy/.pm2", c.PM2Home)
 
 	t.Setenv("KOREGO_LISTEN", ":9100")
 	t.Setenv("KOREGO_PM2_PATH", "/env/pm2")
+	t.Setenv("KOREGO_PM2_HOME", "/env/.pm2")
 	c, err = config.Load(p)
 	require.NoError(t, err)
 	assert.Equal(t, ":9100", c.ListenAddr)
 	assert.Equal(t, "/env/pm2", c.PM2Path)
+	assert.Equal(t, "/env/.pm2", c.PM2Home)
 }
 
 func TestLoad_InvalidFile(t *testing.T) {
