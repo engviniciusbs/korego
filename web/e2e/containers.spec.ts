@@ -19,7 +19,8 @@ function dockerAvailable(): boolean {
 }
 
 const hasDocker = dockerAvailable();
-test.skip(!hasDocker, "Docker indisponível: spec de containers pulado");
+// No CI o Docker é obrigatório: sem ele o spec falha em vez de pular.
+test.skip(!hasDocker && !process.env.CI, "Docker indisponível: spec de containers pulado");
 
 function removeContainer(): void {
   try {
