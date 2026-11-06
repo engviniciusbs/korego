@@ -7,6 +7,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/node"
+	"github.com/engviniciusbs/korego/internal/store"
 	"github.com/engviniciusbs/korego/internal/version"
 	"github.com/go-chi/chi/v5"
 )
@@ -22,6 +23,12 @@ type Deps struct {
 	Web http.Handler
 	// Updater consulta e aplica atualizações (nil desativa /api/update).
 	Updater Updater
+	// Metrics fornece a última amostra de métricas (nil = sempre "não pronto").
+	Metrics LatestMetrics
+	// DB atende o histórico de métricas.
+	DB *store.DB
+	// Now é o relógio do histórico de métricas (nil = time.Now).
+	Now func() time.Time
 }
 
 // NewRouter monta o roteador principal, com a API sob /api.
@@ -31,6 +38,7 @@ func NewRouter(d Deps) http.Handler {
 	auditH := auditHandlers{svc: d.Auth}
 	systemH := systemHandlers{node: d.Node}
 
+	metricsH := metricsHandlers{latest: d.Metrics, db: d.DB, now: d.Now}
 	updateH := &updateHandlers{svc: d.Auth, up: d.Updater}
 
 	if d.Hub == nil {
@@ -56,6 +64,8 @@ func NewRouter(d Deps) http.Handler {
 			r.Post("/auth/logout", authH.logout)
 			r.Get("/audit", auditH.list)
 			r.Get("/system", systemH.info)
+			r.Get("/metrics/current", metricsH.current)
+			r.Get("/metrics/history", metricsH.history)
 			r.Get("/ws", wsH.serve)
 			if d.Updater != nil {
 				r.Get("/update", updateH.status)
