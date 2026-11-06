@@ -82,7 +82,7 @@ func (h *handler) serveFile(w http.ResponseWriter, r *http.Request, name string)
 		h.notFound(w, r)
 		return
 	}
-	ct := mime.TypeByExtension(path.Ext(name))
+	ct := contentType(name)
 	if ct == "" {
 		ct = http.DetectContentType(data)
 	}
@@ -93,6 +93,35 @@ func (h *handler) serveFile(w http.ResponseWriter, r *http.Request, name string)
 		w.Header().Set("Cache-Control", "no-cache")
 	}
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(data))
+}
+
+// contentTypes fixa os tipos dos arquivos do frontend. mime.TypeByExtension
+// consulta o registro no Windows, que varia de máquina para máquina.
+var contentTypes = map[string]string{
+	".html":        "text/html; charset=utf-8",
+	".js":          "text/javascript; charset=utf-8",
+	".mjs":         "text/javascript; charset=utf-8",
+	".css":         "text/css; charset=utf-8",
+	".json":        "application/json",
+	".map":         "application/json",
+	".txt":         "text/plain; charset=utf-8",
+	".svg":         "image/svg+xml",
+	".ico":         "image/x-icon",
+	".png":         "image/png",
+	".jpg":         "image/jpeg",
+	".jpeg":        "image/jpeg",
+	".webp":        "image/webp",
+	".woff":        "font/woff",
+	".woff2":       "font/woff2",
+	".webmanifest": "application/manifest+json",
+}
+
+func contentType(name string) string {
+	ext := strings.ToLower(path.Ext(name))
+	if ct, ok := contentTypes[ext]; ok {
+		return ct
+	}
+	return mime.TypeByExtension(ext)
 }
 
 func isFile(fsys fs.FS, name string) bool {

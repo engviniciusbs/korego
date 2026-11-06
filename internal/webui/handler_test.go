@@ -77,17 +77,17 @@ func TestStaticCacheHeaders(t *testing.T) {
 func TestContentTypes(t *testing.T) {
 	h := webui.NewHandler(testFS())
 	cases := map[string]string{
-		"/_next/static/css/app.css": "text/css",
+		"/_next/static/css/app.css": "text/css; charset=utf-8",
 		"/data.json":                "application/json",
 		"/logo.svg":                 "image/svg+xml",
 		"/font.woff2":               "font/woff2",
-		"/robots.txt":               "text/plain",
-		"/favicon.ico":              "image/",
+		"/robots.txt":               "text/plain; charset=utf-8",
+		"/favicon.ico":              "image/x-icon",
 	}
 	for p, want := range cases {
 		w := get(h, http.MethodGet, p)
 		require.Equal(t, http.StatusOK, w.Code, p)
-		assert.Contains(t, w.Header().Get("Content-Type"), want, p)
+		assert.Equal(t, want, w.Header().Get("Content-Type"), p)
 	}
 }
 
