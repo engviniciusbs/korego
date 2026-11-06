@@ -41,10 +41,17 @@ func (d *DB) UpsertMetricMinute(ctx context.Context, m MetricMinute) error {
 
 // MetricHistory devolve a média por balde de step (ts - ts % step) no intervalo
 // [from, to), em ordem crescente e só com os baldes que têm dados.
+// from é arredondado para cima ao próximo múltiplo de step (mantido se já
+// alinhado): o balde inicial parcial é descartado, então uma janela de N*step
+// nunca devolve mais de N pontos. to continua exclusivo.
 func (d *DB) MetricHistory(ctx context.Context, from, to time.Time, step time.Duration) ([]MetricMinute, error) {
 	secs := int64(step / time.Second)
 	if secs < 1 {
 		secs = 1
+	}
+	fromTS := from.Unix()
+	if r := fromTS % secs; r != 0 {
+		fromTS += secs - r
 	}
 	rows, err := d.sql.QueryContext(ctx,
 		`SELECT ts - ts % ?1 AS bucket,
@@ -54,7 +61,7 @@ func (d *DB) MetricHistory(ctx context.Context, from, to time.Time, step time.Du
 		 WHERE ts >= ?2 AND ts < ?3
 		 GROUP BY bucket
 		 ORDER BY bucket`,
-		secs, from.Unix(), to.Unix())
+		secs, fromTS, to.Unix())
 	if err != nil {
 		return nil, fmt.Errorf("consultar métricas: %w", err)
 	}

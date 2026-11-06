@@ -57,6 +57,36 @@ func TestMetricHistory_KeepsGaps(t *testing.T) {
 	for i := 1; i < len(got); i++ {
 		require.Greater(t, got[i].TS, got[i-1].TS)
 	}
+
+	// passo grosso: nenhum balde pode cair dentro da lacuna (minutos 10..69)
+	coarse, err := db.MetricHistory(ctx, time.Unix(metricsBase, 0), time.Unix(metricsBase+80*60, 0), 5*time.Minute)
+	require.NoError(t, err)
+	require.Len(t, coarse, 4)
+	for _, p := range coarse {
+		require.False(t, p.TS >= metricsBase+10*60 && p.TS < metricsBase+70*60, "balde na lacuna: %d", p.TS)
+	}
+}
+
+func TestMetricHistory_UnalignedFromCapsPoints(t *testing.T) {
+	db := OpenMemory(t)
+	ctx := context.Background()
+	tx, err := db.SQL().BeginTx(ctx, nil)
+	require.NoError(t, err)
+	for i := 0; i < 7*24*60+10; i++ {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO metrics_minute (ts, cpu_percent, mem_used, mem_total, load1, net_rx, net_tx, disk_used, disk_total) VALUES (?, 1, 1, 2, 1, 1, 1, 1, 2)`,
+			metricsBase+int64(i)*60)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+
+	from := time.Unix(metricsBase+7*60, 0)
+	got, err := db.MetricHistory(ctx, from, from.Add(7*24*time.Hour), 30*time.Minute)
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(got), 336)
+	require.NotEmpty(t, got)
+	require.Zero(t, got[0].TS%1800)
+	require.GreaterOrEqual(t, got[0].TS, from.Unix())
 }
 
 func TestMetricHistory_7dMaxPoints(t *testing.T) {
