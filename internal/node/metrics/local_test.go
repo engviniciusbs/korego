@@ -17,7 +17,8 @@ func TestLocal_Sample(t *testing.T) {
 	first, err := l.Sample(ctx)
 	require.NoError(t, err)
 	assert.Greater(t, first.MemTotalBytes, uint64(0))
-	assert.GreaterOrEqual(t, len(first.Disks), 1)
+	// Pode vir vazio (raiz overlay num container); o filtro é coberto por TestFilterDisks.
+	assert.NotNil(t, first.Disks)
 
 	time.Sleep(50 * time.Millisecond)
 	second, err := l.Sample(ctx)
