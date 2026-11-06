@@ -144,7 +144,7 @@ func TestLogsSource_BatchesLines(t *testing.T) {
 func TestLogsSource_ResumesWithoutDuplicates(t *testing.T) {
 	var mu sync.Mutex
 	var sinces []string
-	fake := &dockertest.Fake{LogsFn: func(ctx context.Context, _ string, o docker.LogOptions, fn func(docker.LogLine)) error {
+	fake := &dockertest.Fake{InspectFn: running, LogsFn: func(ctx context.Context, _ string, o docker.LogOptions, fn func(docker.LogLine)) error {
 		mu.Lock()
 		sinces = append(sinces, o.Since)
 		call := len(sinces)
@@ -194,8 +194,91 @@ func TestLogsSource_ResumesWithoutDuplicates(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Len(t, sinces, 2)
-	assert.Len(t, sinces[0], 19)
+	assert.Empty(t, sinces[0])
 	assert.Equal(t, ts(2e18+3), sinces[1])
+}
+
+// running é um InspectFn de container rodando.
+func running(context.Context, string) (docker.Details, error) {
+	return docker.Details{Container: docker.Container{ID: validID, State: "running"}}, nil
+}
+
+func TestLogsSource_FirstStreamTailThenSince(t *testing.T) {
+	opts := make(chan docker.LogOptions, 2)
+	var calls atomic.Int32
+	fake := &dockertest.Fake{InspectFn: running, LogsFn: func(ctx context.Context, _ string, o docker.LogOptions, fn func(docker.LogLine)) error {
+		opts <- o
+		if calls.Add(1) == 1 {
+			fn(docker.LogLine{TS: ts(2e18 + 7), Text: "a"})
+			return nil
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	runSource(t, monitor.ContainerLogsSource(fake, time.Millisecond), "container-logs:"+validID)
+	recv := func() docker.LogOptions {
+		select {
+		case o := <-opts:
+			return o
+		case <-time.After(2 * time.Second):
+			t.Fatal("Logs não foi chamado")
+			return docker.LogOptions{}
+		}
+	}
+	// Primeiro stream: tail curto, sem Since (sem varrer o arquivo de log).
+	assert.Equal(t, docker.LogOptions{Tail: 200, Follow: true}, recv())
+	// Retry: retoma da última linha publicada.
+	assert.Equal(t, docker.LogOptions{Since: ts(2e18 + 7), Follow: true}, recv())
+}
+
+func TestLogsSource_WaitsWhileStopped(t *testing.T) {
+	var state atomic.Value
+	state.Store("exited")
+	var inspects, logs atomic.Int32
+	sinces := make(chan string, 4)
+	fake := &dockertest.Fake{
+		InspectFn: func(context.Context, string) (docker.Details, error) {
+			inspects.Add(1)
+			return docker.Details{Container: docker.Container{ID: validID, State: state.Load().(string)}}, nil
+		},
+		LogsFn: func(ctx context.Context, _ string, o docker.LogOptions, fn func(docker.LogLine)) error {
+			sinces <- o.Since
+			if logs.Add(1) == 1 {
+				fn(docker.LogLine{TS: ts(2e18 + 1), Text: "a"})
+				return nil // container parou
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+	runSource(t, monitor.ContainerLogsSource(fake, time.Millisecond), "container-logs:"+validID)
+	require.Equal(t, "", <-sinces)
+
+	// Parado: só Inspect a cada retry, Logs não é chamado de novo.
+	require.Eventually(t, func() bool { return inspects.Load() >= 5 }, 2*time.Second, time.Millisecond)
+	assert.Equal(t, int32(1), logs.Load())
+
+	state.Store("running")
+	select {
+	case s := <-sinces:
+		assert.Equal(t, ts(2e18+1), s)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Logs não foi chamado com o container rodando")
+	}
+}
+
+func TestLogsSource_RemovedWhileStopped(t *testing.T) {
+	fake := &dockertest.Fake{
+		InspectFn: func(context.Context, string) (docker.Details, error) { return docker.Details{}, docker.ErrNotFound },
+		LogsFn:    func(context.Context, string, docker.LogOptions, func(docker.LogLine)) error { return nil },
+	}
+	var msgs []string
+	// A fonte encerra sozinha quando o Inspect do retry não acha o container.
+	monitor.ContainerLogsSource(fake, time.Millisecond)(context.Background(), "container-logs:"+validID, func(d any) {
+		b, _ := json.Marshal(d)
+		msgs = append(msgs, string(b))
+	})
+	assert.Equal(t, []string{`{"ended":true}`, `{"error":"CONTAINER_NOT_FOUND"}`}, msgs)
 }
 
 func TestLogsSource_FlushesBeforeEnded(t *testing.T) {

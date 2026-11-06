@@ -1,16 +1,13 @@
 package monitor
 
 import (
-	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/engviniciusbs/korego/internal/node/docker"
-	"github.com/engviniciusbs/korego/internal/node/docker/dockertest"
 )
 
 func tsN(n int) string { return fmt.Sprintf("%019d", n) }
@@ -50,24 +47,4 @@ func TestLogBatcher_ResumeWithoutLinesKeepsCut(t *testing.T) {
 	b := newLogBatcher(tsN(5))
 	assert.Equal(t, tsN(5), b.resume())
 	assert.Equal(t, tsN(5), b.resume())
-}
-
-func TestLogsSource_SinceIsStartTime(t *testing.T) {
-	start := time.Unix(1700000000, 123456789)
-	got := make(chan docker.LogOptions, 1)
-	fake := &dockertest.Fake{LogsFn: func(ctx context.Context, _ string, o docker.LogOptions, _ func(docker.LogLine)) error {
-		got <- o
-		<-ctx.Done()
-		return ctx.Err()
-	}}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		containerLogsSource(fake, time.Millisecond, func() time.Time { return start })(ctx, "container-logs:abcdef123456", func(any) {})
-	}()
-	o := <-got
-	assert.Equal(t, docker.LogOptions{Tail: 0, Since: "1700000000123456789", Follow: true}, o)
-	cancel()
-	<-done
 }

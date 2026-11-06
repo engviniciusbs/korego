@@ -3,7 +3,6 @@ package monitor
 import (
 	"context"
 	"errors"
-	"fmt"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -90,26 +89,47 @@ func ContainerEventsSource(c docker.Client, retry time.Duration) events.SourceFu
 	}
 }
 
-// ContainerLogsSource segue os logs do container do tópico
-// "container-logs:<id>" a partir de agora e publica {"lines":[...]} a cada
-// 100 ms ou 200 linhas. Quando o stream termina, publica {"ended":true} (uma
-// vez até chegarem linhas novas) e tenta de novo a cada retry a partir da
-// última linha publicada. ID inválido ou container inexistente publicam
-// {"error":...} e encerram a fonte.
-func ContainerLogsSource(c docker.Client, retry time.Duration) events.SourceFunc {
-	return containerLogsSource(c, retry, time.Now)
-}
+// logsFirstTail é quantas linhas o primeiro stream da fonte de logs traz:
+// cobre o intervalo entre o tail da REST e o início da fonte sem Since (o
+// Since faz o dockerd varrer o arquivo de log inteiro).
+const logsFirstTail = 200
 
-func containerLogsSource(c docker.Client, retry time.Duration, now func() time.Time) events.SourceFunc {
+// ContainerLogsSource segue os logs do container do tópico
+// "container-logs:<id>": o primeiro stream começa com as últimas
+// logsFirstTail linhas, e as linhas são publicadas como {"lines":[...]} a
+// cada 100 ms ou 200 linhas. Quando o stream termina, publica {"ended":true}
+// (uma vez até chegarem linhas novas); a cada retry inspeciona o container e
+// só volta a seguir, a partir da última linha publicada, quando ele está
+// rodando. ID inválido ou container inexistente publicam {"error":...} e
+// encerram a fonte.
+func ContainerLogsSource(c docker.Client, retry time.Duration) events.SourceFunc {
 	return func(ctx context.Context, topic string, publish func(any)) {
 		id, ok := topicContainerID(topic)
 		if !ok {
 			publish(sourceError{Error: "INVALID_CONTAINER_ID"})
 			return
 		}
-		b := newLogBatcher(fmt.Sprintf("%019d", now().UnixNano()))
+		b := newLogBatcher("")
 		ended := false
-		for {
+		for first := true; ; first = false {
+			if !first {
+				// Parado, o Logs com follow volta logo depois de varrer o
+				// arquivo: só segue de novo com o container rodando.
+				d, err := c.Inspect(ctx, id)
+				if ctx.Err() != nil {
+					return
+				}
+				if errors.Is(err, docker.ErrNotFound) {
+					publish(sourceError{Error: "CONTAINER_NOT_FOUND"})
+					return
+				}
+				if err != nil || d.State != "running" {
+					if !sleepCtx(ctx, retry) {
+						return
+					}
+					continue
+				}
+			}
 			got, err := followLogs(ctx, c, id, b, publish)
 			if ctx.Err() != nil {
 				return
@@ -133,14 +153,19 @@ func containerLogsSource(c docker.Client, retry time.Duration, now func() time.T
 }
 
 // followLogs lê um stream de logs até ele terminar, publicando os lotes.
-// Devolve se alguma linha nova foi aceita e o erro de Logs. As linhas
-// pendentes são publicadas antes de voltar (exceto com ctx cancelado).
+// Sem linha publicada ainda, pede as últimas logsFirstTail; depois, retoma a
+// partir da última. Devolve se alguma linha nova foi aceita e o erro de Logs.
+// As linhas pendentes são publicadas antes de voltar (exceto com ctx
+// cancelado).
 func followLogs(ctx context.Context, c docker.Client, id string, b *logBatcher, publish func(any)) (bool, error) {
-	since := b.resume()
+	o := docker.LogOptions{Follow: true}
+	if o.Since = b.resume(); o.Since == "" {
+		o.Tail = logsFirstTail
+	}
 	lines := make(chan docker.LogLine)
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Logs(ctx, id, docker.LogOptions{Since: since, Follow: true}, func(l docker.LogLine) {
+		done <- c.Logs(ctx, id, o, func(l docker.LogLine) {
 			select {
 			case lines <- l:
 			case <-ctx.Done():
