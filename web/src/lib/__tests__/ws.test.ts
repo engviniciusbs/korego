@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LiveSocket } from "../ws";
+import { renderHook } from "@testing-library/react";
+import { LiveSocket, useLiveStream } from "../ws";
 
 class FakeWS {
   static instances: FakeWS[] = [];
@@ -129,5 +130,35 @@ describe("LiveSocket", () => {
     vi.advanceTimersByTime(60000);
     expect(FakeWS.instances).toHaveLength(1);
     expect(s.status).toBe("closed");
+  });
+});
+
+describe("useLiveStream", () => {
+  it("entrega todas as mensagens, não só a última", () => {
+    vi.stubGlobal("WebSocket", FakeWS);
+    const got: unknown[] = [];
+    const { unmount, rerender } = renderHook(
+      ({ topic }: { topic: string | null }) => useLiveStream(topic, (d) => got.push(d)),
+      { initialProps: { topic: "container-logs:abc123abc123" as string | null } },
+    );
+    const ws = last();
+    ws.open();
+    ws.msg({ type: "event", topic: "container-logs:abc123abc123", data: { n: 1 } });
+    ws.msg({ type: "event", topic: "container-logs:abc123abc123", data: { n: 2 } });
+    ws.msg({ type: "event", topic: "container-logs:abc123abc123", data: { n: 3 } });
+    expect(got).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
+    rerender({ topic: null });
+    expect(ws.sent[ws.sent.length - 1]).toBe(
+      '{"type":"unsubscribe","topic":"container-logs:abc123abc123"}',
+    );
+    unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("topic null não assina", () => {
+    vi.stubGlobal("WebSocket", FakeWS);
+    renderHook(() => useLiveStream(null, () => {}));
+    expect(FakeWS.instances).toHaveLength(0);
+    vi.unstubAllGlobals();
   });
 });

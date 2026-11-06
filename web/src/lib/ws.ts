@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { UNAUTHORIZED_EVENT } from "./api";
 
 export type LiveStatus = "connecting" | "open" | "closed";
@@ -151,6 +151,21 @@ let singleton: LiveSocket | null = null;
 export function getLiveSocket(): LiveSocket {
   if (!singleton) singleton = new LiveSocket();
   return singleton;
+}
+
+/**
+ * Entrega cada mensagem do tópico ao callback (useLive guarda só a última).
+ * `null` não assina.
+ */
+export function useLiveStream(topic: string | null, onData: (d: unknown) => void): void {
+  const ref = useRef(onData);
+  useEffect(() => {
+    ref.current = onData;
+  });
+  useEffect(() => {
+    if (!topic) return;
+    return getLiveSocket().subscribe(topic, (d) => ref.current(d));
+  }, [topic]);
 }
 
 export function useLive<T>(topic: string): T | undefined {
