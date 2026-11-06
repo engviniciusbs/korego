@@ -14,6 +14,9 @@ import (
 	"github.com/shirou/gopsutil/v4/net"
 )
 
+// netCounter guarda os contadores acumulados de uma interface.
+type netCounter struct{ rx, tx uint64 }
+
 // Local lê as métricas da máquina onde o KoreGO roda. Guarda a leitura
 // anterior para calcular CPU e taxas de rede pela diferença.
 type Local struct {
@@ -21,12 +24,44 @@ type Local struct {
 	havePrev bool
 	prevAt   time.Time
 	prevCPU  cpu.TimesStat
-	prevRx   uint64
-	prevTx   uint64
+	prevNet  map[string]netCounter
+
+	// Pontos de injeção para testes.
+	now   func() time.Time
+	cpuFn func(ctx context.Context) (cpu.TimesStat, error)
+	netFn func(ctx context.Context) (map[string]netCounter, error)
 }
 
 // NewLocal cria a fonte de métricas local.
-func NewLocal() *Local { return &Local{} }
+func NewLocal() *Local {
+	return &Local{now: time.Now, cpuFn: readCPU, netFn: readNet}
+}
+
+func readCPU(ctx context.Context) (cpu.TimesStat, error) {
+	times, err := cpu.TimesWithContext(ctx, false)
+	if err != nil {
+		return cpu.TimesStat{}, err
+	}
+	if len(times) == 0 {
+		return cpu.TimesStat{}, errors.New("nenhuma leitura")
+	}
+	return times[0], nil
+}
+
+// readNet lê os contadores por interface, já sem as interfaces excluídas.
+func readNet(ctx context.Context) (map[string]netCounter, error) {
+	counters, err := net.IOCountersWithContext(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]netCounter, len(counters))
+	for _, c := range counters {
+		if includeInterface(c.Name) {
+			out[c.Name] = netCounter{rx: c.BytesRecv, tx: c.BytesSent}
+		}
+	}
+	return out, nil
+}
 
 var _ Source = (*Local)(nil)
 
@@ -35,15 +70,12 @@ func (l *Local) Sample(ctx context.Context) (Sample, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	now := time.Now()
+	now := l.now()
 	s := Sample{Time: now}
 
-	times, err := cpu.TimesWithContext(ctx, false)
+	curCPU, err := l.cpuFn(ctx)
 	if err != nil {
 		return Sample{}, fmt.Errorf("ler tempos de CPU: %w", err)
-	}
-	if len(times) == 0 {
-		return Sample{}, errors.New("ler tempos de CPU: nenhuma leitura")
 	}
 	vm, err := mem.VirtualMemoryWithContext(ctx)
 	if err != nil {
@@ -57,16 +89,9 @@ func (l *Local) Sample(ctx context.Context) (Sample, error) {
 		s.Load1, s.Load5, s.Load15 = avg.Load1, avg.Load5, avg.Load15
 	}
 
-	counters, err := net.IOCountersWithContext(ctx, true)
+	curNet, err := l.netFn(ctx)
 	if err != nil {
 		return Sample{}, fmt.Errorf("ler contadores de rede: %w", err)
-	}
-	var rx, tx uint64
-	for _, c := range counters {
-		if includeInterface(c.Name) {
-			rx += c.BytesRecv
-			tx += c.BytesSent
-		}
 	}
 
 	parts, err := disk.PartitionsWithContext(ctx, false)
@@ -87,10 +112,25 @@ func (l *Local) Sample(ctx context.Context) (Sample, error) {
 
 	if l.havePrev {
 		elapsed := now.Sub(l.prevAt)
-		s.CPUPercent = cpuPercent(l.prevCPU, times[0])
-		s.NetRxBytesPerSec = rate(l.prevRx, rx, elapsed)
-		s.NetTxBytesPerSec = rate(l.prevTx, tx, elapsed)
+		s.CPUPercent = cpuPercent(l.prevCPU, curCPU)
+		// Delta por interface: interface nova ou com contador que recuou
+		// contribui 0, sem esconder nem inflar o tráfego das demais.
+		var dRx, dTx uint64
+		for name, c := range curNet {
+			p, ok := l.prevNet[name]
+			if !ok {
+				continue
+			}
+			if c.rx >= p.rx {
+				dRx += c.rx - p.rx
+			}
+			if c.tx >= p.tx {
+				dTx += c.tx - p.tx
+			}
+		}
+		s.NetRxBytesPerSec = rate(0, dRx, elapsed)
+		s.NetTxBytesPerSec = rate(0, dTx, elapsed)
 	}
-	l.havePrev, l.prevAt, l.prevCPU, l.prevRx, l.prevTx = true, now, times[0], rx, tx
+	l.havePrev, l.prevAt, l.prevCPU, l.prevNet = true, now, curCPU, curNet
 	return s, nil
 }
