@@ -1,0 +1,250 @@
+// Comando korego: gerenciador de VPS self-hosted em um único binário.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/engviniciusbs/korego/internal/api"
+	"github.com/engviniciusbs/korego/internal/audit"
+	"github.com/engviniciusbs/korego/internal/auth"
+	"github.com/engviniciusbs/korego/internal/config"
+	"github.com/engviniciusbs/korego/internal/events"
+	"github.com/engviniciusbs/korego/internal/node"
+	"github.com/engviniciusbs/korego/internal/secrets"
+	"github.com/engviniciusbs/korego/internal/store"
+	"github.com/engviniciusbs/korego/internal/update"
+	"github.com/engviniciusbs/korego/internal/version"
+	"github.com/engviniciusbs/korego/internal/webui"
+)
+
+func main() {
+	args := os.Args[1:]
+	cmd := "serve"
+	if len(args) > 0 && len(args[0]) > 0 && args[0][0] != '-' {
+		cmd, args = args[0], args[1:]
+	}
+	switch cmd {
+	case "serve":
+		if err := serve(args); err != nil {
+			log.Fatalf("erro: %v", err)
+		}
+	case "version":
+		fmt.Println(version.Version)
+	case "update-finish":
+		if err := updateFinish(args); err != nil {
+			log.Fatalf("erro: %v", err)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "comando desconhecido: %s\nuso: korego [serve|version|update-finish]\n", cmd)
+		os.Exit(2)
+	}
+}
+
+func serve(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	cfgPath := fs.String("config", "/etc/korego/config.toml", "caminho do arquivo de configuração")
+	_ = fs.Parse(args)
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
+		return fmt.Errorf("criar diretório de dados %s: %w", cfg.DataDir, err)
+	}
+	db, err := store.Open(filepath.Join(cfg.DataDir, "korego.db"))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	users, err := db.CountUsers(context.Background())
+	if err != nil {
+		return fmt.Errorf("contar usuários: %w", err)
+	}
+	keyPath := filepath.Join(cfg.ConfigDir, "master.key")
+	key, err := secrets.LoadOrCreateKey(keyPath, users == 0)
+	if errors.Is(err, secrets.ErrKeyMissing) {
+		return fmt.Errorf("a chave mestra %s não existe, mas o banco já possui usuários; "+
+			"restaure o arquivo original da chave (sem ela os segredos não podem ser decifrados)", keyPath)
+	}
+	if err != nil {
+		return err
+	}
+	box, err := secrets.NewBox(key)
+	if err != nil {
+		return err
+	}
+
+	tokenPath := filepath.Join(cfg.ConfigDir, "setup-token")
+	var setupToken string
+	if users == 0 {
+		setupToken, err = loadOrCreateSetupToken(tokenPath)
+		if err != nil {
+			return err
+		}
+		log.Printf("Setup pendente. Token de setup: %s (também em %s)", setupToken, tokenPath)
+	} else if err := os.Remove(tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("remover token de setup antigo %s: %v", tokenPath, err)
+	}
+
+	svc := &auth.Service{
+		DB:             db,
+		Box:            box,
+		Sessions:       &auth.Sessions{DB: db},
+		Limiter:        auth.NewLimiter(5, time.Minute, 15*time.Minute),
+		Audit:          &audit.Logger{DB: db},
+		SetupToken:     setupToken,
+		SetupTokenFile: tokenPath,
+	}
+
+	nd := node.NewLocal()
+	hub := events.NewHub()
+	hub.RegisterSource("system", api.SystemSource(nd, 5*time.Second))
+
+	var web http.Handler
+	if cfg.DevProxy != "" {
+		web, err = webui.NewDevProxy(cfg.DevProxy)
+		if err != nil {
+			return err
+		}
+		log.Printf("Modo dev: frontend via proxy para %s", cfg.DevProxy)
+	} else {
+		web = webui.NewHandler(webui.Dist())
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("localizar executável: %w", err)
+	}
+	handler := api.NewRouter(api.Deps{
+		Auth: svc, Node: nd, Hub: hub, Web: web,
+		Updater: &update.System{ExePath: exe, ConfigPath: *cfgPath},
+	})
+	if cfg.DevProxy == "" {
+		handler = api.SecurityHeaders(handler)
+	}
+
+	srv := &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		cleanupSessions(ctx, db)
+	}()
+	defer func() { stop(); <-cleanupDone }()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
+	log.Printf("KoreGO %s ouvindo em %s", version.Version, cfg.ListenAddr)
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+	}
+	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+// cleanupSessions removes expired sessions every hour until ctx is canceled.
+func cleanupSessions(ctx context.Context, db *store.DB) {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := db.DeleteExpiredSessions(ctx, time.Now()); err != nil && ctx.Err() == nil {
+				log.Printf("limpar sessões expiradas: %v", err)
+			}
+		}
+	}
+}
+
+// healthURL deriva a URL de /api/health a partir do endereço de escuta:
+// host vazio, 0.0.0.0 ou :: viram 127.0.0.1.
+func healthURL(listenAddr string) (string, error) {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return "", fmt.Errorf("endereço de escuta inválido %q: %w", listenAddr, err)
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/api/health", nil
+}
+
+// updateFinish reinicia o serviço após uma atualização e reverte o binário se
+// o novo não responder em /api/health. Roda a partir do binário anterior.
+func updateFinish(args []string) error {
+	fs := flag.NewFlagSet("update-finish", flag.ExitOnError)
+	cfgPath := fs.String("config", "/etc/korego/config.toml", "caminho do arquivo de configuração")
+	exe := fs.String("exe", "", "caminho do binário instalado (obrigatório)")
+	_ = fs.Parse(args)
+	if *exe == "" {
+		return errors.New("--exe é obrigatório")
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	url, err := healthURL(cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
+	httpc := &http.Client{Timeout: 3 * time.Second}
+
+	f := &update.Finisher{
+		ExePath: *exe,
+		Timeout: 30 * time.Second,
+		Restart: func(ctx context.Context) error {
+			return exec.CommandContext(ctx, "systemctl", "restart", "korego").Run()
+		},
+		Health: func(ctx context.Context) error {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				return err
+			}
+			resp, err := httpc.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("health retornou %d", resp.StatusCode)
+			}
+			return nil
+		},
+	}
+	err = f.Run(context.Background())
+	if errors.Is(err, update.ErrRolledBack) {
+		log.Printf("%v", err)
+		return nil
+	}
+	return err
+}

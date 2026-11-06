@@ -1,0 +1,22 @@
+// Package node define a fronteira entre o KoreGO e a máquina que ele gerencia.
+package node
+
+import "context"
+
+// HostInfo descreve o host.
+type HostInfo struct {
+	Hostname         string `json:"hostname"`
+	OS               string `json:"os"`
+	Platform         string `json:"platform"`
+	PlatformVersion  string `json:"platformVersion"`
+	Kernel           string `json:"kernel"`
+	Arch             string `json:"arch"`
+	CPUs             int    `json:"cpus"`
+	MemoryTotalBytes uint64 `json:"memoryTotalBytes"`
+	UptimeSeconds    uint64 `json:"uptimeSeconds"`
+}
+
+// Node é uma máquina gerenciada (nesta etapa, apenas a local).
+type Node interface {
+	Info(ctx context.Context) (HostInfo, error)
+}

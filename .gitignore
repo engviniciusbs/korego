@@ -11,7 +11,8 @@ web/.next/
 web/out/
 
 # Embedded frontend build output
-internal/webui/dist/
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
 
 # Local data / secrets
 *.db
@@ -29,3 +30,7 @@ Thumbs.db
 
 # Local-only notes (sensitive: real servers, IPs, domains)
 docs/local/
+
+# Playwright
+web/test-results/
+web/playwright-report/

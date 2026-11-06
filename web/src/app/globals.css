@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+/*
+ * KoreGO — console de operador.
+ * Somente tema escuro. Nenhum canto arredondado: todos os tokens de raio valem 0.
+ */
+@theme {
+  /* Raios: zerados de propósito (Tailwind não gera nenhuma curva). */
+  --radius: 0;
+  --radius-xs: 0;
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-2xl: 0;
+  --radius-3xl: 0;
+  --radius-4xl: 0;
+
+  /* Superfícies: quase preto, em camadas. */
+  --color-bg: #08080a;
+  --color-surface: #0f0f12;
+  --color-surface-2: #15151a;
+  --color-surface-3: #1c1c22;
+
+  /* Bordas finas (hairlines). */
+  --color-line: #23232a;
+  --color-line-strong: #34343d;
+
+  /* Texto. */
+  --color-fg: #e6e6ea;
+  --color-fg-muted: #a0a0ab;
+  --color-fg-subtle: #7c7c88;
+
+  /* Acento violeta (herança do Coolify, mais fechado). */
+  --color-accent: #6d3df5;
+  --color-accent-hover: #5b2be0;
+  --color-accent-fg: #ffffff;
+  --color-accent-text: #a990ff;
+
+  /* Estados. */
+  --color-success: #2fbf71;
+  --color-success-bg: #0c1f15;
+  --color-warning: #e5b53a;
+  --color-warning-bg: #221b08;
+  --color-danger: #f0524f;
+  --color-danger-strong: #c62f2c;
+  --color-danger-strong-hover: #a82523;
+  --color-danger-bg: #24100f;
+  --color-info: #4aa8e8;
+  --color-info-bg: #0b1a25;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SFMono-Regular", monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+/* Rede de segurança: nada arredonda, nem controles nativos. */
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+}
+
+html {
+  background: var(--color-bg);
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+  background: var(--color-accent);
+  color: var(--color-accent-fg);
+}
