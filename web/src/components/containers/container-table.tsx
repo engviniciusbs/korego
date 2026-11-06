@@ -8,7 +8,7 @@ import { cn } from "@/lib/cn";
 import type { Container, ContainerGroup, PortBinding } from "@/lib/containers";
 import { ContainerActions } from "./container-actions";
 
-const stateVariant: Record<string, BadgeVariant> = {
+export const stateVariant: Record<string, BadgeVariant> = {
   running: "success",
   paused: "warning",
   restarting: "warning",
@@ -18,7 +18,7 @@ const stateVariant: Record<string, BadgeVariant> = {
   dead: "danger",
 };
 
-const healthVariant: Record<string, BadgeVariant> = {
+export const healthVariant: Record<string, BadgeVariant> = {
   healthy: "success",
   unhealthy: "danger",
   starting: "warning",

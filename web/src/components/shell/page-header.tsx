@@ -18,7 +18,7 @@ export function PageHeader({
         {eyebrow && (
           <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-fg-subtle">{eyebrow}</p>
         )}
-        <h1 className="mt-1 text-xl font-semibold tracking-tight text-balance text-fg">{title}</h1>
+        <h1 className="mt-1 text-xl font-semibold tracking-tight text-balance text-fg [overflow-wrap:anywhere]">{title}</h1>
         {description && <p className="mt-1 text-[13px] text-fg-muted">{description}</p>}
       </div>
       {actions && <div className="flex items-center gap-2">{actions}</div>}
