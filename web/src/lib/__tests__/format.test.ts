@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { describeUserAgent, formatDateTime, formatGiB, formatUptime } from "../format";
+import {
+  describeUserAgent,
+  formatBytes,
+  formatDateTime,
+  formatGiB,
+  formatPercent,
+  formatRate,
+  formatUptime,
+} from "../format";
 
 describe("formatUptime", () => {
   it("formata dias, horas e minutos", () => {
@@ -60,5 +68,21 @@ describe("describeUserAgent", () => {
   it("usa o texto bruto ou um rótulo quando não reconhece", () => {
     expect(describeUserAgent("curl/8.4.0")).toBe("curl/8.4.0");
     expect(describeUserAgent("")).toBe("Desconhecido");
+  });
+});
+
+describe("formatBytes, formatRate e formatPercent", () => {
+  it("formatBytes usa unidades binárias com 1 casa", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(1536)).toBe("1,5 KiB");
+    expect(formatBytes(5 * 1024 ** 3)).toBe("5,0 GiB");
+    expect(formatBytes(2 * 1024 ** 4)).toBe("2,0 TiB");
+  });
+
+  it("formatRate e formatPercent em pt-BR", () => {
+    expect(formatRate(1.5 * 1024 ** 2)).toBe("1,5 MiB/s");
+    expect(formatPercent(12.34)).toBe("12,3%");
+    expect(formatPercent(0)).toBe("0,0%");
   });
 });

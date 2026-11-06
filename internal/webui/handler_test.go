@@ -112,3 +112,31 @@ func TestPathTraversalBlocked(t *testing.T) {
 	}
 	assert.Equal(t, http.StatusNotFound, get(h, http.MethodGet, "/%2e%2e/x").Code)
 }
+
+func TestSegmentPrefetchMapsDotsToDirs(t *testing.T) {
+	fsys := testFS()
+	// O export grava os segmentos em diretórios; o cliente pede com pontos.
+	fsys["containers/detalhe/__next.!KHBhaW5lbCk/containers/detalhe/__PAGE__.txt"] = &fstest.MapFile{Data: []byte("seg")}
+	fsys["containers/detalhe/__next._tree.txt"] = &fstest.MapFile{Data: []byte("tree")}
+	h := webui.NewHandler(fsys)
+
+	w := get(h, http.MethodGet, "/containers/detalhe/__next.!KHBhaW5lbCk.containers.detalhe.__PAGE__.txt")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "seg", w.Body.String())
+	assert.Contains(t, w.Header().Get("Content-Type"), "text/plain")
+
+	// O arquivo que existe com esse nome continua sendo servido direto.
+	w = get(h, http.MethodGet, "/containers/detalhe/__next._tree.txt")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "tree", w.Body.String())
+
+	// Segmento inexistente e nomes fora do padrão continuam 404.
+	for _, p := range []string{
+		"/containers/detalhe/__next.!KHBhaW5lbCk.nada.__PAGE__.txt",
+		"/containers/detalhe/__next..txt",
+		"/containers/detalhe/__next.a..b.txt",
+		"/containers/detalhe/x.!KHBhaW5lbCk.containers.detalhe.__PAGE__.txt",
+	} {
+		assert.Equal(t, http.StatusNotFound, get(h, http.MethodGet, p).Code, p)
+	}
+}

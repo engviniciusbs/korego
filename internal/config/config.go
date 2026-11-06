@@ -16,6 +16,11 @@ type Config struct {
 	DataDir    string `toml:"data_dir"`
 	ConfigDir  string `toml:"config_dir"`
 	DevProxy   string `toml:"dev_proxy"`
+	// PM2Path é o caminho do binário pm2 (vazio = procurar no PATH).
+	PM2Path string `toml:"pm2_path"`
+	// PM2Home é o PM2_HOME do usuário que roda o PM2 (vazio = $PM2_HOME do
+	// ambiente, senão $HOME/.pm2 do usuário do KoreGO).
+	PM2Home string `toml:"pm2_home"`
 }
 
 // Load lê o arquivo TOML em path (inexistente não é erro) e aplica as
@@ -33,6 +38,8 @@ func Load(path string) (Config, error) {
 	override(&c.DataDir, "KOREGO_DATA_DIR")
 	override(&c.ConfigDir, "KOREGO_CONFIG_DIR")
 	override(&c.DevProxy, "KOREGO_DEV_PROXY")
+	override(&c.PM2Path, "KOREGO_PM2_PATH")
+	override(&c.PM2Home, "KOREGO_PM2_HOME")
 	return c, nil
 }
 

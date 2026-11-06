@@ -58,3 +58,31 @@ export function describeUserAgent(ua: string): string {
   if (!browser) return ua;
   return os ? `${browser} · ${os}` : browser;
 }
+
+const oneDecimal = new Intl.NumberFormat("pt-BR", {
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+});
+
+const BYTE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
+
+/** Bytes → "512 B", "1,5 KiB", "7,8 GiB" (unidades binárias, 1 casa a partir de KiB). */
+export function formatBytes(n: number): string {
+  let v = Number.isFinite(n) && n > 0 ? n : 0;
+  let i = 0;
+  while (v >= 1024 && i < BYTE_UNITS.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return i === 0 ? `${Math.round(v)} B` : `${oneDecimal.format(v)} ${BYTE_UNITS[i]}`;
+}
+
+/** Bytes por segundo → "1,5 MiB/s". */
+export function formatRate(bytesPerSec: number): string {
+  return `${formatBytes(bytesPerSec)}/s`;
+}
+
+/** Percentual → "12,3%". */
+export function formatPercent(v: number): string {
+  return `${oneDecimal.format(Number.isFinite(v) ? v : 0)}%`;
+}

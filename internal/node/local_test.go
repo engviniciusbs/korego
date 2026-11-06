@@ -11,7 +11,7 @@ import (
 )
 
 func TestLocal_Info(t *testing.T) {
-	info, err := node.NewLocal().Info(context.Background())
+	info, err := node.NewLocal("", "").Info(context.Background())
 	require.NoError(t, err)
 	assert.NotEmpty(t, info.Hostname)
 	assert.GreaterOrEqual(t, info.CPUs, 1)

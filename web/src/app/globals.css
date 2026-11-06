@@ -49,6 +49,11 @@
   --color-info: #4aa8e8;
   --color-info-bg: #0b1a25;
 
+  /* Séries dos gráficos (ordem fixa, validada contra a superfície escura com o
+     validador da skill dataviz: ΔE CVD 26,8, contraste >= 3:1). */
+  --color-series-1: #3987e5;
+  --color-series-2: #d95926;
+
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, "SFMono-Regular", monospace;
 }

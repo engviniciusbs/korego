@@ -19,7 +19,7 @@ interface NavItem {
 
 const items: NavItem[] = [
   { label: "Visão geral", href: "/" },
-  { label: "Containers", stage: "Etapa 1" },
+  { label: "Containers", href: "/containers/", match: "/containers/" },
   { label: "Projetos", stage: "Etapa 2" },
   { label: "Domínios", stage: "Etapa 2" },
   {

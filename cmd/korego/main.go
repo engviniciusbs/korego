@@ -21,6 +21,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/config"
 	"github.com/engviniciusbs/korego/internal/events"
+	"github.com/engviniciusbs/korego/internal/monitor"
 	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/secrets"
 	"github.com/engviniciusbs/korego/internal/store"
@@ -111,9 +112,14 @@ func serve(args []string) error {
 		SetupTokenFile: tokenPath,
 	}
 
-	nd := node.NewLocal()
+	nd := node.NewLocal(cfg.PM2Path, cfg.PM2Home)
 	hub := events.NewHub()
 	hub.RegisterSource("system", api.SystemSource(nd, 5*time.Second))
+	hub.RegisterSource("containers", monitor.ContainerEventsSource(nd.Docker(), 5*time.Second))
+	hub.RegisterSource("container-logs", monitor.ContainerLogsSource(nd.Docker(), 2*time.Second))
+	hub.RegisterSource("container-stats", monitor.ContainerStatsSource(nd.Docker(), 2*time.Second))
+
+	collector := &monitor.Collector{Source: nd.Metrics(), Hub: hub, DB: db}
 
 	var web http.Handler
 	if cfg.DevProxy != "" {
@@ -130,7 +136,7 @@ func serve(args []string) error {
 		return fmt.Errorf("localizar executável: %w", err)
 	}
 	handler := api.NewRouter(api.Deps{
-		Auth: svc, Node: nd, Hub: hub, Web: web,
+		Auth: svc, Node: nd, Hub: hub, Web: web, Metrics: collector, DB: db,
 		Updater: &update.System{ExePath: exe, ConfigPath: *cfgPath},
 	})
 	if cfg.DevProxy == "" {
@@ -152,6 +158,15 @@ func serve(args []string) error {
 		cleanupSessions(ctx, db)
 	}()
 	defer func() { stop(); <-cleanupDone }()
+
+	collectorDone := make(chan struct{})
+	go func() {
+		defer close(collectorDone)
+		collector.Run(ctx)
+	}()
+	// Declarado depois do defer anterior, roda antes: espera o minuto parcial
+	// ser gravado antes de db.Close.
+	defer func() { stop(); <-collectorDone }()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
