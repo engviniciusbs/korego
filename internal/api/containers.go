@@ -22,6 +22,12 @@ import (
 const (
 	defaultLogTail = 500
 	maxLogTail     = 5000
+
+	// Limites da mutação no Docker e da gravação da auditoria. As duas não
+	// são canceladas se o cliente desconectar: toda ação concluída tem
+	// registro (spec §4).
+	mutationTimeout = 60 * time.Second
+	auditTimeout    = 5 * time.Second
 )
 
 var containerIDRe = regexp.MustCompile(`^[a-f0-9]{12,64}$`)
@@ -89,6 +95,12 @@ func (h containerHandlers) details(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, d)
 }
 
+// detached devolve um contexto com os valores da requisição que não é
+// cancelado quando o cliente desconecta, limitado a d.
+func detached(r *http.Request, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.Context()), d)
+}
+
 func (h containerHandlers) audit(r *http.Request, action, id string, d docker.Details, ok bool) {
 	sess, has := CurrentSession(r.Context())
 	if !has {
@@ -98,7 +110,9 @@ func (h containerHandlers) audit(r *http.Request, action, id string, d docker.De
 	if target == "" {
 		target = id
 	}
-	h.svc.Record(r.Context(), audit.Entry{
+	ctx, cancel := detached(r, auditTimeout)
+	defer cancel()
+	h.svc.Record(ctx, audit.Entry{
 		UserID: &sess.UserID, Action: action, Target: target, IP: auth.ClientIP(r),
 		Metadata: map[string]any{"id": id, "managed": d.Managed, "ok": ok},
 	})
@@ -117,7 +131,9 @@ func (h containerHandlers) action(name string, call func(docker.Client, context.
 			dockerError(w, r, err)
 			return
 		}
-		if err := call(c, r.Context(), id); err != nil {
+		ctx, cancel := detached(r, mutationTimeout)
+		defer cancel()
+		if err := call(c, ctx, id); err != nil {
 			h.audit(r, "container."+name, id, d, false)
 			dockerError(w, r, err)
 			return
@@ -148,7 +164,9 @@ func (h containerHandlers) remove(w http.ResponseWriter, r *http.Request) {
 		dockerError(w, r, docker.ErrConflict)
 		return
 	}
-	if err := c.Remove(r.Context(), id); err != nil {
+	ctx, cancel := detached(r, mutationTimeout)
+	defer cancel()
+	if err := c.Remove(ctx, id); err != nil {
 		h.audit(r, "container.remove", id, d, false)
 		dockerError(w, r, err)
 		return

@@ -199,6 +199,45 @@ func TestContainers_ActionAudited(t *testing.T) {
 	assert.Equal(t, "container.restart", items[2].(map[string]any)["action"])
 }
 
+func TestContainers_ActionAuditedAfterClientGone(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	stopCtxErr := make(chan error, 1)
+	f := &dockertest.Fake{
+		InspectFn: func(context.Context, string) (docker.Details, error) {
+			return docker.Details{Container: docker.Container{ID: cid, Name: "web"}}, nil
+		},
+		StopFn: func(ctx context.Context, _ string) error {
+			close(started)
+			<-release
+			stopCtxErr <- ctx.Err()
+			return nil
+		},
+	}
+	e, c, csrf := containersEnv(t, f)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.do(t, http.MethodPost, "/api/containers/"+cid+"/stop", nil, withCookie(c), withHeader("X-CSRF-Token", csrf),
+			func(r *http.Request) { *r = *r.WithContext(ctx) })
+	}()
+	<-started
+	cancel() // o cliente desconecta no meio do stop
+	close(release)
+	<-done
+
+	// A mutação não é cancelada junto com a requisição e o registro existe.
+	require.NoError(t, <-stopCtxErr)
+	w := e.do(t, http.MethodGet, "/api/audit", nil, withCookie(c))
+	items := decode(t, w)["items"].([]any)
+	require.NotEmpty(t, items)
+	last := items[0].(map[string]any)
+	assert.Equal(t, "container.stop", last["action"])
+	assert.Equal(t, true, last["metadata"].(map[string]any)["ok"])
+}
+
 func TestContainers_DetailsHasNoEnvValues(t *testing.T) {
 	f := &dockertest.Fake{InspectFn: func(context.Context, string) (docker.Details, error) {
 		return docker.Details{Container: docker.Container{ID: cid, Name: "web"}, EnvNames: []string{"DB_PASSWORD"}}, nil
