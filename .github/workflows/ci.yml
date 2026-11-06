@@ -44,6 +44,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -62,6 +63,7 @@ jobs:
       - run: go build -o bin/korego ./cmd/korego
       - name: Instalar o Chromium do Playwright
         working-directory: web
+        timeout-minutes: 5
         run: pnpm exec playwright install --with-deps chromium
       - name: Teste ponta a ponta
         working-directory: web
