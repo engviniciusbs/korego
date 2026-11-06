@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 
 export interface DiskUsage {
@@ -56,5 +56,7 @@ export function useMetricsHistory(range: MetricsRange) {
     queryKey: ["metrics", "history", range],
     queryFn: () => api<HistoryResponse>(`/api/metrics/history?range=${range}`),
     refetchInterval: 60_000,
+    // Ao trocar o período, mantém o gráfico anterior até chegar o novo.
+    placeholderData: keepPreviousData,
   });
 }

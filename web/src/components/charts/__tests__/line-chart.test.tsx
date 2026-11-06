@@ -46,6 +46,39 @@ describe("LineChart", () => {
     expect(screen.getByText("21 u")).toBeInTheDocument();
   });
 
+  it("com domain, pontos só nos últimos 10 minutos de 1h começam depois de 80% da largura", () => {
+    // viewBox tem 1000 de largura; o primeiro x do path é a posição do primeiro ponto.
+    const points = [3000, 3060, 3120, 3180].map((t) => ({ t, v: 1 }));
+    const { container } = render(
+      <LineChart
+        series={[{ label: "CPU", points: [{ t: -600, v: 9 }, ...points] }]}
+        stepSeconds={60}
+        format={fmt}
+        domain={[0, 3600]}
+      />,
+    );
+    const paths = container.querySelectorAll("path[data-segment]");
+    // O ponto fora da janela é cortado: sobra um segmento.
+    expect(paths).toHaveLength(1);
+    const firstX = Number(/^M([\d.]+)/.exec(paths[0].getAttribute("d") ?? "")?.[1]);
+    expect(firstX).toBeGreaterThan(800);
+    expect(firstX).toBeCloseTo((3000 / 3600) * 1000, 1);
+  });
+
+  it("janela de 24h mostra a data nos extremos do eixo", () => {
+    const end = Date.UTC(2026, 10, 6, 15, 0) / 1000;
+    const points = [end - 3600, end].map((t) => ({ t, v: 1 }));
+    render(
+      <LineChart
+        series={[{ label: "CPU", points }]}
+        stepSeconds={60}
+        format={fmt}
+        domain={[end - 86400, end]}
+      />,
+    );
+    expect(screen.getAllByText(/\d{2}\/\d{2}, \d{2}:\d{2}/).length).toBeGreaterThanOrEqual(2);
+  });
+
   it("sem pontos mostra o estado vazio", () => {
     render(<LineChart series={[{ label: "CPU", points: [] }]} stepSeconds={60} format={fmt} />);
     expect(screen.getByText("Sem dados neste período.")).toBeInTheDocument();

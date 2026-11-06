@@ -18,6 +18,12 @@ export interface LineChartProps {
   format: (v: number) => string;
   /** Teto do eixo Y; sem ele o teto é `niceMax` do maior valor. */
   yMax?: number;
+  /**
+   * Janela do eixo X em segundos unix ([de, até]). Com ela, períodos sem dados
+   * no começo ou no fim aparecem como vazio, e pontos fora da janela são cortados.
+   * Sem ela, o eixo vai do primeiro ao último ponto.
+   */
+  domain?: [number, number];
   /** Altura da área do gráfico em px. */
   height?: number;
   className?: string;
@@ -41,14 +47,32 @@ const timeLong = new Intl.DateTimeFormat("pt-BR", {
 const colorOf = (s: LineSeries, i: number) => s.color ?? SERIES_COLORS[i % SERIES_COLORS.length];
 
 /** Gráfico de linha em SVG próprio: buracos viram cortes, eixo Y com teto "redondo". */
-export function LineChart({ series, stepSeconds, format, yMax, height = 160, className }: LineChartProps) {
+export function LineChart({
+  series: rawSeries,
+  stepSeconds,
+  format,
+  yMax,
+  domain,
+  height = 160,
+  className,
+}: LineChartProps) {
   const [hover, setHover] = useState<number | null>(null);
+
+  const d0 = domain?.[0];
+  const d1 = domain?.[1];
+  const series = useMemo(
+    () =>
+      d0 === undefined || d1 === undefined
+        ? rawSeries
+        : rawSeries.map((s) => ({ ...s, points: s.points.filter((p) => p.t >= d0 && p.t <= d1) })),
+    [rawSeries, d0, d1],
+  );
 
   const model = useMemo(() => {
     const times = [...new Set(series.flatMap((s) => s.points.map((p) => p.t)))].sort((a, b) => a - b);
     if (times.length === 0) return null;
-    let t0 = times[0];
-    let t1 = times[times.length - 1];
+    let t0 = d0 !== undefined && d1 !== undefined && d1 > d0 ? d0 : times[0];
+    let t1 = d0 !== undefined && d1 !== undefined && d1 > d0 ? d1 : times[times.length - 1];
     if (t0 === t1) {
       t0 -= stepSeconds;
       t1 += stepSeconds;
@@ -67,8 +91,11 @@ export function LineChart({ series, stepSeconds, format, yMax, height = 160, cla
           : { single: false, d: seg.map((p, k) => `${k ? "L" : "M"}${x(p.t).toFixed(2)} ${y(p.v).toFixed(2)}`).join("") },
       ),
     );
-    return { times, t0, t1, top, x, y, byT, paths, long: t1 - t0 > 86400 };
-  }, [series, stepSeconds, yMax]);
+    // Data no eixo quando a janela cobre um dia inteiro ou cruza a meia-noite.
+    const long =
+      t1 - t0 >= 86400 || new Date(t0 * 1000).toDateString() !== new Date(t1 * 1000).toDateString();
+    return { times, t0, t1, top, x, y, byT, paths, long };
+  }, [series, stepSeconds, yMax, d0, d1]);
 
   const summary = series
     .map((s) => {

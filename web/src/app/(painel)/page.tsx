@@ -371,9 +371,12 @@ const RANGES: { value: MetricsRange; label: string }[] = [
   { value: "7d", label: "7d" },
 ];
 
+const RANGE_SECONDS: Record<MetricsRange, number> = { "1h": 3600, "24h": 86400, "7d": 7 * 86400 };
+
 function HistorySection({ memTotal }: { memTotal: number | undefined }) {
   const [range, setRange] = useState<MetricsRange>("1h");
-  const { data, isPending, isError, error, refetch, isFetching } = useMetricsHistory(range);
+  const { data, isPending, isError, error, refetch, isFetching, isPlaceholderData, dataUpdatedAt } =
+    useMetricsHistory(range);
   const headingId = useId();
   const tabsId = useId();
 
@@ -390,6 +393,14 @@ function HistorySection({ memTotal }: { memTotal: number | undefined }) {
     };
   }, [data, memTotal]);
 
+  // Janela fixa do período dos dados exibidos, ancorada no momento da busca:
+  // buracos no começo e no fim aparecem e o eixo não se mexe a cada render.
+  const domain = useMemo<[number, number] | undefined>(() => {
+    if (!data || !dataUpdatedAt) return undefined;
+    const now = Math.floor(dataUpdatedAt / 1000);
+    return [now - RANGE_SECONDS[data.range], now];
+  }, [data, dataUpdatedAt]);
+
   const step = data?.stepSeconds ?? 60;
   const body = (chart: ReactNode) =>
     isPending ? (
@@ -404,10 +415,13 @@ function HistorySection({ memTotal }: { memTotal: number | undefined }) {
   return (
     <section aria-labelledby={headingId}>
       <SectionHeading id={headingId} title="Histórico">
-        <Tabs id={tabsId} label="Período do histórico" items={RANGES} value={range} onChange={setRange} />
+        <div className="flex items-center gap-3">
+          {isPlaceholderData && <Spinner size="sm" label="Carregando o novo período…" />}
+          <Tabs id={tabsId} label="Período do histórico" items={RANGES} value={range} onChange={setRange} />
+        </div>
       </SectionHeading>
       <div role="tabpanel" id={tabPanelId(tabsId)} aria-labelledby={tabId(tabsId, range)}>
-        {isError ? (
+        {isError && !data ? (
           <Alert variant="danger" title="Não foi possível carregar o histórico.">
             <p>{error.message}</p>
             <Button size="sm" className="mt-2" loading={isFetching} onClick={() => void refetch()}>
@@ -415,19 +429,49 @@ function HistorySection({ memTotal }: { memTotal: number | undefined }) {
             </Button>
           </Alert>
         ) : (
-          <div className="grid gap-4 xl:grid-cols-3">
-            <Panel title="Uso de CPU" headingLevel={3}>
-              {body(<LineChart series={series.cpu} stepSeconds={step} format={formatPercent} yMax={100} />)}
-            </Panel>
-            <Panel title="Memória usada" headingLevel={3}>
-              {body(
-                <LineChart series={series.mem} stepSeconds={step} format={formatBytes} yMax={series.memTotal} />,
+          <>
+            {isError && (
+              <Alert variant="warning" className="mb-3" title="Não foi possível atualizar o histórico.">
+                <p>Mostrando os últimos dados recebidos. {error.message}</p>
+                <Button size="sm" className="mt-2" loading={isFetching} onClick={() => void refetch()}>
+                  Tentar novamente
+                </Button>
+              </Alert>
+            )}
+            <div
+              aria-busy={isPlaceholderData || undefined}
+              className={cn(
+                "grid gap-4 xl:grid-cols-3 motion-safe:transition-opacity",
+                isPlaceholderData && "opacity-60",
               )}
-            </Panel>
-            <Panel title="Tráfego de rede" headingLevel={3}>
-              {body(<LineChart series={series.net} stepSeconds={step} format={formatRate} />)}
-            </Panel>
-          </div>
+            >
+              <Panel title="Uso de CPU" headingLevel={3}>
+                {body(
+                  <LineChart
+                    series={series.cpu}
+                    stepSeconds={step}
+                    format={formatPercent}
+                    yMax={100}
+                    domain={domain}
+                  />,
+                )}
+              </Panel>
+              <Panel title="Memória usada" headingLevel={3}>
+                {body(
+                  <LineChart
+                    series={series.mem}
+                    stepSeconds={step}
+                    format={formatBytes}
+                    yMax={series.memTotal}
+                    domain={domain}
+                  />,
+                )}
+              </Panel>
+              <Panel title="Tráfego de rede" headingLevel={3}>
+                {body(<LineChart series={series.net} stepSeconds={step} format={formatRate} domain={domain} />)}
+              </Panel>
+            </div>
+          </>
         )}
       </div>
     </section>

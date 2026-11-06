@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import VisaoGeralPage from "../(painel)/page";
 
@@ -55,6 +55,18 @@ const system = {
   uptimeSeconds: 3600,
 };
 
+const hp = (t: number) => ({
+  t,
+  cpuPercent: 20,
+  memUsedBytes: GiB,
+  memTotalBytes: 8 * GiB,
+  load1: 0.1,
+  netRxBytesPerSec: 100,
+  netTxBytesPerSec: 50,
+  diskUsedBytes: GiB,
+  diskTotalBytes: 2 * GiB,
+});
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
@@ -88,11 +100,12 @@ function mockApi(over: Routes = {}) {
 
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const view = render(
     <QueryClientProvider client={client}>
       <VisaoGeralPage />
     </QueryClientProvider>,
   );
+  return { ...view, client };
 }
 
 beforeEach(() => {
@@ -137,7 +150,11 @@ describe("Visão geral", () => {
   it("bloco PM2 some quando available é false e avisa quando o daemon está parado", async () => {
     mockApi();
     const first = renderPage();
-    await screen.findByText("Containers: 1 rodando de 2");
+    // Só afirma a ausência depois que /api/pm2 respondeu e a resposta foi renderizada.
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/pm2", expect.anything()));
+    await waitFor(() => expect(first.client.getQueryState(["pm2"])?.status).toBe("success"));
+    await act(async () => {});
+    expect(first.client.getQueryData(["pm2"])).toEqual({ available: false, daemonRunning: false, processes: [] });
     expect(screen.queryByRole("region", { name: "Processos PM2" })).toBeNull();
     first.unmount();
 
@@ -174,6 +191,41 @@ describe("Visão geral", () => {
     expect(within(row).getByText("50,0 MiB")).toBeInTheDocument();
     expect(within(row).getByText("3")).toBeInTheDocument();
     expect(within(row).getByText("/srv/api")).toBeInTheDocument();
+  });
+
+  it("troca de período mantém os gráficos montados enquanto o novo chega", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    let release24h: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release24h = r;
+    });
+    mockApi();
+    const base = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      const u = String(url);
+      if (u === "/api/metrics/history?range=1h") {
+        return json({ range: "1h", stepSeconds: 60, points: [hp(now - 120), hp(now - 60)] });
+      }
+      if (u === "/api/metrics/history?range=24h") {
+        await gate;
+        return json({ range: "24h", stepSeconds: 60, points: [hp(now - 60)] });
+      }
+      return base(url as string, init);
+    });
+    renderPage();
+    const cpuChart = await screen.findByRole("region", { name: "Uso de CPU" });
+    await within(cpuChart).findByRole("img");
+
+    fireEvent.click(screen.getByRole("tab", { name: "24h" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/metrics/history?range=24h", expect.anything()));
+    // Enquanto o 24h não chega, o gráfico de 1h continua na tela, sem spinner por painel.
+    expect(within(cpuChart).getByRole("img")).toBeInTheDocument();
+    expect(screen.queryByText("Carregando histórico…")).toBeNull();
+    expect(screen.getByText("Carregando o novo período…")).toBeInTheDocument();
+
+    await act(async () => release24h());
+    await waitFor(() => expect(screen.queryByText("Carregando o novo período…")).toBeNull());
+    expect(within(cpuChart).getByRole("img")).toBeInTheDocument();
   });
 
   it("resumo de containers mostra Docker indisponível em 503", async () => {
