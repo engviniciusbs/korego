@@ -5,6 +5,7 @@ import (
 	"context"
 
 	"github.com/engviniciusbs/korego/internal/node"
+	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/node/metrics"
 )
 
@@ -12,6 +13,7 @@ import (
 type Fake struct {
 	InfoFn        func(ctx context.Context) (node.HostInfo, error)
 	MetricsSource metrics.Source
+	DockerClient  docker.Client
 }
 
 var _ node.Node = (*Fake)(nil)
@@ -21,3 +23,6 @@ func (f *Fake) Info(ctx context.Context) (node.HostInfo, error) { return f.InfoF
 
 // Metrics devolve MetricsSource.
 func (f *Fake) Metrics() metrics.Source { return f.MetricsSource }
+
+// Docker devolve DockerClient.
+func (f *Fake) Docker() docker.Client { return f.DockerClient }

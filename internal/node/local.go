@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/node/metrics"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/host"
@@ -13,15 +14,21 @@ import (
 // Local é o Node que representa a máquina onde o KoreGO roda.
 type Local struct {
 	metrics *metrics.Local
+	docker  *docker.Local
 }
 
 // NewLocal cria o Node local.
-func NewLocal() *Local { return &Local{metrics: metrics.NewLocal()} }
+func NewLocal() *Local {
+	return &Local{metrics: metrics.NewLocal(), docker: docker.NewLocal()}
+}
 
 var _ Node = (*Local)(nil)
 
 // Metrics devolve a fonte de métricas do host local.
 func (l *Local) Metrics() metrics.Source { return l.metrics }
+
+// Docker devolve o cliente do Docker local.
+func (l *Local) Docker() docker.Client { return l.docker }
 
 // Info lê as informações do host local.
 func (l *Local) Info(ctx context.Context) (HostInfo, error) {

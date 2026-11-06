@@ -4,6 +4,7 @@ package node
 import (
 	"context"
 
+	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/node/metrics"
 )
 
@@ -25,4 +26,6 @@ type Node interface {
 	Info(ctx context.Context) (HostInfo, error)
 	// Metrics devolve a fonte de métricas do host.
 	Metrics() metrics.Source
+	// Docker devolve o cliente Docker do node.
+	Docker() docker.Client
 }
