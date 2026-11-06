@@ -5,3 +5,4 @@ export { Input, type InputProps, type InputSize } from "./input";
 export { Label, type LabelProps } from "./label";
 export { Panel, type PanelProps, type PanelSize, type PanelVariant } from "./panel";
 export { Spinner, type SpinnerProps, type SpinnerSize } from "./spinner";
+export { Tabs, tabId, tabPanelId, type TabItem, type TabsProps } from "./tabs";
