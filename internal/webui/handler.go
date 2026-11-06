@@ -41,6 +41,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveFile(w, r, name)
 		return
 	}
+	if seg, ok := segmentFile(name); ok && isFile(h.fsys, seg) {
+		h.serveFile(w, r, seg)
+		return
+	}
 	if name == "." || isDir(h.fsys, name) {
 		idx := path.Join(name, "index.html")
 		if name == "." {
@@ -60,6 +64,23 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.notFound(w, r)
+}
+
+// segmentFile traduz o pedido de prefetch de segmento do Next 16: o cliente
+// pede <dir>/__next.<seg1>.<seg2>....txt, mas o export grava
+// <dir>/__next.<seg1>/<seg2>/....txt. Chaves de segmento não têm ".".
+func segmentFile(name string) (string, bool) {
+	dir, base := path.Split(name)
+	key, ok := strings.CutPrefix(base, "__next.")
+	if !ok {
+		return "", false
+	}
+	key, ok = strings.CutSuffix(key, ".txt")
+	if !ok || key == "" {
+		return "", false
+	}
+	// Caminhos inválidos ("a//b", "..") são recusados pelo fs.FS.
+	return dir + "__next." + strings.ReplaceAll(key, ".", "/") + ".txt", true
 }
 
 func (h *handler) notFound(w http.ResponseWriter, r *http.Request) {
