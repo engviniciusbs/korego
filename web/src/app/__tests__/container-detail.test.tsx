@@ -138,11 +138,9 @@ describe("Detalhe do container", () => {
     act(() => ws.msg(topic, { running: false }));
     expect(screen.getByText("Container parado")).toBeInTheDocument();
 
-    // Amostra nova limpa o aviso; a amostra vazia que o Docker manda com o container parado conta como parado.
+    // Amostra nova limpa o aviso.
     act(() => ws.msg(topic, { cpuPercent: 1, memUsedBytes: 1024, memLimitBytes: 2048 }));
     expect(screen.queryByText("Container parado")).not.toBeInTheDocument();
-    act(() => ws.msg(topic, { cpuPercent: 0, memUsedBytes: 0, memLimitBytes: 0 }));
-    expect(screen.getByText("Container parado")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: "Detalhes" }));
     expect(subs(ws, "unsubscribe")).toContain(topic);

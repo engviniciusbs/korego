@@ -64,9 +64,8 @@ export function StatsPanel({ containerId }: { containerId: string }) {
       setS((p) => ({ ...p, error: streamErrors[msg.error!] ?? msg.error! }));
       return;
     }
-    // Com o container parado o Docker continua mandando amostras vazias (limite 0),
-    // em vez de encerrar o stream; um container rodando sempre tem limite de memória.
-    if (msg.running === false || !msg.memLimitBytes) {
+    // Container parado: o servidor encerra o stream e publica {running:false}.
+    if (msg.running === false) {
       setS((p) => ({ ...p, stopped: true }));
       return;
     }

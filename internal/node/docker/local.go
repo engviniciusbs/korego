@@ -200,7 +200,14 @@ func (l *Local) Stats(ctx context.Context, id string, fn func(Stats)) error {
 		return mapErr(err)
 	}
 	defer res.Body.Close()
-	dec := json.NewDecoder(res.Body)
+	return decodeStats(ctx, res.Body, fn)
+}
+
+// decodeStats lê o stream de amostras e chama fn a cada uma. Com o container
+// parado, o Docker não encerra o stream: manda amostras com read zerado a
+// cada segundo. A primeira delas encerra o stream (nil).
+func decodeStats(ctx context.Context, r io.Reader, fn func(Stats)) error {
+	dec := json.NewDecoder(r)
 	for {
 		var s container.StatsResponse
 		if err := dec.Decode(&s); err != nil {
@@ -211,6 +218,9 @@ func (l *Local) Stats(ctx context.Context, id string, fn func(Stats)) error {
 				return nil
 			}
 			return mapErr(err)
+		}
+		if s.Read.IsZero() {
+			return nil
 		}
 		fn(toStats(container.StatsResponse{CPUStats: s.PreCPUStats}, s))
 	}

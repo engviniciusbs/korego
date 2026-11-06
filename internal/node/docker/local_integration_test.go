@@ -146,6 +146,21 @@ func TestLocal_StatsAndEvents(t *testing.T) {
 	assert.Equal(t, 2, n)
 }
 
+func TestLocal_StatsStoppedContainerEnds(t *testing.T) {
+	id := runBusybox(t, "sleep", "300")
+	out, err := exec.Command("docker", "stop", "-t", "0", id).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var n int
+	// Parado, o stream termina sozinho (nil), sem amostras, antes do timeout.
+	err = NewLocal().Stats(ctx, id, func(Stats) { n++ })
+	require.NoError(t, err)
+	assert.NoError(t, ctx.Err())
+	assert.Equal(t, 0, n)
+}
+
 func TestLocal_UnavailableSocket(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "unix:///nao/existe")
 	l := NewLocal()
