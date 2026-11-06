@@ -115,6 +115,9 @@ func serve(args []string) error {
 	nd := node.NewLocal()
 	hub := events.NewHub()
 	hub.RegisterSource("system", api.SystemSource(nd, 5*time.Second))
+	hub.RegisterSource("containers", monitor.ContainerEventsSource(nd.Docker(), 5*time.Second))
+	hub.RegisterSource("container-logs", monitor.ContainerLogsSource(nd.Docker(), 2*time.Second))
+	hub.RegisterSource("container-stats", monitor.ContainerStatsSource(nd.Docker(), 2*time.Second))
 
 	collector := &monitor.Collector{Source: nd.Metrics(), Hub: hub, DB: db}
 
