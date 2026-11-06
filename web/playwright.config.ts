@@ -16,6 +16,10 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
+  projects: [
+    { name: "fundacao", testMatch: /fundacao\.spec\.ts/ },
+    { name: "containers", testMatch: /containers\.spec\.ts/, dependencies: ["fundacao"] },
+  ],
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
   use: {
     baseURL: `http://localhost:${PORT}`,

@@ -3,9 +3,7 @@ import { hostname } from "node:os";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import { generate } from "otplib";
-
-const EMAIL = "admin@exemplo.com";
-const PASSWORD = "senha-de-teste-muito-longa-123";
+import { EMAIL, PASSWORD, saveAdmin } from "./helpers";
 
 test("fundação: setup, painel, logout, login com código de recuperação e auditoria", async ({ page }) => {
   // / -> /setup/ (nenhum usuário ainda)
@@ -38,6 +36,8 @@ test("fundação: setup, painel, logout, login com código de recuperação e au
     .map((t) => t.match(/[a-z0-9]{5}-[a-z0-9]{5}/i)?.[0])
     .filter((c): c is string => Boolean(c));
   expect(recoveryCodes).toHaveLength(10);
+  // O primeiro código é consumido abaixo; os demais ficam para os outros specs.
+  saveAdmin({ email: EMAIL, password: PASSWORD, recoveryCodes: recoveryCodes.slice(1) });
   await page.getByLabel("Guardei meus códigos").check();
   await page.getByRole("button", { name: "Ir para o painel" }).click();
 
