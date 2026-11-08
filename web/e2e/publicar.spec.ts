@@ -94,13 +94,21 @@ async function waitProxyActive(page: Page): Promise<void> {
   }
 }
 
-/** Uma requisição pelo Caddy: status HTTP, ou o erro de conexão. */
-async function probe(request: APIRequestContext): Promise<{ status: number | string; body: string }> {
+/**
+ * Uma requisição pelo Caddy. Só vale como ok com 200 E a página do nginx: sem
+ * rota para o Host, o Caddy responde 200 com corpo vazio. `desc` traz o status
+ * (ou o erro de conexão) e um trecho do corpo, para a mensagem de falha.
+ */
+async function probe(request: APIRequestContext): Promise<{ ok: boolean; desc: string }> {
   try {
     const r = await request.get(PROXY_URL, { headers: { Host: HOST }, maxRedirects: 0, timeout: 10_000 });
-    return { status: r.status(), body: await r.text() };
+    const body = await r.text();
+    return {
+      ok: r.status() === 200 && body.includes(NGINX_PAGE),
+      desc: `${r.status()} ${JSON.stringify(body.slice(0, 120))}`,
+    };
   } catch (err) {
-    return { status: err instanceof Error ? err.message.split("\n")[0] : String(err), body: "" };
+    return { ok: false, desc: err instanceof Error ? err.message.split("\n")[0] : String(err) };
   }
 }
 
@@ -171,7 +179,10 @@ test("publicar: projeto, app por imagem, deploy, domínio, deploy sem queda, rol
   await page.getByRole("link", { name: `Ver log do deploy #${d1}` }).click();
   await expect(page).toHaveURL(new RegExp(`/deploys/detalhe/\\?id=${d1}`));
   const log1 = await expectDeployLive(page, d1, 120_000);
-  await expect(log1.getByRole("region", { name: `Saída do deploy #${d1}` })).toContainText("==> Baixando a imagem");
+  const out1 = log1.getByRole("region", { name: `Saída do deploy #${d1}` });
+  await expect(out1).toContainText("==> Baixando a imagem");
+  // Saída real do pull: a linha final do Docker, com a imagem já local (CI) ou baixada agora.
+  await expect(out1).toContainText(/Status: (Image is up to date|Downloaded newer image) for nginx:1-alpine/);
 
   // 3. Domínio, sem forçar HTTPS
   await page.goto("/dominios/");
@@ -199,18 +210,19 @@ test("publicar: projeto, app por imagem, deploy, domínio, deploy sem queda, rol
   await expect
     .poll(async () => {
       const r = await probe(request);
-      return r.status === 200 && r.body.includes(NGINX_PAGE) ? "ok" : `${r.status}`;
+      return r.ok ? "ok" : r.desc;
     }, { timeout: 60_000, intervals: [500, 1_000, 2_000] })
     .toBe("ok");
 
-  // 5. Segundo deploy com um laço de requisições pelo proxy: nenhuma resposta ≠ 200
+  // 5. Segundo deploy com um laço de requisições pelo proxy: toda resposta é 200 com a página do nginx.
+  // 3 requisições sobrepostas a cada ~100 ms estreitam a janela em que um 502 curto escaparia.
   await page.goto(appTab("visao"));
   await expect(page.getByRole("heading", { name: SLUG, level: 1 })).toBeVisible();
   let stop = false;
-  const results: (number | string)[] = [];
+  const results: { ok: boolean; desc: string }[] = [];
   const loop = (async () => {
     while (!stop || results.length < 10) {
-      results.push((await probe(request)).status);
+      results.push(...(await Promise.all([probe(request), probe(request), probe(request)])));
       await new Promise((r) => setTimeout(r, 100));
     }
   })();
@@ -226,8 +238,8 @@ test("publicar: projeto, app por imagem, deploy, domínio, deploy sem queda, rol
     await loop;
   }
   await expect(statusCell(page, d2)).toHaveText("No ar");
-  const failures = results.filter((s) => s !== 200);
-  expect(failures, `respostas ≠ 200 durante a troca (${results.length} requisições)`).toEqual([]);
+  const failures = results.filter((r) => !r.ok).map((r) => r.desc);
+  expect(failures, `respostas sem a página do nginx durante a troca (${results.length} requisições)`).toEqual([]);
   expect(results.length).toBeGreaterThanOrEqual(10);
 
   // 6. O primeiro foi substituído
@@ -247,7 +259,7 @@ test("publicar: projeto, app por imagem, deploy, domínio, deploy sem queda, rol
   await expect(page).toHaveURL(new RegExp(`/deploys/detalhe/\\?id=${d3}`));
   await expectDeployLive(page, d3, 120_000);
   const after = await probe(request);
-  expect(after.status).toBe(200);
+  expect(after.ok, `depois do rollback: ${after.desc}`).toBe(true);
   await page.goto(appTab("deploys"));
   await expect(statusCell(page, d3)).toHaveText("No ar");
   await expect(statusCell(page, d2)).toHaveText("Substituído", { timeout: 30_000 });
