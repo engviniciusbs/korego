@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useId, useState, type FormEvent, type ReactNode } from "react";
 import { AppForm, COMPOSE_WARNING } from "@/components/apps/app-form";
 import { EnvEditor } from "@/components/apps/env-editor";
+import { DeployList } from "@/components/deploys/deploy-list";
 import { linkCls } from "@/components/apps/form-bits";
 import {
   AppStatus,
@@ -18,7 +19,7 @@ import {
   projectHref,
   shortSha,
 } from "@/components/apps/page-bits";
-import { PageHeader, PanelState } from "@/components/shell/page-header";
+import { PageHeader } from "@/components/shell/page-header";
 import { Alert, Button, Dialog, Input, Label, Panel, Tabs, tabId, tabPanelId } from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import { useApp, useDeleteApp, type AppView } from "@/lib/apps";
@@ -362,13 +363,7 @@ function AppDetail({ id, initialTab }: { id: number; initialTab: Tab }) {
 
       <div role="tabpanel" id={tabPanelId(tabsId)} aria-labelledby={tabId(tabsId, tab)}>
         {tab === "visao" && <Overview app={a} onDeployed={() => changeTab("deploys")} onOpenDeploys={() => changeTab("deploys")} />}
-        {tab === "deploys" && (
-          <Panel title="Deploys" size="sm">
-            <PanelState>
-              <span>Lista de deploys</span>
-            </PanelState>
-          </Panel>
-        )}
+        {tab === "deploys" && <DeployList app={a} />}
         {envOpened && (
           <div hidden={tab !== "variaveis"}>
             <EnvEditor appId={a.id} />

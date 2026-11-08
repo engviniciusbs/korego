@@ -176,7 +176,7 @@ describe("Aplicação", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Deploy agora" }));
     await waitFor(() => expect(screen.getByRole("tab", { name: "Deploys" })).toHaveAttribute("aria-selected", "true"));
-    expect(screen.getByText("Lista de deploys")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Deploys" })).toBeInTheDocument();
   });
 
   it("visão mostra o último deploy que falhou", async () => {
