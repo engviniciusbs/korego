@@ -1,0 +1,117 @@
+{
+  "admin": {
+    "listen": "127.0.0.1:2019"
+  },
+  "apps": {
+    "http": {
+      "servers": {
+        "korego_https": {
+          "listen": [":443"],
+          "automatic_https": {
+            "disable_redirects": true
+          },
+          "routes": [
+            {
+              "match": [{"host": ["api.exemplo.com"]}],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [{"dial": "127.0.0.1:20002"}]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "match": [{"host": ["app.exemplo.com"]}],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [{"dial": "127.0.0.1:20001"}]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "match": [{"host": ["exemplo.com"]}],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [{"dial": "127.0.0.1:20003"}]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "match": [{"host": ["www.exemplo.com"]}],
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 308,
+                  "headers": {"Location": ["https://exemplo.com{http.request.uri}"]}
+                }
+              ],
+              "terminal": true
+            }
+          ]
+        },
+        "korego_http": {
+          "listen": [":80"],
+          "routes": [
+            {
+              "match": [{"host": ["api.exemplo.com"]}],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [{"dial": "127.0.0.1:20002"}]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "match": [{"host": ["app.exemplo.com"]}],
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 308,
+                  "headers": {"Location": ["https://{http.request.host}{http.request.uri}"]}
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "match": [{"host": ["exemplo.com"]}],
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 308,
+                  "headers": {"Location": ["https://{http.request.host}{http.request.uri}"]}
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "match": [{"host": ["www.exemplo.com"]}],
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 308,
+                  "headers": {"Location": ["https://exemplo.com{http.request.uri}"]}
+                }
+              ],
+              "terminal": true
+            }
+          ]
+        }
+      }
+    },
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "subjects": ["api.exemplo.com", "app.exemplo.com", "exemplo.com", "www.exemplo.com"]
+          }
+        ]
+      }
+    }
+  }
+}
