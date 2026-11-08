@@ -129,7 +129,7 @@ make web && make build
 cd web && pnpm exec playwright install chromium && pnpm test:e2e
 ```
 
-O teste ponta a ponta sobe o binário em `:18000` com dados temporários e percorre: setup, 2FA, visão geral, logout, login com código de recuperação e auditoria. Um segundo spec cria um container `busybox` de teste e percorre lista, logs, parar, remover e auditoria; ele é pulado se o Docker não estiver disponível.
+O teste ponta a ponta sobe o binário em `:18000` com dados temporários e percorre: setup, 2FA, visão geral, logout, login com código de recuperação e auditoria. Um segundo spec cria um container `busybox` de teste e percorre lista, logs, parar, remover e auditoria; ele é pulado se o Docker não estiver disponível. O terceiro (`publicar`) cria um projeto e uma aplicação pela imagem `nginx:1-alpine`, faz o deploy, aponta `site-e2e.korego.localhost` pelo Caddy, refaz o deploy sem nenhuma requisição falhar, volta a versão e confere a auditoria; ele precisa de Linux com Docker e as portas 80/443 livres, e fora do CI é pulado sem isso.
 
 ## Segurança
 
