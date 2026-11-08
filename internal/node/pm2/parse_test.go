@@ -26,7 +26,7 @@ func TestParseJList(t *testing.T) {
 	require.Len(t, ps, 2)
 
 	assert.Equal(t, Process{
-		Name: "api-exemplo", PMID: 0, Status: "online", CPUPercent: 1.5,
+		Name: "api-exemplo", PMID: 0, PID: 4242, Status: "online", CPUPercent: 1.5,
 		MemoryBytes: 73400320, Restarts: 3, Cwd: "/srv/exemplo", UptimeSeconds: 90,
 	}, ps[0])
 	assert.Equal(t, Process{
@@ -66,4 +66,14 @@ func TestParseJList_DropsEnv(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(out), "SEGREDO_TESTE")
 	assert.NotContains(t, string(out), "valor-ficticio")
+}
+
+func TestParseJList_PID(t *testing.T) {
+	b, err := os.ReadFile("testdata/jlist.json")
+	require.NoError(t, err)
+	ps, err := parseJList(b, time.Now())
+	require.NoError(t, err)
+	require.Len(t, ps, 2)
+	assert.Equal(t, 4242, ps[0].PID)
+	assert.Equal(t, 0, ps[1].PID)
 }

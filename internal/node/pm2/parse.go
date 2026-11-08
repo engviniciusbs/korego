@@ -16,6 +16,7 @@ var jsonStart = regexp.MustCompile(`\[\s*[\{\]]`)
 type jlistItem struct {
 	Name  string `json:"name"`
 	PMID  int    `json:"pm_id"`
+	PID   int    `json:"pid"`
 	Monit struct {
 		Memory uint64  `json:"memory"`
 		CPU    float64 `json:"cpu"`
@@ -45,6 +46,7 @@ func parseJList(out []byte, now time.Time) ([]Process, error) {
 		p := Process{
 			Name:        it.Name,
 			PMID:        it.PMID,
+			PID:         it.PID,
 			Status:      it.Env.Status,
 			CPUPercent:  it.Monit.CPU,
 			MemoryBytes: it.Monit.Memory,
