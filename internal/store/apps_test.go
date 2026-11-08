@@ -123,3 +123,38 @@ func TestUsedHostPorts(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, map[int]bool{20001: true, 20002: true, 20003: true}, got)
 }
+
+func TestApps_UpdateAppConfigKeepsPortAndCurrent(t *testing.T) {
+	db := OpenMemory(t)
+	ctx := context.Background()
+	a := mkApp(t, db, "cfg")
+	m := &Deploy{AppID: a.ID, Trigger: "manual", Status: "running"}
+	require.NoError(t, db.InsertDeploy(ctx, m))
+	require.NoError(t, db.SetCurrentDeploy(ctx, a.ID, m.ID))
+	require.NoError(t, db.SetAppHostPort(ctx, a.ID, 20123))
+
+	stale := *a // cópia antiga: host_port 0 e sem deploy atual
+	stale.InternalPort = 9090
+	require.NoError(t, db.UpdateAppConfig(ctx, &stale))
+	g, err := db.GetApp(ctx, a.ID)
+	require.NoError(t, err)
+	require.Equal(t, 9090, g.InternalPort)
+	require.Equal(t, 20123, g.HostPort)
+	require.NotNil(t, g.CurrentDeployID)
+	require.Equal(t, m.ID, *g.CurrentDeployID)
+	require.ErrorIs(t, db.UpdateAppConfig(ctx, &App{ID: 999, ProjectID: a.ProjectID, Slug: "z"}), ErrNotFound)
+}
+
+func TestApps_SetAppHostPortOnlyPort(t *testing.T) {
+	db := OpenMemory(t)
+	ctx := context.Background()
+	a := mkApp(t, db, "port")
+	require.NoError(t, db.SetAppHostPort(ctx, a.ID, 20001))
+	g, err := db.GetApp(ctx, a.ID)
+	require.NoError(t, err)
+	want := *a
+	want.HostPort, want.UpdatedAt = 20001, g.UpdatedAt
+	require.Equal(t, want, g)
+	require.NoError(t, db.SetAppHostPort(ctx, a.ID, 0))
+	require.ErrorIs(t, db.SetAppHostPort(ctx, 999, 1), ErrNotFound)
+}

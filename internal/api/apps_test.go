@@ -294,9 +294,14 @@ func TestAppsAPI_DeleteRemovesContainersImagesAndDir(t *testing.T) {
 	pid := f.project(t)
 	_, b := f.call(t, http.MethodPost, "/api/apps", imageApp(pid, "web"))
 	id := appID(b)
+	swept := false
 	f.dock.ListByLabelFn = func(_ context.Context, k, v string) ([]docker.Container, error) {
 		assert.Equal(t, "korego.app", k)
 		assert.Equal(t, "web", v)
+		if swept {
+			return nil, nil
+		}
+		swept = true
 		return []docker.Container{{ID: "c1"}, {ID: "c2"}}, nil
 	}
 	var imgRemoved []string
@@ -355,4 +360,67 @@ func TestAppsAPI_DeleteComposeAndFailureKeepsRow(t *testing.T) {
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
 	require.Eventually(t, cond, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestAppsAPI_UpdateKeepsHostPort(t *testing.T) {
+	f := newAppsFx(t)
+	pid := f.project(t)
+	_, b := f.call(t, http.MethodPost, "/api/apps", imageApp(pid, "web"))
+	id := appID(b)
+	require.NoError(t, f.db.SetAppHostPort(context.Background(), id, 20123))
+
+	in := imageApp(pid, "web")
+	in["internalPort"] = 8081
+	code, b := f.call(t, http.MethodPut, "/api/apps/"+itoa(id), in)
+	require.Equal(t, http.StatusOK, code, b)
+	assert.EqualValues(t, 20123, b["app"].(map[string]any)["hostPort"])
+	g, err := f.db.GetApp(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, 20123, g.HostPort)
+	assert.Equal(t, 8081, g.InternalPort)
+}
+
+func TestAppsAPI_DeleteSweepsAndBlocksDeploy(t *testing.T) {
+	f := newAppsFx(t)
+	pid := f.project(t)
+	_, b := f.call(t, http.MethodPost, "/api/apps", imageApp(pid, "web"))
+	id := appID(b)
+	calls := 0
+	f.dock.ListByLabelFn = func(context.Context, string, string) ([]docker.Container, error) {
+		calls++
+		if calls == 2 { // um deploy criou um container durante a remoção
+			return []docker.Container{{ID: "late"}}, nil
+		}
+		return nil, nil
+	}
+	// Durante a remoção, o deploy é recusado.
+	f.dock.RemoveForceFn = func(_ context.Context, cid string) error {
+		code, e := f.call(t, http.MethodPost, "/api/apps/"+itoa(id)+"/deploys", nil)
+		assert.Equal(t, http.StatusConflict, code)
+		assert.Equal(t, "APP_DELETING", errCode(e))
+		f.removed = append(f.removed, cid)
+		return nil
+	}
+	code, _ := f.call(t, http.MethodDelete, "/api/apps/"+itoa(id), nil)
+	require.Equal(t, http.StatusNoContent, code)
+	assert.Equal(t, []string{"late"}, f.removed)
+	assert.GreaterOrEqual(t, calls, 2)
+}
+
+func TestAppsAPI_EnvAuditCapped(t *testing.T) {
+	f := newAppsFx(t)
+	pid := f.project(t)
+	_, b := f.call(t, http.MethodPost, "/api/apps", imageApp(pid, "web"))
+	id := itoa(appID(b))
+	set := map[string]string{}
+	for i := 0; i < 80; i++ {
+		set["V"+strconv.Itoa(1000+i)] = "valor-secreto"
+	}
+	code, _ := f.call(t, http.MethodPut, "/api/apps/"+id+"/env", map[string]any{"set": set})
+	require.Equal(t, http.StatusNoContent, code)
+	w := f.do(t, http.MethodGet, "/api/audit", nil, withCookie(f.cookie))
+	body := w.Body.String()
+	assert.Contains(t, body, `"setCount":80`)
+	assert.NotContains(t, body, "V1079")
+	assert.NotContains(t, body, "valor-secreto")
 }

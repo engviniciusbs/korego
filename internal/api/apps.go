@@ -314,12 +314,12 @@ func (h appHandlers) create(w http.ResponseWriter, r *http.Request) {
 
 // update serves PUT /api/apps/{id}. O slug é imutável.
 func (h appHandlers) update(w http.ResponseWriter, r *http.Request) {
-	cur, ok := h.loadApp(w, r)
-	if !ok {
-		return
-	}
 	var in AppInput
 	if !decodeJSON(w, r, &in) {
+		return
+	}
+	cur, ok := h.loadApp(w, r)
+	if !ok {
 		return
 	}
 	if in.Slug == "" {
@@ -342,8 +342,8 @@ func (h appHandlers) update(w http.ResponseWriter, r *http.Request) {
 		writeFieldError(w, http.StatusBadRequest, "INVALID_APP", ae.msg, ae.field)
 		return
 	}
-	a.ID, a.HostPort, a.CurrentDeployID = cur.ID, cur.HostPort, cur.CurrentDeployID
-	if err := h.db.UpdateApp(ctx, &a); err != nil {
+	a.ID = cur.ID
+	if err := h.db.UpdateAppConfig(ctx, &a); err != nil {
 		record(h.svc, r, "app.update", cur.Slug, map[string]any{"ok": false})
 		if errors.Is(err, store.ErrNotFound) {
 			appNotFound(w)
@@ -422,20 +422,33 @@ func (h appHandlers) teardown(ctx context.Context, a store.App) error {
 			}
 		}
 	} else {
-		cs, err := h.deploys.Docker.ListByLabel(ctx, "korego.app", a.Slug)
-		if err != nil {
+		if err := h.removeLabeled(ctx, a.Slug); err != nil {
 			return err
 		}
-		for _, c := range cs {
-			if err := h.deploys.Docker.RemoveForce(ctx, c.ID); err != nil && !errors.Is(err, docker.ErrNotFound) {
-				return err
-			}
-		}
+	}
+	// Segunda varredura: pega o que um deploy em curso criou durante a remoção
+	// (inclusive containers Compose, que carregam korego.app pelo override).
+	if err := h.removeLabeled(ctx, a.Slug); err != nil {
+		return err
 	}
 	if err := deploy.Cleanup(ctx, h.deploys.Docker, a, nil, io.Discard); err != nil {
 		return err
 	}
 	return os.RemoveAll(dir)
+}
+
+// removeLabeled remove à força todo container com korego.app=<slug>.
+func (h appHandlers) removeLabeled(ctx context.Context, slug string) error {
+	cs, err := h.deploys.Docker.ListByLabel(ctx, "korego.app", slug)
+	if err != nil {
+		return err
+	}
+	for _, c := range cs {
+		if err := h.deploys.Docker.RemoveForce(ctx, c.ID); err != nil && !errors.Is(err, docker.ErrNotFound) {
+			return err
+		}
+	}
+	return nil
 }
 
 // remove serves DELETE /api/apps/{id}.
@@ -446,6 +459,7 @@ func (h appHandlers) remove(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := detached(r, 5*time.Minute)
 	defer cancel()
+	defer h.deploys.BeginDelete(a.ID)()
 	ds, err := h.db.DomainsByApp(ctx, a.ID)
 	if err == nil && len(ds) > 0 {
 		record(h.svc, r, "app.delete", a.Slug, map[string]any{"ok": false})
@@ -472,6 +486,14 @@ func (h appHandlers) remove(w http.ResponseWriter, r *http.Request) {
 		record(h.svc, r, "app.delete", a.Slug, map[string]any{"ok": true})
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// capNames limita a lista da auditoria aos primeiros 50 nomes.
+func capNames(n []string) []string {
+	if len(n) > 50 {
+		return n[:50]
+	}
+	return n
 }
 
 // envNames serves GET /api/apps/{id}/env: só os nomes.
@@ -519,10 +541,14 @@ func (h appHandlers) envSet(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(remove)
 	remove = slices.Compact(remove)
 	audit := func(ok bool) {
-		record(h.svc, r, "app.env", a.Slug, map[string]any{"set": setNames, "remove": remove, "ok": ok})
+		record(h.svc, r, "app.env", a.Slug, map[string]any{
+			"set": capNames(setNames), "remove": capNames(remove),
+			"setCount": len(setNames), "removeCount": len(remove), "ok": ok})
 	}
 	if bad := h.checkEnv(r.Context(), a.ID, in.Set, setNames, remove); bad != nil {
-		audit(false)
+		// Nomes ainda não validados: a auditoria leva só as contagens.
+		record(h.svc, r, "app.env", a.Slug, map[string]any{
+			"setCount": len(setNames), "removeCount": len(remove), "ok": false})
 		envInvalid(w, bad.msg, bad.field)
 		return
 	}

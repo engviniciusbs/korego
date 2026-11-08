@@ -62,6 +62,8 @@ func deployError(w http.ResponseWriter, err error, notFound string) {
 		WriteError(w, http.StatusConflict, "ROLLBACK_NOT_SUPPORTED", "Aplicações Compose não suportam rollback.")
 	case errors.Is(err, deploy.ErrImageGone):
 		WriteError(w, http.StatusConflict, "IMAGE_GONE", "A imagem desse deploy não está mais disponível.")
+	case errors.Is(err, deploy.ErrAppDeleting):
+		WriteError(w, http.StatusConflict, "APP_DELETING", "A aplicação está sendo removida.")
 	case errors.Is(err, deploy.ErrDeployFinished):
 		WriteError(w, http.StatusConflict, "DEPLOY_FINISHED", "O deploy já terminou.")
 	case errors.Is(err, store.ErrNotFound):

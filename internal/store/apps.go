@@ -103,6 +103,39 @@ func (d *DB) UpdateApp(ctx context.Context, a *App) error {
 	return nil
 }
 
+// UpdateAppConfig atualiza só a configuração editável: nunca toca em host_port
+// nem em current_deploy_id, que pertencem ao pipeline de deploy. Id inexistente
+// → ErrNotFound; slug repetido → ErrConflict.
+func (d *DB) UpdateAppConfig(ctx context.Context, a *App) error {
+	now := time.Now().Unix()
+	res, err := d.sql.ExecContext(ctx,
+		`UPDATE apps SET project_id = ?, slug = ?, source_type = ?, repo = ?, image = ?, build_type = ?,
+		   branch = ?, dockerfile_path = ?, compose_path = ?, compose_service = ?, internal_port = ?,
+		   health_timeout_s = ?, auto_deploy = ?, updated_at = ? WHERE id = ?`,
+		a.ProjectID, a.Slug, a.SourceType, a.Repo, a.Image, a.BuildType, a.Branch, a.DockerfilePath,
+		a.ComposePath, a.ComposeService, a.InternalPort, a.HealthTimeoutS, b2i(a.AutoDeploy), now, a.ID)
+	if err != nil {
+		if isUnique(err) {
+			return fmt.Errorf("aplicação %q: %w", a.Slug, ErrConflict)
+		}
+		return fmt.Errorf("atualizar aplicação: %w", err)
+	}
+	if err := needRows(res, "atualizar aplicação"); err != nil {
+		return err
+	}
+	a.UpdatedAt = time.Unix(now, 0)
+	return nil
+}
+
+// SetAppHostPort grava só apps.host_port (0 = sem porta). Id inexistente → ErrNotFound.
+func (d *DB) SetAppHostPort(ctx context.Context, appID int64, port int) error {
+	res, err := d.sql.ExecContext(ctx, `UPDATE apps SET host_port = ? WHERE id = ?`, port, appID)
+	if err != nil {
+		return fmt.Errorf("gravar porta da aplicação: %w", err)
+	}
+	return needRows(res, "gravar porta da aplicação")
+}
+
 // GetApp devolve a aplicação ou ErrNotFound.
 func (d *DB) GetApp(ctx context.Context, id int64) (App, error) {
 	return d.getApp(ctx, `WHERE id = ?`, id)

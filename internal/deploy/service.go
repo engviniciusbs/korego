@@ -31,6 +31,7 @@ var (
 	ErrRollbackUnsupported = errors.New("rollback não é suportado para aplicações Compose")
 	ErrImageGone           = errors.New("a imagem desse deploy não está mais disponível")
 	ErrDeployFinished      = errors.New("o deploy já terminou")
+	ErrAppDeleting         = errors.New("a aplicação está sendo removida")
 )
 
 // StatusTopic é o tópico do hub com as mudanças de status dos deploys.
@@ -89,6 +90,8 @@ type Service struct {
 
 	// portMu serializa "portas em uso → FreePort → reserva". inflight guarda
 	// as portas escolhidas por deploys cujo container ainda não foi gravado.
+	delMu    sync.Mutex
+	deleting map[int64]int
 	portMu   sync.Mutex
 	inflight map[int]bool
 }
@@ -194,8 +197,7 @@ func (s *Service) reserveComposePort(ctx context.Context, appID int64) (port int
 	if port, err = FreePort(used, s.listenFn()); err != nil {
 		return 0, false, err
 	}
-	a.HostPort = port
-	if err := s.DB.UpdateApp(ctx, &a); err != nil {
+	if err := s.DB.SetAppHostPort(ctx, a.ID, port); err != nil {
 		return 0, false, err
 	}
 	return port, true, nil
@@ -210,8 +212,7 @@ func (s *Service) releaseComposePort(ctx context.Context, appID int64, port int)
 	if err != nil || a.HostPort != port {
 		return
 	}
-	a.HostPort = 0
-	if err := s.DB.UpdateApp(ctx, &a); err != nil {
+	if err := s.DB.SetAppHostPort(ctx, a.ID, 0); err != nil {
 		log.Printf("app %d: liberar porta %d: %v", appID, port, err)
 	}
 }
@@ -231,12 +232,42 @@ func (s *Service) setStatus(ctx context.Context, id, appID int64, status, reason
 	s.publish(id, appID, status, reason)
 }
 
+// BeginDelete marca a app como em remoção: enquanto done não for chamado,
+// Deploy e Rollback dessa app devolvem ErrAppDeleting.
+func (s *Service) BeginDelete(appID int64) (done func()) {
+	s.delMu.Lock()
+	if s.deleting == nil {
+		s.deleting = map[int64]int{}
+	}
+	s.deleting[appID]++
+	s.delMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.delMu.Lock()
+			defer s.delMu.Unlock()
+			if s.deleting[appID]--; s.deleting[appID] <= 0 {
+				delete(s.deleting, appID)
+			}
+		})
+	}
+}
+
+func (s *Service) isDeleting(appID int64) bool {
+	s.delMu.Lock()
+	defer s.delMu.Unlock()
+	return s.deleting[appID] > 0
+}
+
 // Deploy grava um deploy queued e o coloca na fila da aplicação. Um pedido que
 // esperava na mesma aplicação vira superseded. sha e msg (opcionais) vêm do
 // webhook e são trocados pelos do clone.
 func (s *Service) Deploy(ctx context.Context, appID int64, trigger, sha, msg string) (store.Deploy, error) {
 	if trigger != "manual" && trigger != "webhook" {
 		return store.Deploy{}, fmt.Errorf("gatilho inválido: %q", trigger)
+	}
+	if s.isDeleting(appID) {
+		return store.Deploy{}, ErrAppDeleting
 	}
 	app, err := s.DB.GetApp(ctx, appID)
 	if err != nil {
@@ -255,6 +286,9 @@ func (s *Service) Deploy(ctx context.Context, appID int64, trigger, sha, msg str
 // Rollback cria um deploy que sobe de novo a imagem de fromDeployID, sem
 // buscar código nem construir.
 func (s *Service) Rollback(ctx context.Context, appID, fromDeployID int64) (store.Deploy, error) {
+	if s.isDeleting(appID) {
+		return store.Deploy{}, ErrAppDeleting
+	}
 	app, err := s.DB.GetApp(ctx, appID)
 	if err != nil {
 		return store.Deploy{}, err
@@ -409,8 +443,7 @@ func (s *Service) restorePort(ctx context.Context, app store.App, d store.Deploy
 			port = cur.HostPort
 		}
 	}
-	app.HostPort = port
-	if err := s.DB.UpdateApp(ctx, &app); err != nil {
+	if err := s.DB.SetAppHostPort(ctx, app.ID, port); err != nil {
 		log.Printf("deploy %d: restaurar porta da app: %v", d.ID, err)
 	}
 }
@@ -818,8 +851,7 @@ func (p *pipeline) swap(ctx context.Context) error {
 	}
 	prevID := cur.CurrentDeployID
 	p.oldPort = cur.HostPort
-	cur.HostPort = p.port
-	if err := s.DB.UpdateApp(ctx, &cur); err != nil {
+	if err := s.DB.SetAppHostPort(ctx, cur.ID, p.port); err != nil {
 		return fail("falha ao gravar a porta", err)
 	}
 	p.portSwapped = true
@@ -928,8 +960,7 @@ func (p *pipeline) abort(ctx context.Context, status, reason string) {
 	bg := context.WithoutCancel(ctx)
 	if p.portSwapped {
 		if back, err := s.DB.GetApp(bg, p.app.ID); err == nil {
-			back.HostPort = p.oldPort
-			if err := s.DB.UpdateApp(bg, &back); err != nil {
+			if err := s.DB.SetAppHostPort(bg, back.ID, p.oldPort); err != nil {
 				log.Printf("deploy %d: restaurar porta: %v", p.d.ID, err)
 			}
 		}

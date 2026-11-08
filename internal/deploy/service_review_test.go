@@ -170,3 +170,16 @@ func TestDeploy_PanicMarksFailed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "running", h.wait(d2.ID).Status)
 }
+
+func TestService_BeginDeleteBlocksDeployAndRollback(t *testing.T) {
+	h := newHarness(t, nil)
+	done := h.svc.BeginDelete(h.app.ID)
+	_, err := h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
+	require.ErrorIs(t, err, ErrAppDeleting)
+	_, err = h.svc.Rollback(h.ctx, h.app.ID, 1)
+	require.ErrorIs(t, err, ErrAppDeleting)
+	done()
+	done() // idempotente
+	_, err = h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
+	require.NotErrorIs(t, err, ErrAppDeleting)
+}
