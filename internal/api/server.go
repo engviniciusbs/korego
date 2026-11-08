@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/node/docker"
+	"github.com/engviniciusbs/korego/internal/secrets"
 	"github.com/engviniciusbs/korego/internal/store"
 	"github.com/engviniciusbs/korego/internal/version"
 	"github.com/go-chi/chi/v5"
@@ -34,8 +36,16 @@ type Deps struct {
 	Now func() time.Time
 	// Domains atende /api/proxy, /api/domains e /api/settings/panel (nil as desativa).
 	Domains *domains.Service
-	// Deploys executa e consulta os deploys das aplicações (rotas na Tarefa 13).
+	// Deploys executa e consulta os deploys das aplicações.
 	Deploys *deploy.Service
+	// DataDir guarda logs e diretórios das aplicações (apagados com a app).
+	DataDir string
+	// Runner executa "docker compose down" ao apagar uma app Compose (nil = ExecRunner).
+	Runner deploy.Runner
+	// Box cifra as variáveis de ambiente das aplicações (nil = a do serviço de deploy).
+	Box *secrets.Box
+	// GitHubConnected diz se há GitHub App conectado (nil = não).
+	GitHubConnected func(context.Context) bool
 }
 
 // NewRouter monta o roteador principal, com a API sob /api.
@@ -99,6 +109,33 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/settings/panel", settingsH.panel)
 				r.Put("/settings/panel/domain", settingsH.setDomain)
 				r.Put("/settings/panel/public-port", settingsH.setPublicPort)
+			}
+			if d.DB != nil && d.Deploys != nil {
+				box := d.Box
+				if box == nil {
+					box = d.Deploys.Box
+				}
+				projectsH := projectHandlers{svc: d.Auth, db: d.DB}
+				appsH := appHandlers{svc: d.Auth, db: d.DB, deploys: d.Deploys, dataDir: d.DataDir,
+					runner: d.Runner, box: box, github: d.GitHubConnected}
+				deploysH := deployHandlers{svc: d.Auth, db: d.DB, deploys: d.Deploys, dataDir: d.DataDir}
+				r.Get("/projects", projectsH.list)
+				r.Post("/projects", projectsH.create)
+				r.Put("/projects/{id}", projectsH.update)
+				r.Delete("/projects/{id}", projectsH.remove)
+				r.Get("/apps", appsH.list)
+				r.Post("/apps", appsH.create)
+				r.Get("/apps/{id}", appsH.get)
+				r.Put("/apps/{id}", appsH.update)
+				r.Delete("/apps/{id}", appsH.remove)
+				r.Get("/apps/{id}/env", appsH.envNames)
+				r.Put("/apps/{id}/env", appsH.envSet)
+				r.Post("/apps/{id}/deploys", deploysH.create)
+				r.Get("/apps/{id}/deploys", deploysH.list)
+				r.Post("/apps/{id}/rollback", deploysH.rollback)
+				r.Get("/deploys/{id}", deploysH.get)
+				r.Get("/deploys/{id}/log", deploysH.log)
+				r.Post("/deploys/{id}/cancel", deploysH.cancel)
 			}
 			if d.Updater != nil {
 				r.Get("/update", updateH.status)
