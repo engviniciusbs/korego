@@ -240,15 +240,19 @@ func TestService_ReposSkipsBrokenInstallation(t *testing.T) {
 
 func TestCloneToken_EvictsCacheOnTokenError(t *testing.T) {
 	now := time.Unix(1700000000, 0)
-	f := newFakeGH(t, now.Add(time.Hour), map[int64][]string{1: {"o/a"}, 2: {"o/a"}})
+	// Tokens de 6 min: com a folga de 5 min, renovam após 1 min (bem dentro do TTL de 10 min do cache de repo).
+	f := newFakeGH(t, now.Add(6*time.Minute), map[int64][]string{1: {"o/a"}, 2: {"o/a"}})
 	s := newService(t, f, func() time.Time { return now })
 	tok, err := s.CloneToken(context.Background(), "o/a")
 	require.NoError(t, err)
 	assert.Equal(t, "tok1", tok)
 
-	// Token da instalação 1 vence e ela passa a falhar: cai para a varredura e usa a 2.
-	now = now.Add(time.Hour - time.Minute)
+	// Dois minutos depois: o cache repo->instalação 1 ainda vale, mas o token
+	// precisa ser renovado e a renovação falha. Deve despejar e varrer de novo.
+	now = now.Add(2 * time.Minute)
+	f.expires = now.Add(6 * time.Minute)
 	f.fail[1] = 1
+	require.True(t, now.Before(s.repos["o/a"].until), "cache de repo deve continuar válido")
 	tok, err = s.CloneToken(context.Background(), "o/a")
 	require.NoError(t, err)
 	assert.Equal(t, "tok2", tok)
