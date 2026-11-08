@@ -11,7 +11,8 @@ import { cn } from "@/lib/cn";
 import { usePanelSettings, useSetPanelDomain, useSetPublicPort, type PanelSettings } from "@/lib/settings";
 import { validHostname } from "@/lib/validate";
 
-const RECOVERY_CMD = "korego painel --porta-publica";
+const RECOVERY_CMD = "sudo korego painel --porta-publica";
+const RESTART_CMD = "sudo systemctl restart korego";
 
 /** Se a porta 8000 pode ser desligada agora e, se não, por quê. */
 function publicPortLock(p: PanelSettings): string {
@@ -237,7 +238,8 @@ function PublicPort({ panel }: { panel: PanelSettings }) {
         </p>
         <p>
           Se o domínio deixar de funcionar, reative pelo servidor com{" "}
-          <code translate="no" className="bg-bg px-1 py-0.5 font-mono text-fg">{RECOVERY_CMD}</code>.
+          <code translate="no" className="bg-bg px-1 py-0.5 font-mono text-fg">{RECOVERY_CMD}</code> e depois{" "}
+          <code translate="no" className="bg-bg px-1 py-0.5 font-mono text-fg">{RESTART_CMD}</code>.
         </p>
         {set.isError && <Alert variant="danger">{set.error.message}</Alert>}
       </Dialog>

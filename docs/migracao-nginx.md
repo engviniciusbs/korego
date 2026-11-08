@@ -35,7 +35,7 @@ Anote, para cada `server_name`, a porta local de destino (`exemplo.com` → `127
 
 ## 3. Cadastrar cada domínio como endereço manual
 
-No painel: **Domínios → Novo domínio → Endereço**. Informe o domínio (`exemplo.com`) e o endereço de destino (`127.0.0.1:3000`). Repita para cada site (`api.exemplo.com` → `127.0.0.1:4000`).
+No painel: **Domínios → Adicionar domínio**. Em **Tipo de destino**, escolha a aba **Endereço**. Preencha **Hostname** (`exemplo.com`) e **Endereço (host:porta)** (`127.0.0.1:3000`) e clique em **Salvar**. Repita para cada site (`api.exemplo.com` → `127.0.0.1:4000`).
 
 Enquanto o nginx estiver ativo, o Caddy não consegue subir nas portas 80 e 443; o painel mostra um aviso no proxy. Isso é esperado neste ponto.
 
@@ -48,6 +48,8 @@ sudo systemctl stop nginx && sudo systemctl disable nginx
 ## 5. Tentar novamente no proxy
 
 Volte ao painel e clique em **Tentar novamente** no aviso do proxy. O KoreGO sobe o Caddy em 80/443 e ele emite os certificados de cada domínio.
+
+O proxy só sai de "bloqueado" para ativo depois que o nginx parou **e** você clicou em **Tentar novamente**, ou depois da próxima verificação automática (até 30 segundos). Enquanto o nginx estiver ativo, o aviso continua.
 
 ## 6. Conferir cada domínio por HTTPS
 
@@ -63,8 +65,16 @@ Confira também no navegador. Se um domínio falhar na emissão, veja se o DNS a
 Se algo der errado, devolva as portas ao nginx:
 
 ```sh
-docker stop korego-caddy && sudo systemctl enable --now nginx
+sudo systemctl stop korego && sudo docker stop korego-caddy && sudo systemctl enable --now nginx && sudo systemctl start korego
 ```
+
+Depois confira se o nginx subiu:
+
+```sh
+systemctl status nginx
+```
+
+Por que nessa ordem: com o KoreGO parado, a reconciliação dele não pode subir o Caddy de novo entre o `docker stop` e o nginx pegar as portas. Quando o KoreGO volta, o nginx já está em 80/443; o KoreGO mostra o proxy como bloqueado e não sobe o Caddy.
 
 Seus arquivos em `/etc/nginx` e os certificados em `/etc/letsencrypt` não foram alterados pela migração, então o nginx volta exatamente como estava.
 
@@ -73,9 +83,9 @@ Seus arquivos em `/etc/nginx` e os certificados em `/etc/letsencrypt` não foram
 Depois que o proxy estiver funcionando, você pode servir o próprio painel em HTTPS.
 
 1. Aponte um domínio para o servidor (por exemplo `painel.exemplo.com`, DNS apontando para `203.0.113.10`).
-2. No painel, configure esse domínio como o domínio do painel. O Caddy emite o certificado e passa a encaminhar para o KoreGO.
-3. Confirme que `https://painel.exemplo.com` abre e que o login funciona.
-4. Só então desligue a porta pública 8000 pela própria configuração do painel. Se tiver firewall, pode fechar a 8000 também.
+2. No painel, abra **Configurações → Painel**, preencha **Domínio do painel** (`painel.exemplo.com`) e clique em **Salvar domínio**. O Caddy emite o certificado e passa a encaminhar para o KoreGO.
+3. Abra `https://painel.exemplo.com` e confirme que o login funciona.
+4. Só então, ainda em **Configurações → Painel** e acessando por `https://painel.exemplo.com`, desligue a chave **Porta 8000 pública** e confirme em **Desligar porta 8000**. A chave fica desabilitada até o certificado do domínio estar ativo **e** você estar acessando o painel por `https://<domínio>`. Se tiver firewall, pode fechar a 8000 também.
 
 ### Recuperação se você perder o acesso
 

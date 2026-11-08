@@ -95,9 +95,10 @@ describe("Configurações → Painel", () => {
 
     const dialog = screen.getByRole("dialog");
     expect(dialog).toHaveTextContent(
-      "Se o domínio deixar de funcionar, reative pelo servidor com korego painel --porta-publica.",
+      "Se o domínio deixar de funcionar, reative pelo servidor com sudo korego painel --porta-publica e depois sudo systemctl restart korego.",
     );
-    expect(within(dialog).getByText("korego painel --porta-publica").tagName).toBe("CODE");
+    expect(within(dialog).getByText("sudo korego painel --porta-publica").tagName).toBe("CODE");
+    expect(within(dialog).getByText("sudo systemctl restart korego").tagName).toBe("CODE");
     expect(fetchMock).not.toHaveBeenCalledWith("/api/settings/panel/public-port", expect.anything());
 
     routes["GET /api/settings/panel"] = () => json(panel({ publicPort: false }));
