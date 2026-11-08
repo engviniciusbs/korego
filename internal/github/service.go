@@ -203,3 +203,25 @@ func (s *Service) CloneToken(ctx context.Context, repo string) (string, error) {
 	}
 	return "", ErrRepoNotInstalled
 }
+
+// Installations lista as instalações do App salvo.
+func (s *Service) Installations(ctx context.Context) ([]Installation, error) {
+	jwt, err := s.jwt(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.Client.Installations(ctx, jwt)
+}
+
+// Forget descarta os tokens e repositórios em cache (App trocado ou removido).
+func (s *Service) Forget() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokens, s.repos = nil, nil
+}
+
+// Ready diz se há App conectado (deploy.Service trata false como sem GitHub).
+func (s *Service) Ready(ctx context.Context) bool {
+	_, ok, err := s.Connected(ctx)
+	return err == nil && ok
+}

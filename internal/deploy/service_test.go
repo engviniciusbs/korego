@@ -614,6 +614,21 @@ func TestDeploy_GitHubWithoutTokens(t *testing.T) {
 	assert.Empty(t, list)
 }
 
+type notReadyTokens struct{}
+
+func (notReadyTokens) CloneToken(context.Context, string) (string, error) { return "", errors.New("x") }
+func (notReadyTokens) Ready(context.Context) bool                         { return false }
+
+func TestDeploy_GitHubTokensNotReady(t *testing.T) {
+	h := newHarness(t, func(a *store.App) { a.SourceType = "github"; a.Repo = "dono/blog" })
+	h.svc.Tokens = notReadyTokens{}
+	_, err := h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
+	assert.ErrorIs(t, err, ErrNoGitHub)
+	list, err := h.db.ListDeploys(h.ctx, h.app.ID, 10)
+	require.NoError(t, err)
+	assert.Empty(t, list)
+}
+
 func TestDeploy_SupersededInQueue(t *testing.T) {
 	h := newHarness(t, nil)
 	gate := make(chan struct{})

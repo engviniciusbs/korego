@@ -60,6 +60,14 @@ func (c *Client) apiURL() string {
 	return strings.TrimRight(c.APIURL, "/")
 }
 
+// WebBaseURL é a URL do site do GitHub, sem barra final.
+func (c *Client) WebBaseURL() string {
+	if c.WebURL == "" {
+		return "https://github.com"
+	}
+	return strings.TrimRight(c.WebURL, "/")
+}
+
 func (c *Client) http() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP

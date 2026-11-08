@@ -1,0 +1,52 @@
+{
+  "ref": "refs/heads/main",
+  "before": "6113728f27ae82c7b1a177c8d03f9e96e0adf246",
+  "after": "0d1a26e67d8f5eaf1f6ba5c57fc3c7d91ac0fd1c",
+  "created": false,
+  "deleted": false,
+  "forced": false,
+  "base_ref": null,
+  "compare": "https://github.com/exemplo/site/compare/6113728f27ae...0d1a26e67d8f",
+  "commits": [
+    {
+      "id": "0d1a26e67d8f5eaf1f6ba5c57fc3c7d91ac0fd1c",
+      "tree_id": "f9d2a07e9488b91af2641b26b9407fe22a451433",
+      "distinct": true,
+      "message": "Atualiza a página inicial\n\nTroca o título e corrige o rodapé.",
+      "timestamp": "2026-11-08T10:15:00-03:00",
+      "url": "https://github.com/exemplo/site/commit/0d1a26e67d8f5eaf1f6ba5c57fc3c7d91ac0fd1c",
+      "author": {"name": "Pessoa Exemplo", "email": "pessoa@exemplo.com", "username": "pessoa-exemplo"},
+      "committer": {"name": "Pessoa Exemplo", "email": "pessoa@exemplo.com", "username": "pessoa-exemplo"},
+      "added": [],
+      "removed": [],
+      "modified": ["index.html"]
+    }
+  ],
+  "head_commit": {
+    "id": "0d1a26e67d8f5eaf1f6ba5c57fc3c7d91ac0fd1c",
+    "tree_id": "f9d2a07e9488b91af2641b26b9407fe22a451433",
+    "distinct": true,
+    "message": "Atualiza a página inicial\n\nTroca o título e corrige o rodapé.",
+    "timestamp": "2026-11-08T10:15:00-03:00",
+    "url": "https://github.com/exemplo/site/commit/0d1a26e67d8f5eaf1f6ba5c57fc3c7d91ac0fd1c",
+    "author": {"name": "Pessoa Exemplo", "email": "pessoa@exemplo.com", "username": "pessoa-exemplo"},
+    "committer": {"name": "Pessoa Exemplo", "email": "pessoa@exemplo.com", "username": "pessoa-exemplo"},
+    "added": [],
+    "removed": [],
+    "modified": ["index.html"]
+  },
+  "repository": {
+    "id": 123456789,
+    "node_id": "R_kgDOExemplo",
+    "name": "site",
+    "full_name": "exemplo/site",
+    "private": true,
+    "owner": {"name": "exemplo", "login": "exemplo", "id": 987654, "type": "Organization"},
+    "html_url": "https://github.com/exemplo/site",
+    "default_branch": "main",
+    "master_branch": "main"
+  },
+  "pusher": {"name": "pessoa-exemplo", "email": "pessoa@exemplo.com"},
+  "sender": {"login": "pessoa-exemplo", "id": 1234567, "type": "User"},
+  "installation": {"id": 11111111, "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uMTExMTExMTE="}
+}

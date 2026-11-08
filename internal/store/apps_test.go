@@ -42,6 +42,15 @@ func TestApps_SlugConflictAndByRepo(t *testing.T) {
 	require.Len(t, got, 1)
 	require.Equal(t, "web", got[0].Slug)
 
+	// O full_name do GitHub pode vir com outra caixa; o branch não.
+	got, err = db.AppsByRepo(ctx, "O/R", "main")
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "web", got[0].Slug)
+	got, err = db.AppsByRepo(ctx, "o/r", "Main")
+	require.NoError(t, err)
+	require.Len(t, got, 0)
+
 	bySlug, err := db.GetAppBySlug(ctx, "web")
 	require.NoError(t, err)
 	require.Equal(t, a.ID, bySlug.ID)

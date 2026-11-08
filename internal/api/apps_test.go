@@ -63,7 +63,8 @@ func (f *appsFx) call(t *testing.T, method, path string, body any) (int, map[str
 	return w.Code, decode(t, w)
 }
 
-func newAppsFx(t *testing.T) *appsFx {
+// newAppsFx monta a API com deploy; mods ajustam as Deps antes do roteador.
+func newAppsFx(t *testing.T, mods ...func(*appsFx, *api.Deps)) *appsFx {
 	t.Helper()
 	f := &appsFx{db: store.OpenMemory(t), runner: &recRunner{}, release: make(chan struct{})}
 	box, err := secrets.NewBox(make([]byte, 32))
@@ -87,10 +88,14 @@ func newAppsFx(t *testing.T) *appsFx {
 	t.Cleanup(q.Close)
 	f.svc = &deploy.Service{DB: f.db, Docker: f.dock, Runner: f.runner, Box: box, Hub: events.NewHub(),
 		Queue: q, DataDir: f.dataDir}
-	f.env = newEnvDeps(t, api.Deps{
+	deps := api.Deps{
 		DB: f.db, Deploys: f.svc, DataDir: f.dataDir, Runner: f.runner, Box: box,
 		GitHubConnected: func(context.Context) bool { return f.gh },
-	})
+	}
+	for _, m := range mods {
+		m(f, &deps)
+	}
+	f.env = newEnvDeps(t, deps)
 	_, f.cookie, f.csrf = f.setup(t)
 	return f
 }

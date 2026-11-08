@@ -186,8 +186,9 @@ func (d *DB) ListApps(ctx context.Context, projectID *int64) ([]App, error) {
 }
 
 // AppsByRepo devolve as apps github com auto_deploy ligado para o repositório e branch.
+// O repositório compara sem caixa (o full_name do GitHub pode diferir); o branch, com.
 func (d *DB) AppsByRepo(ctx context.Context, repo, branch string) ([]App, error) {
-	return d.queryApps(ctx, `WHERE source_type = 'github' AND auto_deploy = 1 AND repo = ? AND branch = ?`, repo, branch)
+	return d.queryApps(ctx, `WHERE source_type = 'github' AND auto_deploy = 1 AND LOWER(repo) = LOWER(?) AND branch = ?`, repo, branch)
 }
 
 // DeleteApp remove a aplicação (variáveis e deploys vão em cascata).

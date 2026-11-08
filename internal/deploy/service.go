@@ -57,6 +57,23 @@ type TokenSource interface {
 	CloneToken(ctx context.Context, repo string) (string, error)
 }
 
+// tokenReadiness é opcional no TokenSource: Ready=false (App não conectado)
+// equivale a Tokens nil.
+type tokenReadiness interface {
+	Ready(ctx context.Context) bool
+}
+
+// githubReady diz se há TokenSource e, quando ele sabe dizer, se está conectado.
+func (s *Service) githubReady(ctx context.Context) bool {
+	if s.Tokens == nil {
+		return false
+	}
+	if r, ok := s.Tokens.(tokenReadiness); ok {
+		return r.Ready(ctx)
+	}
+	return true
+}
+
 // StatusEvent é publicado em StatusTopic a cada mudança de status.
 type StatusEvent struct {
 	ID     int64  `json:"id"`
@@ -273,7 +290,7 @@ func (s *Service) Deploy(ctx context.Context, appID int64, trigger, sha, msg str
 	if err != nil {
 		return store.Deploy{}, err
 	}
-	if app.SourceType == "github" && s.Tokens == nil {
+	if app.SourceType == "github" && !s.githubReady(ctx) {
 		return store.Deploy{}, ErrNoGitHub
 	}
 	d := store.Deploy{AppID: appID, Trigger: trigger, Status: "queued", CommitSHA: sha, CommitMessage: msg}

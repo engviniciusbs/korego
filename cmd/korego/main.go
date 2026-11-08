@@ -23,6 +23,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/deploy"
 	"github.com/engviniciusbs/korego/internal/domains"
 	"github.com/engviniciusbs/korego/internal/events"
+	"github.com/engviniciusbs/korego/internal/github"
 	"github.com/engviniciusbs/korego/internal/jobs"
 	"github.com/engviniciusbs/korego/internal/monitor"
 	"github.com/engviniciusbs/korego/internal/node"
@@ -173,9 +174,11 @@ func runServe(args []string) error {
 	// em andamento e espera terminarem. Os que esperavam ficam queued e voltam
 	// à fila no Recover da próxima subida.
 	defer queue.Close()
+	ghSvc := &github.Service{DB: db, Box: box, Client: &github.Client{APIURL: cfg.GitHubAPIURL, WebURL: cfg.GitHubWebURL}}
+	// Tokens antes do Recover: os deploys github reenfileirados pedem o token ao rodar.
 	deploySvc := &deploy.Service{
 		DB: db, Docker: nd.Docker(), Runner: deploy.ExecRunner{}, Box: box, Hub: hub,
-		Queue: queue, Router: domSvc, Tokens: nil, // Tokens: GitHub App (Tarefa 15)
+		Queue: queue, Router: domSvc, Tokens: ghSvc,
 		DataDir: cfg.DataDir,
 	}
 	// Antes de reaplicar as rotas e de servir: marca interrompidos, remove
@@ -188,7 +191,8 @@ func runServe(args []string) error {
 		Auth: svc, Node: nd, Hub: hub, Web: web, Metrics: collector, DB: db,
 		Updater: &update.System{ExePath: exe, ConfigPath: *cfgPath},
 		Domains: domSvc, Deploys: deploySvc, DataDir: cfg.DataDir, Runner: deploy.ExecRunner{}, Box: box,
-		// GitHubConnected: nil até o GitHub App (Tarefa 15).
+		GitHub:          ghSvc,
+		GitHubConnected: ghSvc.Ready,
 	})
 	if cfg.DevProxy == "" {
 		handler = api.SecurityHeaders(handler)
