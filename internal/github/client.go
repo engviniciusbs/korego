@@ -80,13 +80,18 @@ func (c *Client) do(ctx context.Context, method, rawURL, auth string, out any) (
 	if auth != "" {
 		req.Header.Set("Authorization", auth)
 	}
+	// O code do manifesto troca-se pela chave privada: nunca aparece em erros.
+	path := req.URL.Path
+	if strings.HasPrefix(path, "/app-manifests/") {
+		path = "/app-manifests/***/conversions"
+	}
 	resp, err := c.http().Do(req)
 	if err != nil {
 		var ue *url.Error
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return nil, fmt.Errorf("github: %s %s: %w", method, req.URL.Path, err)
+		return nil, fmt.Errorf("github: %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -96,13 +101,13 @@ func (c *Client) do(ctx context.Context, method, rawURL, auth string, out any) (
 		}
 		_ = json.Unmarshal(bytes.TrimSpace(body), &e)
 		if e.Message == "" {
-			return nil, fmt.Errorf("github: %s %s: status %d", method, req.URL.Path, resp.StatusCode)
+			return nil, fmt.Errorf("github: %s %s: status %d", method, path, resp.StatusCode)
 		}
-		return nil, fmt.Errorf("github: %s %s: status %d: %s", method, req.URL.Path, resp.StatusCode, e.Message)
+		return nil, fmt.Errorf("github: %s %s: status %d: %s", method, path, resp.StatusCode, e.Message)
 	}
 	if out != nil {
 		if err := json.NewDecoder(io.LimitReader(resp.Body, maxRespBody)).Decode(out); err != nil {
-			return nil, fmt.Errorf("github: resposta inválida de %s: %w", req.URL.Path, err)
+			return nil, fmt.Errorf("github: resposta inválida de %s: %w", path, err)
 		}
 	}
 	return resp.Header, nil

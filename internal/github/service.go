@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,6 +114,7 @@ func (s *Service) installationToken(ctx context.Context, jwt string, id int64) (
 }
 
 // Repos lista os repositórios de todas as instalações, sem duplicatas.
+// Instalação com erro (ex.: suspensa) é ignorada; só falha se todas falharem.
 func (s *Service) Repos(ctx context.Context) ([]RepoView, error) {
 	jwt, err := s.jwt(ctx)
 	if err != nil {
@@ -126,24 +128,37 @@ func (s *Service) Repos(ctx context.Context) ([]RepoView, error) {
 	defer s.mu.Unlock()
 	seen := map[string]bool{}
 	out := []RepoView{}
+	var lastErr error
+	failed := 0
 	for _, in := range ins {
-		tok, err := s.installationToken(ctx, jwt, in.ID)
+		repos, err := s.installationRepos(ctx, jwt, in.ID)
 		if err != nil {
-			return nil, err
-		}
-		repos, err := s.Client.Repos(ctx, tok)
-		if err != nil {
-			return nil, err
+			lastErr = err
+			failed++
+			continue
 		}
 		for _, r := range repos {
-			if seen[r.FullName] {
+			key := strings.ToLower(r.FullName)
+			if seen[key] {
 				continue
 			}
-			seen[r.FullName] = true
+			seen[key] = true
 			out = append(out, RepoView{FullName: r.FullName, DefaultBranch: r.DefaultBranch, InstallationID: in.ID})
 		}
 	}
+	if failed > 0 && failed == len(ins) {
+		return nil, lastErr
+	}
 	return out, nil
+}
+
+// installationRepos lista os repositórios de uma instalação. Chamar com s.mu preso.
+func (s *Service) installationRepos(ctx context.Context, jwt string, id int64) ([]Repo, error) {
+	tok, err := s.installationToken(ctx, jwt, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.Client.Repos(ctx, tok)
 }
 
 // CloneToken devolve um token de instalação que enxerga repo ("dono/nome").
@@ -155,31 +170,36 @@ func (s *Service) CloneToken(ctx context.Context, repo string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	if c, ok := s.repos[repo]; ok && now.Before(c.until) {
-		return s.installationToken(ctx, jwt, c.installation)
+	cacheKey := strings.ToLower(repo)
+	if c, ok := s.repos[cacheKey]; ok && now.Before(c.until) {
+		if tok, err := s.installationToken(ctx, jwt, c.installation); err == nil {
+			return tok, nil
+		}
+		delete(s.repos, cacheKey)
 	}
 	ins, err := s.Client.Installations(ctx, jwt)
 	if err != nil {
 		return "", err
 	}
+	var lastErr error
 	for _, in := range ins {
-		tok, err := s.installationToken(ctx, jwt, in.ID)
+		repos, err := s.installationRepos(ctx, jwt, in.ID)
 		if err != nil {
-			return "", err
-		}
-		repos, err := s.Client.Repos(ctx, tok)
-		if err != nil {
-			return "", err
+			lastErr = err
+			continue
 		}
 		for _, r := range repos {
-			if r.FullName == repo {
+			if strings.EqualFold(r.FullName, repo) {
 				if s.repos == nil {
 					s.repos = map[string]cachedRepo{}
 				}
-				s.repos[repo] = cachedRepo{installation: in.ID, until: now.Add(repoCacheTTL)}
-				return tok, nil
+				s.repos[cacheKey] = cachedRepo{installation: in.ID, until: now.Add(repoCacheTTL)}
+				return s.tokens[in.ID].token, nil
 			}
 		}
+	}
+	if lastErr != nil {
+		return "", lastErr
 	}
 	return "", ErrRepoNotInstalled
 }

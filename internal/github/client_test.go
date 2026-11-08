@@ -89,6 +89,7 @@ type fakeGH struct {
 	srv       *httptest.Server
 	tokenPOST int32
 	expires   time.Time
+	fail      [3]int32 // != 0: access_tokens da instalação devolve 403
 }
 
 func newFakeGH(t *testing.T, expires time.Time, repos map[int64][]string) *fakeGH {
@@ -109,6 +110,11 @@ func newFakeGH(t *testing.T, expires time.Time, repos map[int64][]string) *fakeG
 		mux.HandleFunc(fmt.Sprintf("/app/installations/%d/access_tokens", id), func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, "POST", r.Method)
 			atomic.AddInt32(&f.tokenPOST, 1)
+			if atomic.LoadInt32(&f.fail[id]) != 0 {
+				w.WriteHeader(403)
+				_, _ = w.Write([]byte(`{"message":"This installation has been suspended"}`))
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"token": fmt.Sprintf("tok%d", id), "expires_at": f.expires.UTC().Format(time.RFC3339)})
 		})
 	}
@@ -197,4 +203,79 @@ func TestService_ReposDedupe(t *testing.T) {
 	assert.EqualValues(t, 1, got[0].InstallationID)
 	assert.Equal(t, "o/c", got[2].FullName)
 	assert.EqualValues(t, 2, got[2].InstallationID)
+}
+
+func TestCloneToken_SkipsBrokenInstallation(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	f := newFakeGH(t, now.Add(time.Hour), map[int64][]string{1: {"o/a"}, 2: {"o/b"}})
+	f.fail[1] = 1
+	s := newService(t, f, func() time.Time { return now })
+	tok, err := s.CloneToken(context.Background(), "o/b")
+	require.NoError(t, err)
+	assert.Equal(t, "tok2", tok)
+
+	// Nenhuma instalação enxerga o repo: devolve o último erro, não ErrRepoNotInstalled.
+	_, err = s.CloneToken(context.Background(), "o/zzz")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrRepoNotInstalled)
+	assert.Contains(t, err.Error(), "403")
+}
+
+func TestService_ReposSkipsBrokenInstallation(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	f := newFakeGH(t, now.Add(time.Hour), map[int64][]string{1: {"o/a"}, 2: {"o/b", "o/c"}})
+	f.fail[1] = 1
+	s := newService(t, f, func() time.Time { return now })
+	got, err := s.Repos(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, "o/b", got[0].FullName)
+
+	// Todas falhando (serviço novo, sem tokens em cache): erro.
+	f.fail[2] = 1
+	s2 := newService(t, f, func() time.Time { return now })
+	_, err = s2.Repos(context.Background())
+	assert.Error(t, err)
+}
+
+func TestCloneToken_EvictsCacheOnTokenError(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	f := newFakeGH(t, now.Add(time.Hour), map[int64][]string{1: {"o/a"}, 2: {"o/a"}})
+	s := newService(t, f, func() time.Time { return now })
+	tok, err := s.CloneToken(context.Background(), "o/a")
+	require.NoError(t, err)
+	assert.Equal(t, "tok1", tok)
+
+	// Token da instalação 1 vence e ela passa a falhar: cai para a varredura e usa a 2.
+	now = now.Add(time.Hour - time.Minute)
+	f.fail[1] = 1
+	tok, err = s.CloneToken(context.Background(), "o/a")
+	require.NoError(t, err)
+	assert.Equal(t, "tok2", tok)
+}
+
+func TestCloneToken_RepoNameCaseInsensitive(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	f := newFakeGH(t, now.Add(time.Hour), map[int64][]string{1: {"Dono/App"}})
+	s := newService(t, f, func() time.Time { return now })
+	tok, err := s.CloneToken(context.Background(), "dono/app")
+	require.NoError(t, err)
+	assert.Equal(t, "tok1", tok)
+}
+
+func TestConvertManifest_ErrorRedactsCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+	_, err := (&Client{APIURL: srv.URL}).ConvertManifest(context.Background(), "codigo-secreto")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "codigo-secreto")
+	assert.Contains(t, err.Error(), "404")
+
+	srv.Close()
+	_, err = (&Client{APIURL: srv.URL}).ConvertManifest(context.Background(), "codigo-secreto")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "codigo-secreto")
 }
