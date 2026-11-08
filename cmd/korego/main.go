@@ -195,7 +195,7 @@ func runServe(args []string) error {
 		GitHubConnected: ghSvc.Ready,
 	})
 	if cfg.DevProxy == "" {
-		handler = api.SecurityHeaders(handler)
+		handler = api.SecurityHeaders(handler, cfg.GitHubWebURL)
 	}
 
 	srv := &http.Server{
