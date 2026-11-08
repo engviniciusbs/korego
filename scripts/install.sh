@@ -6,6 +6,7 @@
 #   KOREGO_YES=1          nao pergunta nada (instala o Docker se faltar)
 #   KOREGO_LOCAL_BINARY   caminho de um binario local; pula o download (testes)
 #   KOREGO_SKIP_SERVICE=1 nao habilita/inicia o servico systemd
+#   KOREGO_RAILPACK       auto (padrao: pergunta), skip ou install
 set -eu
 
 REPO="engviniciusbs/korego"
@@ -74,6 +75,69 @@ else
 	command -v curl >/dev/null 2>&1 || die "curl e necessario para instalar o Docker."
 	curl -fsSL https://get.docker.com | sh
 	have_docker || die "o Docker nao ficou disponivel apos a instalacao."
+fi
+
+# --- 2b. git e Railpack ------------------------------------------------------
+# yes_or_prompt PERGUNTA: 0 se o usuario aceitou (KOREGO_YES=1 ou resposta s/y).
+yes_or_prompt() {
+	if [ "${KOREGO_YES:-}" = 1 ]; then
+		return 0
+	fi
+	[ -r /dev/tty ] || return 1
+	printf '%s [s/N] ' "$1" >/dev/tty 2>/dev/null || return 1
+	answer=n
+	read -r answer </dev/tty 2>/dev/null || answer=n
+	case "$answer" in
+		y | Y | s | S | sim | SIM) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+if command -v git >/dev/null 2>&1; then
+	info "git encontrado."
+else
+	info "git nao encontrado (necessario para os deploys)."
+	if yes_or_prompt "Instalar o git agora?"; then
+		if ! { apt-get update -qq && apt-get install -y -qq git; }; then die "falha ao instalar o git."; fi
+		command -v git >/dev/null 2>&1 || die "o git nao ficou disponivel apos a instalacao."
+	else
+		die "git e necessario para os deploys. Instale-o (apt-get install git) ou rode novamente com KOREGO_YES=1."
+	fi
+fi
+
+RAILPACK_MODE=${KOREGO_RAILPACK:-auto}
+case "$RAILPACK_MODE" in
+	auto | skip | install) ;;
+	*) die "KOREGO_RAILPACK invalido: $RAILPACK_MODE (use auto, skip ou install)." ;;
+esac
+
+install_railpack() {
+	command -v curl >/dev/null 2>&1 || { warn "curl ausente; Railpack nao instalado."; return 1; }
+	rp_tmp=$(mktemp -d) || return 1
+	# Script oficial baixado para arquivo e executado com sh (nunca por pipe).
+	if curl -fsSL -o "$rp_tmp/railpack-install.sh" https://railpack.com/install.sh &&
+		sh "$rp_tmp/railpack-install.sh" --bin-dir /usr/local/bin; then
+		rm -rf "$rp_tmp"
+		return 0
+	fi
+	rm -rf "$rp_tmp"
+	return 1
+}
+
+if command -v railpack >/dev/null 2>&1; then
+	info "Railpack encontrado."
+elif [ "$RAILPACK_MODE" = skip ]; then
+	info "Railpack não instalado; builds do tipo railpack vão falhar até instalá-lo."
+else
+	if [ "$RAILPACK_MODE" = install ] || yes_or_prompt "Instalar o Railpack agora (https://railpack.com)?"; then
+		if install_railpack && command -v railpack >/dev/null 2>&1; then
+			info "Railpack instalado."
+		else
+			warn "falha ao instalar o Railpack; builds do tipo railpack vão falhar até instalá-lo."
+		fi
+	else
+		info "Railpack não instalado; builds do tipo railpack vão falhar até instalá-lo."
+	fi
 fi
 
 # --- 3. portas -------------------------------------------------------------

@@ -4,12 +4,12 @@ KoreGO é um gerenciador de VPS auto-hospedado: um único binário Go que serve 
 
 ## Estado
 
-**Etapa 1 (Observar)** concluída, sobre a **Etapa 0 (Fundação)**: binário único com painel embutido, primeiro acesso com criação do administrador (senha + 2FA obrigatório), sessões, auditoria, visão geral do servidor e autoatualização com verificação de checksum e rollback. A Etapa 1 acrescenta métricas ao vivo, containers Docker e PM2 (veja abaixo).
+**Etapa 2 (Publicar)** concluída, sobre a **Etapa 1 (Observar)** e a **Etapa 0 (Fundação)**: binário único com painel embutido, primeiro acesso com criação do administrador (senha + 2FA obrigatório), sessões, auditoria, visão geral do servidor e autoatualização com verificação de checksum e rollback. A Etapa 1 acrescentou métricas ao vivo, containers Docker e PM2; a Etapa 2 acrescenta publicação de aplicações, domínios com HTTPS automático e deploy pelo GitHub (veja "Publicar").
 
 Roadmap:
 
 - **Etapa 1 (Observar)**: métricas, containers e PM2 (pronta).
-- **Etapa 2 (Publicar)**: publicação de aplicações e domínios.
+- **Etapa 2 (Publicar)**: aplicações, deploy, domínios e HTTPS (pronta).
 
 ## Instalação
 
@@ -55,6 +55,36 @@ Também valem as variáveis `KOREGO_PM2_PATH` e `KOREGO_PM2_HOME`. Sem `pm2_home
 
 Se o Docker estiver parado, as métricas e o login continuam funcionando e as telas de containers mostram "Docker indisponível".
 
+## Publicar
+
+A Etapa 2 publica aplicações a partir do painel, sem sair dele.
+
+- **Aplicações**: cada app tem um tipo de deploy, uma origem (repositório do GitHub ou URL git) e variáveis de ambiente (os valores nunca são exibidos nem registrados).
+- **Tipos de deploy**:
+  - **Dockerfile**: constrói a imagem com o `Dockerfile` do repositório.
+  - **Railpack**: constrói sem Dockerfile, com o [Railpack](https://railpack.com) (precisa do binário `railpack`; o instalador oferece instalá-lo).
+  - **Compose**: sobe o `docker-compose.yml` do repositório.
+- **Deploy automático**: ao conectar o **GitHub App** do KoreGO, um `push` na branch configurada dispara o deploy. Também dá para publicar manualmente pelo botão de deploy.
+- **Domínios**: cada domínio aponta para uma aplicação ou para um endereço manual (`127.0.0.1:3000`). O KoreGO gerencia um Caddy em `80/443` e emite os certificados por HTTP-01, então o DNS já precisa apontar para o servidor. Para migrar um nginx existente, veja [docs/migracao-nginx.md](docs/migracao-nginx.md).
+- **Rollback**: apps Dockerfile e Railpack voltam para a imagem do deploy anterior com um clique.
+- **Limitações do Compose**: o deploy derruba e recria os serviços (há **downtime**) e **não há rollback** automático.
+
+O instalador confere o `git` (instala pelo `apt-get`) e oferece instalar o Railpack. Controle com `KOREGO_RAILPACK=auto|skip|install`; com `KOREGO_YES=1` ele não pergunta nada.
+
+### Configuração
+
+Opções em `/etc/korego/config.toml`; cada uma também vale como variável de ambiente.
+
+| Opção | Variável | Padrão | Descrição |
+| --- | --- | --- | --- |
+| `listen` | `KOREGO_LISTEN` | `:8000` | Endereço do painel. |
+| `max_builds` | `KOREGO_MAX_BUILDS` | `2` | Máximo de deploys construindo ao mesmo tempo. |
+| `public_ip` | `KOREGO_PUBLIC_IP` | vazio | IP público, usado na verificação de DNS dos domínios (vazio = IPs das interfaces). |
+| `pm2_path` | `KOREGO_PM2_PATH` | vazio | Binário do `pm2` (vazio = `PATH`). |
+| `pm2_home` | `KOREGO_PM2_HOME` | vazio | `PM2_HOME` do usuário que roda o PM2. |
+| `github_api_url` | `KOREGO_GITHUB_API_URL` | API do GitHub | Servidor da API do GitHub App (testes, GitHub Enterprise). |
+| `github_web_url` | `KOREGO_GITHUB_WEB_URL` | github.com | Servidor web do GitHub App (testes, GitHub Enterprise). |
+
 ## Desenvolvimento local
 
 Requisitos: Go 1.27, Node 22 e pnpm 10.
@@ -76,7 +106,7 @@ make web     # compila o frontend e copia para internal/webui/dist
 make build   # go build -o bin/korego ./cmd/korego
 ```
 
-Variáveis de ambiente: `KOREGO_LISTEN` (padrão `:8000`), `KOREGO_DATA_DIR`, `KOREGO_CONFIG_DIR`, `KOREGO_PM2_PATH` e `KOREGO_PM2_HOME`.
+Variáveis de ambiente: `KOREGO_LISTEN` (padrão `:8000`), `KOREGO_DATA_DIR`, `KOREGO_CONFIG_DIR` e as da tabela de configuração acima.
 
 ## Testes
 
@@ -88,7 +118,11 @@ go test ./... && go vet ./...
 cd web && pnpm vitest run && pnpm lint
 
 # Integração com o Docker (precisa do Docker em execução)
-go test -tags integration ./internal/node/docker/
+# Integração da Etapa 2 (Docker e Caddy; só em Linux)
+go test -tags integration ./internal/node/docker/... ./internal/node/proxy/... ./internal/deploy/...
+
+# Instalador (container ubuntu:24.04 com docker, apt-get e curl simulados)
+sh scripts/test-install.sh && shellcheck scripts/*.sh
 
 # Ponta a ponta (Playwright), com o binário já compilado em bin/
 make web && make build
