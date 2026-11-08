@@ -85,7 +85,9 @@ func TestDomainsAPI_CreateReturnsDNSWarning(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, w.Code)
 	w = e.do(t, http.MethodDelete, "/api/domains/1", nil, mut(c, csrf)...)
 	require.Equal(t, http.StatusNotFound, w.Code)
-	assert.Equal(t, "DOMAIN_NOT_FOUND", errCode(decode(t, w)))
+	er := decode(t, w)["error"].(map[string]any)
+	assert.Equal(t, "DOMAIN_NOT_FOUND", er["code"])
+	assert.NotContains(t, er, "field", "field só aparece em erros de validação")
 }
 
 func TestDomainsAPI_InvalidAndConflict(t *testing.T) {

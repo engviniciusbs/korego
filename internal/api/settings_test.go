@@ -69,6 +69,23 @@ func TestPanelAPI_DisablePortViaPanelDomain(t *testing.T) {
 	assert.Equal(t, 2, seen)
 }
 
+// X-Forwarded-Proto e Host forjados por um cliente remoto (fora do loopback,
+// ou seja, sem passar pelo Caddy) não contam como acesso por HTTPS.
+func TestPanelAPI_RemoteForgedForwardedProtoRejected(t *testing.T) {
+	e, svc, fake, c, csrf := domainsEnv(t, "203.0.113.10")
+	called := false
+	svc.OnListenChange = func(string) error { called = true; return nil }
+	fake.CertFn = func(context.Context, string) proxy.CertInfo { return proxy.CertInfo{State: proxy.CertActive} }
+	require.NoError(t, svc.SetPanelDomain(context.Background(), "painel.exemplo.com"))
+
+	opts := append(mut(c, csrf), withRemote("203.0.113.5:1234"), withHeader("X-Forwarded-Proto", "https"),
+		withHost("painel.exemplo.com"))
+	w := e.do(t, http.MethodPut, "/api/settings/panel/public-port", map[string]any{"enabled": false}, opts...)
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	assert.Equal(t, "PANEL_NOT_HTTPS", errCode(decode(t, w)))
+	assert.False(t, called, "OnListenChange não pode ser chamado")
+}
+
 func TestPanelAPI_SetDomain(t *testing.T) {
 	e, svc, fake, c, csrf := domainsEnv(t, "203.0.113.10")
 	w := e.do(t, http.MethodPut, "/api/settings/panel/domain", map[string]any{"hostname": "Inválido!"}, mut(c, csrf)...)
