@@ -76,6 +76,9 @@ func (s *Service) setStatus(st proxy.Status) {
 	defer s.statusMu.Unlock()
 	changed := !s.hasStatus || s.status != st
 	s.status, s.hasStatus = st, true
+	if st.State != proxy.StateBlocked {
+		s.blockedLogged = false
+	}
 	if changed && s.Hub != nil {
 		s.Hub.Publish(TopicProxy, st)
 	}

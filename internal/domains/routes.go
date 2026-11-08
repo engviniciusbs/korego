@@ -2,6 +2,7 @@ package domains
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -147,7 +148,24 @@ func (s *Service) Reapply(ctx context.Context) error {
 }
 
 // ReapplyApp é chamado pelo deploy depois de trocar a porta da app.
+//
+// Com o último status visto pela reconciliação em blocked (outro processo,
+// como o nginx, segura 80/443 e o Caddy não segura porta nenhuma), devolve
+// nil: a rota é aplicada pela reconciliação quando o proxy ficar ativo. Nos
+// demais estados inativos (starting, docker_unavailable, error) segue
+// devolvendo proxy.ErrInactive.
 func (s *Service) ReapplyApp(ctx context.Context, appID int64) error {
 	_ = appID // a configuração é sempre carregada inteira
-	return s.Reapply(ctx)
+	err := s.Reapply(ctx)
+	if errors.Is(err, proxy.ErrInactive) && s.Status().State == proxy.StateBlocked {
+		s.statusMu.Lock()
+		first := !s.blockedLogged
+		s.blockedLogged = true
+		s.statusMu.Unlock()
+		if first {
+			log.Printf("proxy bloqueado; rota aplicada quando o proxy ficar ativo")
+		}
+		return nil
+	}
+	return err
 }

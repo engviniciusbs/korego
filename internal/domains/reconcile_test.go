@@ -103,3 +103,28 @@ func TestRun_ExitsOnCancel(t *testing.T) {
 		t.Fatal("Run não terminou após cancelar o contexto")
 	}
 }
+
+// Proxy bloqueado (nginx nas portas 80/443): o deploy não pode falhar por
+// isso; a rota entra quando a reconciliação vir o proxy ativo.
+func TestReapplyApp_BlockedIsNil(t *testing.T) {
+	ctx := context.Background()
+	s, fake := newTestService(t)
+	fake.EnsureFn = func(context.Context) proxy.Status {
+		return proxy.Status{State: proxy.StateBlocked, Message: "porta 80 em uso por nginx"}
+	}
+	fake.ApplyFn = func(context.Context, []proxy.Route) error { return proxy.ErrInactive }
+	s.Reconcile(ctx)
+	assert.NoError(t, s.ReapplyApp(ctx, 1))
+	assert.NoError(t, s.ReapplyApp(ctx, 1))
+}
+
+func TestReapplyApp_OtherInactiveStatesFail(t *testing.T) {
+	ctx := context.Background()
+	for _, state := range []proxy.State{proxy.StateStarting, proxy.StateDockerUnavailable, proxy.StateError} {
+		s, fake := newTestService(t)
+		fake.EnsureFn = func(context.Context) proxy.Status { return proxy.Status{State: state} }
+		fake.ApplyFn = func(context.Context, []proxy.Route) error { return proxy.ErrInactive }
+		s.Reconcile(ctx)
+		assert.ErrorIs(t, s.ReapplyApp(ctx, 1), proxy.ErrInactive, string(state))
+	}
+}

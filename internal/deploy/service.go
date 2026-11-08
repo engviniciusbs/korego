@@ -846,6 +846,21 @@ func (p *pipeline) reapply(ctx context.Context) error {
 	return p.s.Router.ReapplyApp(ctx, p.app.ID)
 }
 
+// reapplySwap é o reapply da troca: com o proxy inativo e nenhum domínio
+// apontado para a app não há rota a trocar, então segue sem erro.
+func (p *pipeline) reapplySwap(ctx context.Context) error {
+	err := p.reapply(ctx)
+	if err == nil || !errors.Is(err, proxy.ErrInactive) {
+		return err
+	}
+	doms, derr := p.s.DB.DomainsByApp(ctx, p.app.ID)
+	if derr != nil || len(doms) > 0 {
+		return err
+	}
+	p.out.line("Proxy inativo; a app não tem domínio, nenhuma rota a trocar")
+	return nil
+}
+
 // swap troca a rota para o container novo, que já passou na verificação de
 // saúde. Ordem: host_port → ReapplyApp → deploy atual gravado → só então o
 // container anterior sai. Uma queda em qualquer ponto deixa o Recover com o
@@ -865,7 +880,7 @@ func (p *pipeline) swap(ctx context.Context) error {
 		return fail("falha ao gravar a porta", err)
 	}
 	p.portSwapped = true
-	if err := p.reapply(ctx); err != nil {
+	if err := p.reapplySwap(ctx); err != nil {
 		return proxyFail(err) // abort restaura a porta e a rota
 	}
 	// A rota já é do novo: daqui em diante nada é desfeito nem cancelado.
@@ -894,7 +909,7 @@ func (p *pipeline) swapCompose(ctx context.Context, cid string) error {
 	s := p.s
 	bg := context.WithoutCancel(ctx)
 	p.out.step("==> Trocando a rota")
-	if err := p.reapply(ctx); err != nil {
+	if err := p.reapplySwap(ctx); err != nil {
 		return proxyFail(err)
 	}
 	cur, err := s.DB.GetApp(bg, p.app.ID)

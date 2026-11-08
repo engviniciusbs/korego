@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -138,6 +139,9 @@ func TestDeploy_PortReservationConcurrent(t *testing.T) {
 func TestDeploy_ProxyInactiveReason(t *testing.T) {
 	h := newHarness(t, nil)
 	h.seedCurrent(20000, "old-cid")
+	appID := h.app.ID
+	require.NoError(t, h.db.InsertDomain(h.ctx, &store.Domain{Hostname: "blog.exemplo.com", TargetType: "app",
+		AppID: &appID, WWWRedirect: "none"}))
 	h.router.errFn = func(int) error { return proxy.ErrInactive }
 	d, err := h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
 	require.NoError(t, err)
@@ -146,6 +150,35 @@ func TestDeploy_ProxyInactiveReason(t *testing.T) {
 	assert.Equal(t, "proxy inativo: as portas 80/443 estão em uso ou o Caddy não está ativo", got.Reason)
 	assert.Equal(t, 20000, h.getApp().HostPort)
 	assert.Equal(t, -1, h.rec.first("remove:old-cid"))
+}
+
+// Proxy inativo e nenhum domínio apontado para a app: não há rota a trocar,
+// então o deploy segue (o nginx nas portas 80/443 não impede publicar).
+func TestDeploy_ProxyInactiveWithoutDomainsRuns(t *testing.T) {
+	h := newHarness(t, nil)
+	h.seedCurrent(20000, "old-cid")
+	h.router.errFn = func(int) error { return proxy.ErrInactive }
+	d, err := h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
+	require.NoError(t, err)
+	got := h.wait(d.ID)
+	require.Equal(t, "running", got.Status, got.Reason)
+	a := h.getApp()
+	assert.Equal(t, got.HostPort, a.HostPort)
+	require.NotNil(t, a.CurrentDeployID)
+	assert.Equal(t, d.ID, *a.CurrentDeployID)
+	assert.Equal(t, 1, h.rec.count("remove:old-cid"))
+}
+
+// Outro erro do proxy continua falhando mesmo sem domínios.
+func TestDeploy_ProxyOtherErrorWithoutDomainsFails(t *testing.T) {
+	h := newHarness(t, nil)
+	h.seedCurrent(20000, "old-cid")
+	h.router.errFn = func(int) error { return errors.New("admin api caiu") }
+	d, err := h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
+	require.NoError(t, err)
+	got := h.wait(d.ID)
+	assert.Equal(t, "failed", got.Status)
+	assert.Equal(t, 20000, h.getApp().HostPort)
 }
 
 func TestDeploy_PanicMarksFailed(t *testing.T) {

@@ -79,6 +79,9 @@ type Service struct {
 	statusMu  sync.Mutex
 	status    proxy.Status
 	hasStatus bool
+	// blockedLogged evita repetir o log de ReapplyApp com o proxy bloqueado;
+	// volta a false quando o status sai de blocked.
+	blockedLogged bool
 }
 
 // DomainInput são os campos editáveis de um domínio.
