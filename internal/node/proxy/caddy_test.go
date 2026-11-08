@@ -79,7 +79,8 @@ func TestEnsure_StartsWhenPortsFree(t *testing.T) {
 
 	st := c.Ensure(context.Background())
 	assert.Equal(t, StateActive, st.State)
-	assert.Equal(t, []int{80, 443}, checked)
+	require.GreaterOrEqual(t, len(checked), 2)
+	assert.Equal(t, []int{80, 443}, checked[:2], "portas checadas antes do Run")
 	assert.Equal(t, []string{CaddyImage}, pulled)
 	require.Equal(t, 1, runs)
 	assert.Equal(t, ContainerName, spec.Name)
@@ -132,7 +133,7 @@ func TestEnsure_PullFailureIsError(t *testing.T) {
 func TestEnsure_StartingUntilAdminAnswers(t *testing.T) {
 	d := &dockertest.Fake{
 		ListFn: func(context.Context) ([]docker.Container, error) {
-			return []docker.Container{{ID: "c1", Name: ContainerName, State: "running"}}, nil
+			return []docker.Container{{ID: "c1", Name: ContainerName, State: "running", Managed: true}}, nil
 		},
 	}
 	c := NewCaddy(d, downAdmin(t))
@@ -141,10 +142,11 @@ func TestEnsure_StartingUntilAdminAnswers(t *testing.T) {
 }
 
 func TestEnsure_OwnContainerHoldingPortsIsActive(t *testing.T) {
-	_, admin := newFakeAdmin(t)
+	fa, admin := newFakeAdmin(t)
+	fa.config = `{"apps":{"http":{}}}` // config carregada: o Caddy segura as portas
 	d := &dockertest.Fake{
 		ListFn: func(context.Context) ([]docker.Container, error) {
-			return []docker.Container{{ID: "c1", Name: ContainerName, State: "running"}}, nil
+			return []docker.Container{{ID: "c1", Name: ContainerName, State: "running", Managed: true}}, nil
 		},
 		RunFn: func(context.Context, docker.RunSpec) (string, error) {
 			t.Error("run não deveria ser chamado")
@@ -177,7 +179,7 @@ func TestEnsure_BlockedByOtherProcess(t *testing.T) {
 	st := c.Ensure(context.Background())
 	assert.Equal(t, StateBlocked, st.State)
 	assert.Equal(t, "nginx (pid 7)", st.Process)
-	assert.Contains(t, st.Message, "80")
+	assert.Equal(t, "Proxy inativo: as portas 80/443 estão em uso por nginx (pid 7)", st.Message)
 }
 
 func TestEnsure_RestartsStopped(t *testing.T) {
@@ -185,7 +187,7 @@ func TestEnsure_RestartsStopped(t *testing.T) {
 	var started []string
 	d := &dockertest.Fake{
 		ListFn: func(context.Context) ([]docker.Container, error) {
-			return []docker.Container{{ID: "c1", Name: ContainerName, State: "exited"}}, nil
+			return []docker.Container{{ID: "c1", Name: ContainerName, State: "exited", Managed: true}}, nil
 		},
 		StartFn: func(_ context.Context, id string) error { started = append(started, id); return nil },
 	}
@@ -207,10 +209,11 @@ func TestApply_InactiveError(t *testing.T) {
 	fa, admin := newFakeAdmin(t)
 	d := &dockertest.Fake{
 		ListFn: func(context.Context) ([]docker.Container, error) {
-			return []docker.Container{{ID: "c1", Name: ContainerName, State: "running"}}, nil
+			return []docker.Container{{ID: "c1", Name: ContainerName, State: "running", Managed: true}}, nil
 		},
 	}
 	c := NewCaddy(d, admin)
+	c.PortOwner = freePorts
 	routes := []Route{{Host: "exemplo.com", Upstream: "127.0.0.1:20001"}}
 
 	// Sem Ensure ainda: inativo.
@@ -254,4 +257,109 @@ func TestInSync_DetectsEmptyAfterRestart(t *testing.T) {
 
 	_, err = NewCaddy(&dockertest.Fake{}, downAdmin(t)).InSync(context.Background(), routes)
 	assert.Error(t, err)
+}
+
+func nginxOn80(p int) (string, bool) {
+	if p == 80 {
+		return "nginx (pid 7)", true
+	}
+	return "", false
+}
+
+func TestEnsure_StoppedWithPortBusyIsBlocked(t *testing.T) {
+	_, admin := newFakeAdmin(t)
+	d := &dockertest.Fake{
+		ListFn: func(context.Context) ([]docker.Container, error) {
+			return []docker.Container{{ID: "c1", Name: ContainerName, State: "exited", Managed: true}}, nil
+		},
+		StartFn: func(context.Context, string) error {
+			t.Error("start não deveria ser chamado")
+			return nil
+		},
+	}
+	c := NewCaddy(d, admin)
+	c.PortOwner = nginxOn80
+	st := c.Ensure(context.Background())
+	assert.Equal(t, StateBlocked, st.State)
+	assert.Equal(t, "nginx (pid 7)", st.Process)
+	assert.Equal(t, "Proxy inativo: as portas 80/443 estão em uso por nginx (pid 7)", st.Message)
+}
+
+func TestEnsure_RunningNullConfigPortBusyIsBlocked(t *testing.T) {
+	fa, admin := newFakeAdmin(t) // config "null": o Caddy não escuta em 80/443
+	d := &dockertest.Fake{
+		ListFn: func(context.Context) ([]docker.Container, error) {
+			return []docker.Container{{ID: "c1", Name: ContainerName, State: "running", Managed: true}}, nil
+		},
+		StopFn: func(context.Context, string) error {
+			t.Error("stop não deveria ser chamado")
+			return nil
+		},
+		RemoveForceFn: func(context.Context, string) error {
+			t.Error("remove não deveria ser chamado")
+			return nil
+		},
+	}
+	c := NewCaddy(d, admin)
+	c.PortOwner = func(p int) (string, bool) {
+		if p == 443 {
+			return "apache2 (pid 31)", true
+		}
+		return "", false
+	}
+	st := c.Ensure(context.Background())
+	assert.Equal(t, StateBlocked, st.State)
+	assert.Equal(t, "apache2 (pid 31)", st.Process)
+	assert.Equal(t, "Proxy inativo: as portas 80/443 estão em uso por apache2 (pid 31)", st.Message)
+
+	err := c.Apply(context.Background(), []Route{{Host: "exemplo.com", Upstream: "127.0.0.1:20001"}})
+	assert.ErrorIs(t, err, ErrInactive)
+	assert.Equal(t, 0, fa.loads)
+}
+
+func TestEnsure_RunningNullConfigPortsFreeIsActive(t *testing.T) {
+	_, admin := newFakeAdmin(t)
+	d := &dockertest.Fake{
+		ListFn: func(context.Context) ([]docker.Container, error) {
+			return []docker.Container{{ID: "c1", Name: ContainerName, State: "running", Managed: true}}, nil
+		},
+	}
+	c := NewCaddy(d, admin)
+	var checked []int
+	c.PortOwner = func(p int) (string, bool) { checked = append(checked, p); return "", false }
+	assert.Equal(t, StateActive, c.Ensure(context.Background()).State)
+	assert.Equal(t, []int{80, 443}, checked)
+}
+
+func TestEnsure_ForeignContainerWithSameName(t *testing.T) {
+	_, admin := newFakeAdmin(t)
+	for _, state := range []string{"running", "exited"} {
+		d := &dockertest.Fake{
+			ListFn: func(context.Context) ([]docker.Container, error) {
+				return []docker.Container{{ID: "c1", Name: ContainerName, State: state, Managed: false}}, nil
+			},
+			StartFn: func(context.Context, string) error {
+				t.Error("start não deveria ser chamado")
+				return nil
+			},
+			StopFn: func(context.Context, string) error {
+				t.Error("stop não deveria ser chamado")
+				return nil
+			},
+			RunFn: func(context.Context, docker.RunSpec) (string, error) {
+				t.Error("run não deveria ser chamado")
+				return "", nil
+			},
+			RemoveForceFn: func(context.Context, string) error {
+				t.Error("remove não deveria ser chamado")
+				return nil
+			},
+		}
+		c := NewCaddy(d, admin)
+		c.PortOwner = freePorts
+		st := c.Ensure(context.Background())
+		assert.Equal(t, StateError, st.State, state)
+		assert.Equal(t, "Já existe um container korego-caddy que não foi criado pelo KoreGO.", st.Message)
+		assert.ErrorIs(t, c.Apply(context.Background(), nil), ErrInactive)
+	}
 }

@@ -54,9 +54,12 @@ func NewCaddy(d docker.Client, admin *AdminClient) *Caddy {
 	}
 }
 
-// Ensure garante que o korego-caddy existe e roda. Só checa as portas 80 e
-// 443 quando o container ainda não existe: com ele de pé, quem as ocupa é o
-// próprio Caddy.
+// Ensure garante que o korego-caddy existe e roda. As portas 80 e 443 são
+// checadas quando o container não existe, quando está parado (antes do
+// Start) e quando roda com config vazia: nesses casos o Caddy não as segura,
+// então qualquer escuta nelas é de outro processo. Com config carregada,
+// quem as ocupa é o próprio Caddy. Só usa um korego-caddy com o label
+// korego.managed=true.
 func (c *Caddy) Ensure(ctx context.Context) Status {
 	st := c.ensure(ctx)
 	c.mu.Lock()
@@ -74,9 +77,17 @@ func (c *Caddy) ensure(ctx context.Context) Status {
 		if ct.Name != ContainerName {
 			continue
 		}
+		if !ct.Managed {
+			// Mesmo nome, mas não é nosso: não usa, não inicia, não para.
+			return Status{State: StateError, Message: "Já existe um container korego-caddy que não foi criado pelo KoreGO."}
+		}
 		switch ct.State {
 		case "running", "restarting":
 		default:
+			// Parado, o container não segura nenhuma porta: qualquer dono é alheio.
+			if st, blocked := c.portsBlocked(); blocked {
+				return st
+			}
 			if err := c.docker.Start(ctx, ct.ID); err != nil {
 				return failure("iniciar "+ContainerName, err)
 			}
@@ -84,14 +95,8 @@ func (c *Caddy) ensure(ctx context.Context) Status {
 		return c.ping(ctx)
 	}
 
-	for _, port := range []int{80, 443} {
-		if owner, busy := c.PortOwner(port); busy {
-			return Status{
-				State:   StateBlocked,
-				Process: owner,
-				Message: fmt.Sprintf("a porta %d está ocupada por %s", port, owner),
-			}
-		}
+	if st, blocked := c.portsBlocked(); blocked {
+		return st
 	}
 	if err := c.ensureImage(ctx); err != nil {
 		return failure("baixar "+CaddyImage, err)
@@ -129,12 +134,35 @@ func (c *Caddy) ensureImage(ctx context.Context) error {
 	return c.docker.Pull(ctx, CaddyImage, nil)
 }
 
-// ping devolve active se a Admin API responde, senão starting.
+// portsBlocked confere 80 e 443; ocupada → blocked com o nome do processo.
+func (c *Caddy) portsBlocked() (Status, bool) {
+	for _, port := range []int{80, 443} {
+		if owner, busy := c.PortOwner(port); busy {
+			return Status{
+				State:   StateBlocked,
+				Process: owner,
+				Message: "Proxy inativo: as portas 80/443 estão em uso por " + owner,
+			}, true
+		}
+	}
+	return Status{}, false
+}
+
+// ping devolve starting enquanto a Admin API não responde. Respondendo com
+// config vazia ("null"), o Caddy ainda não escuta em 80/443, então qualquer
+// escuta nelas é de outro processo → blocked (o container fica como está).
+// Com config carregada, o Caddy é quem segura as portas → active.
 func (c *Caddy) ping(ctx context.Context) Status {
 	pctx, cancel := context.WithTimeout(ctx, adminPingTimeout)
 	defer cancel()
-	if err := c.admin.Ping(pctx); err != nil {
+	cfg, err := c.admin.Config(pctx)
+	if err != nil {
 		return Status{State: StateStarting, Message: "aguardando a Admin API do Caddy"}
+	}
+	if SameConfig(cfg, nil) {
+		if st, blocked := c.portsBlocked(); blocked {
+			return st
+		}
 	}
 	return Status{State: StateActive}
 }
