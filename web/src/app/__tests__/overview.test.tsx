@@ -238,4 +238,35 @@ describe("Visão geral", () => {
     expect(await within(box).findByText("Docker indisponível")).toBeInTheDocument();
     expect(within(box).getByRole("button", { name: "Tentar novamente" })).toBeInTheDocument();
   });
+
+  it("lembra de configurar o domínio do painel e mostra o proxy bloqueado", async () => {
+    const panel = (domain: string) => () =>
+      json({
+        domain,
+        domainId: 0,
+        cert: { state: "pending", notAfter: "0001-01-01T00:00:00Z" },
+        publicPort: true,
+        listenAddr: "0.0.0.0:8000",
+        requestHTTPS: false,
+        requestHost: "203.0.113.10",
+      });
+    mockApi({
+      "/api/settings/panel": panel(""),
+      "/api/proxy": () => json({ state: "blocked", process: "apache2", guideUrl: "https://exemplo.com/guia" }),
+    });
+    const { unmount } = renderPage();
+    const reminder = await screen.findByText("Configure o domínio do painel para usar HTTPS");
+    expect(within(reminder.closest("[role=status]") as HTMLElement).getByRole("link", { name: /Configurar domínio/ }))
+      .toHaveAttribute("href", "/configuracoes/painel/");
+    expect(screen.getByText("Proxy inativo: as portas 80/443 estão em uso por apache2")).toBeInTheDocument();
+    unmount();
+
+    mockApi({ "/api/settings/panel": panel("painel.exemplo.com") });
+    renderPage();
+    await waitFor(() =>
+      expect(vi.mocked(fetch).mock.calls.some((c) => c[0] === "/api/settings/panel")).toBe(true),
+    );
+    await screen.findByRole("region", { name: "Containers" });
+    expect(screen.queryByText(/Configure o domínio do painel/)).toBeNull();
+  });
 });

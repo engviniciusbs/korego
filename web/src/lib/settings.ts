@@ -36,7 +36,11 @@ export function useSetPanelDomain() {
   return useMutation({
     mutationFn: (hostname: string) =>
       api<SetPanelDomainResult>("/api/settings/panel/domain", { method: "PUT", body: { hostname } }),
-    onSettled: () => invalidatePanel(qc),
+    onSettled: () => {
+      invalidatePanel(qc);
+      // O GitHub App depende do domínio do painel (panelReady).
+      void qc.invalidateQueries({ queryKey: ["github"] });
+    },
   });
 }
 

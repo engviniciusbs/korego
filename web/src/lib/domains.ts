@@ -24,6 +24,18 @@ export interface CertInfo {
   message?: string;
 }
 
+/**
+ * Validade do certificado. O servidor sempre manda `notAfter`; sem certificado
+ * vem a data zero do Go ("0001-01-01T00:00:00Z"). Qualquer ano antes de 1970,
+ * texto vazio ou inválido conta como ausente.
+ */
+export function certNotAfter(cert: CertInfo): Date | null {
+  if (!cert.notAfter) return null;
+  const d = new Date(cert.notAfter);
+  if (Number.isNaN(d.getTime()) || d.getUTCFullYear() < 1970) return null;
+  return d;
+}
+
 export interface Domain {
   id: number;
   hostname: string;
@@ -110,6 +122,7 @@ export function useSaveDomain() {
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ["domains"] });
       void qc.invalidateQueries({ queryKey: ["apps"] });
+      void qc.invalidateQueries({ queryKey: ["panel"] });
     },
   });
 }
@@ -121,6 +134,7 @@ export function useDeleteDomain() {
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ["domains"] });
       void qc.invalidateQueries({ queryKey: ["apps"] });
+      void qc.invalidateQueries({ queryKey: ["panel"] });
     },
   });
 }

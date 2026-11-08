@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useId, useMemo, useState, type ReactNode } from "react";
 import { LineChart } from "@/components/charts/line-chart";
 import { Sparkline } from "@/components/charts/sparkline";
+import { ProxyBanner } from "@/components/domains/proxy-banner";
 import { PageHeader, PanelState } from "@/components/shell/page-header";
 import { Alert, Badge, Button, Panel, Spinner, Tabs, tabId, tabPanelId, type BadgeVariant } from "@/components/ui";
 import { focusRing } from "@/components/ui/focus";
@@ -13,6 +14,7 @@ import { useContainers, useContainersLive } from "@/lib/containers";
 import { formatBytes, formatGiB, formatPercent, formatRate, formatUptime } from "@/lib/format";
 import { useMetricsCurrent, useMetricsHistory, type MetricsRange, type Sample } from "@/lib/metrics";
 import { usePM2 } from "@/lib/pm2";
+import { usePanelSettings } from "@/lib/settings";
 import { useSystemInfo } from "@/lib/system";
 import { useLive, useLiveStream } from "@/lib/ws";
 
@@ -553,6 +555,22 @@ function PM2Panel() {
 
 // --- Página ------------------------------------------------------------------
 
+/** Lembrete enquanto o painel não tem domínio (só HTTP pela porta 8000). */
+function PanelDomainReminder() {
+  const { data } = usePanelSettings();
+  if (!data || data.domain) return null;
+  return (
+    <Alert variant="info" title="Configure o domínio do painel para usar HTTPS">
+      <p>
+        Hoje o painel responde pela porta 8000, sem criptografia.{" "}
+        <Link href="/configuracoes/painel/" className={cn("text-accent-text hover:text-fg hover:underline", focusRing)}>
+          Configurar domínio <span aria-hidden="true">→</span>
+        </Link>
+      </p>
+    </Alert>
+  );
+}
+
 export default function VisaoGeralPage() {
   const current = useMetricsCurrent();
   const live = useLiveMetrics(current.data);
@@ -564,6 +582,10 @@ export default function VisaoGeralPage() {
       <PageHeader eyebrow="Painel" title="Visão geral" description="Informações do servidor onde o KoreGO está rodando." />
 
       <div className="space-y-8">
+        <div className="space-y-3 empty:hidden">
+          <ProxyBanner />
+          <PanelDomainReminder />
+        </div>
         <ServerSection />
 
         <section aria-labelledby={nowId}>

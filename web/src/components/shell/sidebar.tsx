@@ -21,7 +21,7 @@ const items: NavItem[] = [
   { label: "Visão geral", href: "/" },
   { label: "Containers", href: "/containers/", match: "/containers/" },
   { label: "Projetos", stage: "Etapa 2" },
-  { label: "Domínios", stage: "Etapa 2" },
+  { label: "Domínios", href: "/dominios/", match: "/dominios/" },
   {
     label: "Configurações",
     href: "/configuracoes/seguranca/",
@@ -29,6 +29,8 @@ const items: NavItem[] = [
     children: [
       { label: "Segurança", href: "/configuracoes/seguranca/" },
       { label: "Atualização", href: "/configuracoes/atualizacao/" },
+      { label: "Painel", href: "/configuracoes/painel/" },
+      { label: "GitHub", href: "/configuracoes/github/" },
     ],
   },
 ];
