@@ -60,3 +60,21 @@ func TestLoad_InvalidFile(t *testing.T) {
 	_, err := config.Load(p)
 	assert.Error(t, err)
 }
+
+func TestLoad_PublicIP(t *testing.T) {
+	t.Setenv("KOREGO_PUBLIC_IP", "")
+	c, err := config.Load(filepath.Join(t.TempDir(), "nao-existe.toml"))
+	require.NoError(t, err)
+	assert.Equal(t, "", c.PublicIP)
+
+	p := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(p, []byte("public_ip = \"203.0.113.10\"\n"), 0o600))
+	c, err = config.Load(p)
+	require.NoError(t, err)
+	assert.Equal(t, "203.0.113.10", c.PublicIP)
+
+	t.Setenv("KOREGO_PUBLIC_IP", "203.0.113.20")
+	c, err = config.Load(p)
+	require.NoError(t, err)
+	assert.Equal(t, "203.0.113.20", c.PublicIP)
+}

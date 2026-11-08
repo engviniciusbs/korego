@@ -21,6 +21,9 @@ type Config struct {
 	// PM2Home é o PM2_HOME do usuário que roda o PM2 (vazio = $PM2_HOME do
 	// ambiente, senão $HOME/.pm2 do usuário do KoreGO).
 	PM2Home string `toml:"pm2_home"`
+	// PublicIP é o IP público da máquina, usado na verificação de DNS dos
+	// domínios (vazio = só os IPs das interfaces).
+	PublicIP string `toml:"public_ip"`
 }
 
 // Load lê o arquivo TOML em path (inexistente não é erro) e aplica as
@@ -40,6 +43,7 @@ func Load(path string) (Config, error) {
 	override(&c.DevProxy, "KOREGO_DEV_PROXY")
 	override(&c.PM2Path, "KOREGO_PM2_PATH")
 	override(&c.PM2Home, "KOREGO_PM2_HOME")
+	override(&c.PublicIP, "KOREGO_PUBLIC_IP")
 	return c, nil
 }
 
