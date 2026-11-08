@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/engviniciusbs/korego/internal/node/docker"
@@ -33,17 +35,64 @@ func fetch(ctx context.Context, r Runner, dir string, src Source, out io.Writer,
 		return "", "", errors.New("branch inválido")
 	}
 	clone := Cmd{Name: "git", Args: []string{"clone", "--depth", "1", "--branch", src.Branch, "--single-branch", src.URL, dir}}
-	if src.Token != "" {
-		cred := tokenCred(src.Token)
-		clone.Env = []string{
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader",
-			"GIT_CONFIG_VALUE_0=Authorization: Basic " + cred,
-		}
-	}
+	clone.Env = tokenEnv(src.Token)
 	if err := r.Run(ctx, clone, out); err != nil {
 		return "", "", fmt.Errorf("git clone: %w", err)
 	}
+	return headInfo(ctx, r, dir)
+}
+
+// tokenEnv devolve as variáveis que mandam o token só para github.com, ou nil.
+func tokenEnv(token string) []string {
+	if token == "" {
+		return nil
+	}
+	return []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: Basic " + tokenCred(token),
+	}
+}
+
+// AppDir é o diretório de trabalho persistente de uma aplicação Compose
+// (<dataDir>/apps/<slug>). Apagar a aplicação apaga esse diretório.
+func AppDir(dataDir, slug string) string {
+	return filepath.Join(dataDir, "apps", slug)
+}
+
+// FetchInto atualiza um diretório de trabalho persistente: sem repositório em
+// dir, faz o clone raso; com repositório, aponta origin para a URL, busca o
+// branch (raso) e faz reset --hard FETCH_HEAD. Nunca roda git clean: arquivos
+// não versionados e ignorados (dados de bind mounts) sobrevivem.
+func FetchInto(ctx context.Context, r Runner, dir string, src Source, out io.Writer) (sha, msg string, err error) {
+	return fetchInto(ctx, r, dir, src, out, false)
+}
+
+func fetchInto(ctx context.Context, r Runner, dir string, src Source, out io.Writer, allowFile bool) (sha, msg string, err error) {
+	if _, serr := os.Stat(filepath.Join(dir, ".git")); serr != nil {
+		return fetch(ctx, r, dir, src, out, allowFile)
+	}
+	if !ValidGitURL(src.URL) && !(allowFile && validFileURL(src.URL)) {
+		return "", "", errors.New("URL do repositório inválida")
+	}
+	if !ValidBranch(src.Branch) {
+		return "", "", errors.New("branch inválido")
+	}
+	if err := r.Run(ctx, Cmd{Name: "git", Args: []string{"-C", dir, "remote", "set-url", "origin", src.URL}}, out); err != nil {
+		return "", "", fmt.Errorf("git remote set-url: %w", err)
+	}
+	f := Cmd{Name: "git", Args: []string{"-C", dir, "fetch", "--depth", "1", "origin", src.Branch}, Env: tokenEnv(src.Token)}
+	if err := r.Run(ctx, f, out); err != nil {
+		return "", "", fmt.Errorf("git fetch: %w", err)
+	}
+	if err := r.Run(ctx, Cmd{Name: "git", Args: []string{"-C", dir, "reset", "--hard", "FETCH_HEAD"}}, out); err != nil {
+		return "", "", fmt.Errorf("git reset: %w", err)
+	}
+	return headInfo(ctx, r, dir)
+}
+
+// headInfo devolve o SHA e o assunto do commit em HEAD.
+func headInfo(ctx context.Context, r Runner, dir string) (sha, msg string, err error) {
 	if sha, err = capture(ctx, r, Cmd{Name: "git", Args: []string{"-C", dir, "rev-parse", "HEAD"}}); err != nil {
 		return "", "", fmt.Errorf("git rev-parse: %w", err)
 	}

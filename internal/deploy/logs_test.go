@@ -54,7 +54,9 @@ func TestDeployLog_NumberedAndRead(t *testing.T) {
 	for len(got) < 3 {
 		select {
 		case ev := <-ch:
-			got = append(got, ev.Data.(LogEntry))
+			if e, ok := ev.Data.(LogEntry); ok {
+				got = append(got, e)
+			}
 		case <-time.After(time.Second):
 			t.Fatalf("eventos recebidos: %v", got)
 		}
@@ -65,6 +67,40 @@ func TestDeployLog_NumberedAndRead(t *testing.T) {
 		st, err := os.Stat(filepath.Join(dir, "logs"))
 		require.NoError(t, err)
 		assert.Equal(t, os.FileMode(0o700), st.Mode().Perm())
+	}
+}
+
+func TestDeployLog_DoneMarker(t *testing.T) {
+	dir := t.TempDir()
+	hub := events.NewHub()
+	ch, cancel := hub.Subscribe("deploy-logs:5")
+	defer cancel()
+
+	assert.True(t, LogFinished(dir, 5), "sem log (nunca começou) conta como terminado")
+	l, err := OpenDeployLog(dir, 5, hub)
+	require.NoError(t, err)
+	require.NoError(t, l.Line("x"))
+	assert.False(t, LogFinished(dir, 5), "log aberto")
+	require.NoError(t, l.Close())
+	require.NoError(t, l.Close())
+	assert.True(t, LogFinished(dir, 5))
+	_, err = os.Stat(filepath.Join(dir, "logs", "deploy-5.done"))
+	assert.NoError(t, err)
+
+	var got []any
+	for len(got) < 2 {
+		select {
+		case ev := <-ch:
+			got = append(got, ev.Data)
+		case <-time.After(time.Second):
+			t.Fatalf("eventos: %v", got)
+		}
+	}
+	assert.Equal(t, []any{LogEntry{1, "x"}, LogDone{Done: true}}, got)
+	select {
+	case ev := <-ch:
+		t.Fatalf("evento a mais: %v", ev)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 

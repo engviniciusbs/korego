@@ -28,18 +28,49 @@ type LogEntry struct {
 // LogTopic é o tópico do hub com as linhas do log do deploy id.
 func LogTopic(id int64) string { return "deploy-logs:" + strconv.FormatInt(id, 10) }
 
+// LogDone é publicado no tópico do log quando o log é fechado.
+type LogDone struct {
+	Done bool `json:"done"`
+}
+
 func logPath(dataDir string, id int64) string {
 	return filepath.Join(dataDir, "logs", fmt.Sprintf("deploy-%d.log", id))
+}
+
+func donePath(dataDir string, id int64) string {
+	return filepath.Join(dataDir, "logs", fmt.Sprintf("deploy-%d.done", id))
+}
+
+// LogFinished diz se o log do deploy está fechado: existe o marcador
+// logs/deploy-<id>.done (gravado por DeployLog.Close e pelo Recover) ou o
+// deploy nunca abriu log (cancelado/substituído na fila). A API considera o
+// log completo quando o deploy está num status final E LogFinished é true.
+func LogFinished(dataDir string, id int64) bool {
+	if _, err := os.Stat(donePath(dataDir, id)); err == nil {
+		return true
+	}
+	_, err := os.Stat(logPath(dataDir, id))
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// markLogDone grava o marcador de fim do log.
+func markLogDone(dataDir string, id int64) error {
+	if err := os.MkdirAll(filepath.Join(dataDir, "logs"), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(donePath(dataDir, id), nil, 0o600)
 }
 
 // DeployLog grava as linhas do log de um deploy em <dataDir>/logs/deploy-<id>.log
 // e as publica no tópico deploy-logs:<id>. O texto já chega mascarado.
 type DeployLog struct {
-	mu    sync.Mutex
-	f     *os.File
-	n     int
-	hub   *events.Hub
-	topic string
+	mu      sync.Mutex
+	f       *os.File
+	n       int
+	hub     *events.Hub
+	topic   string
+	dataDir string
+	id      int64
 }
 
 // OpenDeployLog abre (em append) o log do deploy, criando logs/ com 0700.
@@ -57,7 +88,8 @@ func OpenDeployLog(dataDir string, id int64, hub *events.Hub) (*DeployLog, error
 	if err != nil {
 		return nil, fmt.Errorf("abrir log do deploy: %w", err)
 	}
-	return &DeployLog{f: f, n: len(existing), hub: hub, topic: LogTopic(id)}, nil
+	_ = os.Remove(donePath(dataDir, id)) // reaberto: ainda não terminou
+	return &DeployLog{f: f, n: len(existing), hub: hub, topic: LogTopic(id), dataDir: dataDir, id: id}, nil
 }
 
 // Line grava uma linha (sem '\n') e a publica com o número seguinte.
@@ -78,7 +110,8 @@ func (l *DeployLog) Line(text string) error {
 	return nil
 }
 
-// Close fecha o arquivo. Pode ser chamado mais de uma vez.
+// Close fecha o arquivo, grava o marcador de fim (veja LogFinished) e publica
+// {"done": true} no tópico. Pode ser chamado mais de uma vez.
 func (l *DeployLog) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -87,6 +120,12 @@ func (l *DeployLog) Close() error {
 	}
 	err := l.f.Close()
 	l.f = nil
+	if merr := markLogDone(l.dataDir, l.id); merr != nil && err == nil {
+		err = fmt.Errorf("marcar fim do log: %w", merr)
+	}
+	if l.hub != nil {
+		l.hub.Publish(l.topic, LogDone{Done: true})
+	}
 	return err
 }
 

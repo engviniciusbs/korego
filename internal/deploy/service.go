@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strconv"
@@ -18,6 +20,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/jobs"
 	"github.com/engviniciusbs/korego/internal/node/docker"
+	"github.com/engviniciusbs/korego/internal/node/proxy"
 	"github.com/engviniciusbs/korego/internal/secrets"
 	"github.com/engviniciusbs/korego/internal/store"
 )
@@ -36,8 +39,11 @@ const StatusTopic = "deploys"
 // defaultHealthTimeout vale quando a aplicação não define health_timeout_s.
 const defaultHealthTimeout = 60 * time.Second
 
-// overrideName é o arquivo override do Compose gravado no diretório do clone.
+// overrideName é o arquivo override do Compose gravado no diretório da app.
 const overrideName = "docker-compose.korego.yml"
+
+// reasonInternal é o motivo de um deploy que terminou em panic.
+const reasonInternal = "erro interno no deploy"
 
 // Router reaplica as rotas do proxy de uma aplicação (domains.Service).
 type Router interface {
@@ -69,7 +75,7 @@ type Service struct {
 	Queue  *jobs.Queue
 	Router Router
 	Tokens TokenSource
-	// DataDir guarda builds/ e logs/.
+	// DataDir guarda builds/, logs/ e apps/ (diretórios persistentes do Compose).
 	DataDir string
 	Now     func() time.Time
 	// Dial testa a porta quando o container não tem healthcheck (padrão:
@@ -80,6 +86,11 @@ type Service struct {
 
 	// listen testa se uma porta está livre (padrão TryListen).
 	listen func(addr string) error
+
+	// portMu serializa "portas em uso → FreePort → reserva". inflight guarda
+	// as portas escolhidas por deploys cujo container ainda não foi gravado.
+	portMu   sync.Mutex
+	inflight map[int]bool
 }
 
 func (s *Service) now() time.Time {
@@ -120,6 +131,89 @@ func (s *Service) removeBuildDir(id int64) {
 		log.Printf("deploy %d: remover %s: %v", id, dir, err)
 	}
 	_ = os.Remove(filepath.Clean(dir) + ".railpack-plan.json")
+}
+
+// usedPortsLocked devolve as portas em uso (banco + reservas em memória).
+// Exige s.portMu.
+func (s *Service) usedPortsLocked(ctx context.Context) (map[int]bool, error) {
+	used, err := s.DB.UsedHostPorts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for p := range s.inflight {
+		used[p] = true
+	}
+	return used, nil
+}
+
+// reservePort escolhe uma porta livre (fora de exclude) e a reserva em
+// memória até releasePort; nesse meio-tempo o deploy grava a porta no banco.
+func (s *Service) reservePort(ctx context.Context, exclude ...int) (int, error) {
+	s.portMu.Lock()
+	defer s.portMu.Unlock()
+	used, err := s.usedPortsLocked(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, p := range exclude {
+		used[p] = true
+	}
+	port, err := FreePort(used, s.listenFn())
+	if err != nil {
+		return 0, err
+	}
+	if s.inflight == nil {
+		s.inflight = map[int]bool{}
+	}
+	s.inflight[port] = true
+	return port, nil
+}
+
+func (s *Service) releasePort(port int) {
+	s.portMu.Lock()
+	defer s.portMu.Unlock()
+	delete(s.inflight, port)
+}
+
+// reserveComposePort devolve a porta fixa da app Compose, alocando e gravando
+// apps.host_port na primeira vez (allocated = true).
+func (s *Service) reserveComposePort(ctx context.Context, appID int64) (port int, allocated bool, err error) {
+	s.portMu.Lock()
+	defer s.portMu.Unlock()
+	a, err := s.DB.GetApp(ctx, appID)
+	if err != nil {
+		return 0, false, err
+	}
+	if a.HostPort > 0 {
+		return a.HostPort, false, nil
+	}
+	used, err := s.usedPortsLocked(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	if port, err = FreePort(used, s.listenFn()); err != nil {
+		return 0, false, err
+	}
+	a.HostPort = port
+	if err := s.DB.UpdateApp(ctx, &a); err != nil {
+		return 0, false, err
+	}
+	return port, true, nil
+}
+
+// releaseComposePort zera apps.host_port se ainda for port (primeiro deploy
+// Compose que falhou).
+func (s *Service) releaseComposePort(ctx context.Context, appID int64, port int) {
+	s.portMu.Lock()
+	defer s.portMu.Unlock()
+	a, err := s.DB.GetApp(ctx, appID)
+	if err != nil || a.HostPort != port {
+		return
+	}
+	a.HostPort = 0
+	if err := s.DB.UpdateApp(ctx, &a); err != nil {
+		log.Printf("app %d: liberar porta %d: %v", appID, port, err)
+	}
 }
 
 func (s *Service) publish(id, appID int64, status, reason string) {
@@ -231,25 +325,33 @@ func (s *Service) Cancel(ctx context.Context, deployID int64) error {
 	return nil
 }
 
-// Recover roda na subida: deploys building/starting viram failed
-// ("interrompido"), os containers que eles criaram são removidos (menos o do
-// deploy atual da aplicação) e os queued voltam para a fila, em ordem.
+// Recover roda na subida:
+//   - deploys building/starting viram failed ("interrompido"), os containers
+//     que eles criaram são removidos e a porta da app volta à do deploy atual;
+//   - se o interrompido já é o deploy atual da app (caiu depois de a rota
+//     trocar), ele volta a running e os outros running da app saem;
+//   - os logs dos interrompidos são marcados como fechados;
+//   - os queued voltam para a fila, em ordem.
 func (s *Service) Recover(ctx context.Context) error {
 	interrupted, err := s.DB.MarkInterrupted(ctx, s.now())
 	if err != nil {
 		return err
 	}
 	for _, d := range interrupted {
-		s.publish(d.ID, d.AppID, d.Status, d.Reason)
 		app, err := s.DB.GetApp(ctx, d.AppID)
-		current := err == nil && app.CurrentDeployID != nil && *app.CurrentDeployID == d.ID
-		if !current {
+		if err == nil && app.CurrentDeployID != nil && *app.CurrentDeployID == d.ID {
+			s.promoteInterrupted(ctx, d)
+		} else {
+			s.publish(d.ID, d.AppID, d.Status, d.Reason)
 			s.removeDeployContainers(ctx, d.ID)
 			if err == nil {
 				s.restorePort(ctx, app, d)
 			}
 		}
 		s.removeBuildDir(d.ID)
+		if err := markLogDone(s.DataDir, d.ID); err != nil {
+			log.Printf("deploy %d: marcar fim do log: %v", d.ID, err)
+		}
 	}
 	queued, err := s.DB.QueuedDeploys(ctx)
 	if err != nil {
@@ -259,6 +361,25 @@ func (s *Service) Recover(ctx context.Context) error {
 		s.enqueue(d)
 	}
 	return nil
+}
+
+// promoteInterrupted conclui uma troca cortada depois de SetCurrentDeploy: o
+// deploy já recebe o tráfego, então fica running; os demais running da app
+// (o anterior, cujo container talvez ainda exista) são removidos e superseded.
+func (s *Service) promoteInterrupted(ctx context.Context, d store.Deploy) {
+	s.setStatus(ctx, d.ID, d.AppID, "running", "")
+	list, err := s.DB.ListDeploys(ctx, d.AppID, 1000)
+	if err != nil {
+		log.Printf("deploy %d: listar deploys da app: %v", d.ID, err)
+		return
+	}
+	for _, o := range list {
+		if o.ID == d.ID || o.Status != "running" {
+			continue
+		}
+		s.removeDeployContainers(ctx, o.ID)
+		s.setStatus(ctx, o.ID, o.AppID, "superseded", "")
+	}
 }
 
 func (s *Service) removeDeployContainers(ctx context.Context, id int64) {
@@ -274,9 +395,10 @@ func (s *Service) removeDeployContainers(ctx context.Context, id int64) {
 	}
 }
 
-// restorePort desfaz uma troca interrompida no meio: se a app ficou apontando
-// para a porta do deploy interrompido, volta para a do deploy atual. As rotas
-// são reaplicadas na subida pelo serviço de domínios.
+// restorePort desfaz uma troca interrompida antes de SetCurrentDeploy: se a
+// app ficou apontando para a porta do deploy interrompido, volta para a do
+// deploy atual (cujo container ainda existe: ele só é removido depois de
+// SetCurrentDeploy). As rotas são reaplicadas na subida pelo serviço de domínios.
 func (s *Service) restorePort(ctx context.Context, app store.App, d store.Deploy) {
 	if app.BuildType == "compose" || d.HostPort == 0 || app.HostPort != d.HostPort {
 		return
@@ -310,6 +432,26 @@ func fail(prefix string, err error) error {
 	return &failure{reason: prefix + ": " + err.Error(), err: err}
 }
 
+// proxyFail traduz a falha de ReapplyApp.
+func proxyFail(err error) error {
+	if errors.Is(err, proxy.ErrInactive) {
+		return failWith(err, "proxy inativo: as portas 80/443 estão em uso ou o Caddy não está ativo")
+	}
+	return fail("falha ao atualizar o proxy", err)
+}
+
+// envRunner acrescenta as variáveis da app ao ambiente de cada comando (para
+// a interpolação ${VAR} do Compose). Os valores nunca vão para Args nem disco.
+type envRunner struct {
+	r   Runner
+	env []string
+}
+
+func (e envRunner) Run(ctx context.Context, c Cmd, out io.Writer) error {
+	c.Env = append(slices.Clone(c.Env), e.env...)
+	return e.r.Run(ctx, c, out)
+}
+
 // pipeline é a execução de um deploy.
 type pipeline struct {
 	s       *Service
@@ -319,11 +461,17 @@ type pipeline struct {
 	env     []string
 	secrets []string
 	token   string
+	dir     string // clone: builds/<id>, ou apps/<slug> no Compose
 	image   string
 	sha     string
 	msg     string
 	port    int
 	cid     string // container novo (não-Compose) a remover se algo falhar
+
+	composeAllocated bool // a porta da app Compose foi alocada neste deploy
+	portSwapped      bool // apps.host_port já aponta para o novo, rota ainda não confirmada
+	oldPort          int
+	live             bool // o deploy já é o atual: nada mais é desfeito
 }
 
 func (s *Service) run(ctx context.Context, id int64) {
@@ -345,11 +493,13 @@ func (s *Service) run(ctx context.Context, id int64) {
 		s.setStatus(bg, d.ID, d.AppID, "failed", "aplicação não encontrada")
 		return
 	}
-	defer s.removeBuildDir(id)
 	p := &pipeline{s: s, d: d, app: app, sha: d.CommitSHA, msg: d.CommitMessage}
 	p.execute(ctx)
 }
 
+// execute roda os passos. Ao fim, sempre nesta ordem: status final, remoção de
+// builds/<id> e fechamento do log (marcador de fim). Um panic vira failed
+// ("erro interno no deploy"), com a mesma limpeza.
 func (p *pipeline) execute(ctx context.Context) {
 	bg := context.WithoutCancel(ctx)
 	s := p.s
@@ -358,10 +508,24 @@ func (p *pipeline) execute(ctx context.Context) {
 		s.setStatus(bg, p.d.ID, p.d.AppID, "failed", "não foi possível abrir o log do deploy")
 		return
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("deploy %d: panic: %v\n%s", p.d.ID, r, debug.Stack())
+			if p.out == nil {
+				p.out = newLogChain(logf, p.secrets)
+			}
+			if p.live {
+				p.out.line("==> " + reasonInternal + " depois da troca; o deploy segue no ar")
+			} else {
+				p.abort(ctx, "failed", reasonInternal)
+			}
+		}
+		s.removeBuildDir(p.d.ID)
+		p.out.Close()
+	}()
 	s.setStatus(bg, p.d.ID, p.d.AppID, "building", "")
 	prepErr := p.prepare(ctx)
 	p.out = newLogChain(logf, p.secrets)
-	defer p.out.Close()
 	err = prepErr
 	if err == nil {
 		err = p.steps(ctx)
@@ -445,6 +609,8 @@ func (p *pipeline) steps(ctx context.Context) error {
 }
 
 // source busca o código e constrói (git/github), ou puxa e etiqueta (image).
+// Compose usa o diretório persistente apps/<slug> (fetch + reset, nunca
+// clean); os outros, um clone novo em builds/<id>.
 func (p *pipeline) source(ctx context.Context) error {
 	s, app := p.s, p.app
 	switch app.SourceType {
@@ -457,20 +623,40 @@ func (p *pipeline) source(ctx context.Context) error {
 			}
 			url = "https://github.com/" + app.Repo + ".git"
 		}
-		if err := os.MkdirAll(filepath.Join(s.DataDir, "builds"), 0o700); err != nil {
-			return fail("falha ao criar o diretório de build", err)
+		src := Source{URL: url, Branch: app.Branch, Token: p.token}
+		var sha, msg string
+		var err error
+		if p.compose() {
+			if !ValidSlug(app.Slug) {
+				return failWith(nil, "slug inválido: %s", app.Slug)
+			}
+			if err := os.MkdirAll(filepath.Join(s.DataDir, "apps"), 0o700); err != nil {
+				return fail("falha ao criar o diretório da aplicação", err)
+			}
+			p.dir = AppDir(s.DataDir, app.Slug)
+			sha, msg, err = fetchInto(ctx, s.Runner, p.dir, src, p.out, s.AllowFileURLs)
+			if err == nil {
+				err = os.Chmod(p.dir, 0o700)
+			}
+		} else {
+			if err := os.MkdirAll(filepath.Join(s.DataDir, "builds"), 0o700); err != nil {
+				return fail("falha ao criar o diretório de build", err)
+			}
+			p.dir = s.buildDir(p.d.ID)
+			sha, msg, err = fetch(ctx, s.Runner, p.dir, src, p.out, s.AllowFileURLs)
 		}
-		dir := s.buildDir(p.d.ID)
-		sha, msg, err := fetch(ctx, s.Runner, dir, Source{URL: url, Branch: app.Branch, Token: p.token}, p.out, s.AllowFileURLs)
 		if err != nil {
 			return fail("falha ao buscar o código", err)
 		}
 		p.sha, p.msg = sha, msg
 		p.out.step("==> Construindo")
-		if !p.compose() {
+		r := s.Runner
+		if p.compose() {
+			r = envRunner{r: s.Runner, env: p.env}
+		} else {
 			p.image = ImageForApp(app, sha, "")
 		}
-		if err := Build(ctx, s.Runner, app, dir, p.image, p.out); err != nil {
+		if err := Build(ctx, r, app, p.dir, p.image, p.out); err != nil {
 			if errors.Is(err, ErrRailpackMissing) {
 				return failWith(err, "railpack não está instalado")
 			}
@@ -506,14 +692,19 @@ func retryableStart(err error) bool {
 func (p *pipeline) startContainer(ctx context.Context) error {
 	s := p.s
 	p.out.step("==> Subindo container")
-	used, err := s.DB.UsedHostPorts(ctx)
+	// As reservas em memória valem até a porta estar gravada no deploy (fim
+	// desta função); daí em diante UsedHostPorts a enxerga.
+	var reserved []int
+	defer func() {
+		for _, port := range reserved {
+			s.releasePort(port)
+		}
+	}()
+	port, err := s.reservePort(ctx)
 	if err != nil {
 		return fail("falha ao escolher a porta", err)
 	}
-	port, err := FreePort(used, s.listenFn())
-	if err != nil {
-		return fail("falha ao escolher a porta", err)
-	}
+	reserved = append(reserved, port)
 	cid, err := StartContainer(ctx, s.Docker, p.app, p.d.ID, p.image, p.env, port)
 	if err != nil && ctx.Err() == nil && retryableStart(err) {
 		if errors.Is(err, docker.ErrConflict) {
@@ -525,10 +716,10 @@ func (p *pipeline) startContainer(ctx context.Context) error {
 		} else {
 			p.out.line(fmt.Sprintf("Porta %d ocupada, tentando outra", port))
 		}
-		used[port] = true
-		if port, err = FreePort(used, s.listenFn()); err != nil {
+		if port, err = s.reservePort(ctx, port); err != nil {
 			return fail("falha ao escolher a porta", err)
 		}
+		reserved = append(reserved, port)
 		cid, err = StartContainer(ctx, s.Docker, p.app, p.d.ID, p.image, p.env, port)
 	}
 	if err != nil {
@@ -549,36 +740,20 @@ func (p *pipeline) startContainer(ctx context.Context) error {
 func (p *pipeline) startCompose(ctx context.Context) (string, error) {
 	s := p.s
 	p.out.step("==> Subindo container")
-	port := p.app.HostPort
-	if port == 0 {
-		used, err := s.DB.UsedHostPorts(ctx)
-		if err != nil {
-			return "", fail("falha ao escolher a porta", err)
-		}
-		if port, err = FreePort(used, s.listenFn()); err != nil {
-			return "", fail("falha ao escolher a porta", err)
-		}
-		a, err := s.DB.GetApp(ctx, p.app.ID)
-		if err != nil {
-			return "", fail("falha ao gravar a porta", err)
-		}
-		a.HostPort = port
-		if err := s.DB.UpdateApp(ctx, &a); err != nil {
-			return "", fail("falha ao gravar a porta", err)
-		}
-		p.app.HostPort = port
+	port, allocated, err := s.reserveComposePort(ctx, p.app.ID)
+	if err != nil {
+		return "", fail("falha ao escolher a porta", err)
 	}
-	p.port = port
+	p.port, p.composeAllocated, p.app.HostPort = port, allocated, port
 	data, err := ComposeOverride(p.app, port)
 	if err != nil {
 		return "", fail("falha ao gerar o override do Compose", err)
 	}
-	dir := s.buildDir(p.d.ID)
-	override := filepath.Join(dir, overrideName)
+	override := filepath.Join(p.dir, overrideName)
 	if err := os.WriteFile(override, data, 0o600); err != nil {
 		return "", fail("falha ao gravar o override do Compose", err)
 	}
-	if err := ComposeUp(ctx, s.Runner, p.app, dir, override, p.out); err != nil {
+	if err := ComposeUp(ctx, envRunner{r: s.Runner, env: p.env}, p.app, p.dir, override, p.out); err != nil {
 		return "", fail("falha ao subir o Compose", err)
 	}
 	cs, err := s.Docker.ListByLabel(ctx, "com.docker.compose.project", "korego-"+p.app.Slug)
@@ -629,7 +804,10 @@ func (p *pipeline) reapply(ctx context.Context) error {
 }
 
 // swap troca a rota para o container novo, que já passou na verificação de
-// saúde. Só depois de o proxy aceitar é que o container anterior sai.
+// saúde. Ordem: host_port → ReapplyApp → deploy atual gravado → só então o
+// container anterior sai. Uma queda em qualquer ponto deixa o Recover com o
+// estado certo: antes de SetCurrentDeploy o anterior segue intacto; depois,
+// o novo é o atual e é ele que fica.
 func (p *pipeline) swap(ctx context.Context) error {
 	s := p.s
 	bg := context.WithoutCancel(ctx)
@@ -638,27 +816,19 @@ func (p *pipeline) swap(ctx context.Context) error {
 	if err != nil {
 		return fail("falha ao ler a aplicação", err)
 	}
-	oldPort, prevID := cur.HostPort, cur.CurrentDeployID
+	prevID := cur.CurrentDeployID
+	p.oldPort = cur.HostPort
 	cur.HostPort = p.port
 	if err := s.DB.UpdateApp(ctx, &cur); err != nil {
 		return fail("falha ao gravar a porta", err)
 	}
+	p.portSwapped = true
 	if err := p.reapply(ctx); err != nil {
-		// Volta a porta e a rota; o container anterior segue no ar.
-		if back, gerr := s.DB.GetApp(bg, p.app.ID); gerr == nil {
-			back.HostPort = oldPort
-			if uerr := s.DB.UpdateApp(bg, &back); uerr != nil {
-				log.Printf("deploy %d: restaurar porta: %v", p.d.ID, uerr)
-			}
-		}
-		if rerr := p.reapply(bg); rerr != nil {
-			log.Printf("deploy %d: reaplicar rota antiga: %v", p.d.ID, rerr)
-		}
-		return fail("falha ao atualizar o proxy", err)
+		return proxyFail(err) // abort restaura a porta e a rota
 	}
 	// A rota já é do novo: daqui em diante nada é desfeito nem cancelado.
 	newCID := p.cid
-	p.cid = ""
+	p.record(bg, newCID)
 	var prev *store.Deploy
 	if prevID != nil && *prevID != p.d.ID {
 		if d, err := s.DB.GetDeploy(bg, *prevID); err == nil {
@@ -672,7 +842,8 @@ func (p *pipeline) swap(ctx context.Context) error {
 			}
 		}
 	}
-	return p.finish(bg, newCID, prev)
+	p.markRunning(bg, prev)
+	return nil
 }
 
 // swapCompose: os containers já foram recriados pelo Compose na porta fixa;
@@ -682,7 +853,7 @@ func (p *pipeline) swapCompose(ctx context.Context, cid string) error {
 	bg := context.WithoutCancel(ctx)
 	p.out.step("==> Trocando a rota")
 	if err := p.reapply(ctx); err != nil {
-		return fail("falha ao atualizar o proxy", err)
+		return proxyFail(err)
 	}
 	cur, err := s.DB.GetApp(bg, p.app.ID)
 	if err != nil {
@@ -694,24 +865,30 @@ func (p *pipeline) swapCompose(ctx context.Context, cid string) error {
 			prev = &d
 		}
 	}
-	return p.finish(bg, cid, prev)
+	p.record(bg, cid)
+	p.markRunning(bg, prev)
+	return nil
 }
 
-// finish grava o resultado, aponta a app para o deploy e marca o anterior
-// como superseded (D4).
-func (p *pipeline) finish(ctx context.Context, cid string, prev *store.Deploy) error {
+// record grava o resultado e aponta a app para este deploy. A partir daqui o
+// deploy é o atual (live) e não é mais desfeito.
+func (p *pipeline) record(ctx context.Context, cid string) {
 	s := p.s
+	p.cid, p.portSwapped, p.composeAllocated, p.live = "", false, false, true
 	if err := s.DB.SetDeployResult(ctx, p.d.ID, p.image, p.port, cid, p.sha, p.msg); err != nil {
 		log.Printf("deploy %d: gravar resultado: %v", p.d.ID, err)
 	}
 	if err := s.DB.SetCurrentDeploy(ctx, p.app.ID, p.d.ID); err != nil {
 		log.Printf("deploy %d: definir deploy atual: %v", p.d.ID, err)
 	}
-	s.setStatus(ctx, p.d.ID, p.d.AppID, "running", "")
+}
+
+// markRunning grava running e marca o anterior como superseded (D4).
+func (p *pipeline) markRunning(ctx context.Context, prev *store.Deploy) {
+	p.s.setStatus(ctx, p.d.ID, p.d.AppID, "running", "")
 	if prev != nil && prev.Status == "running" {
-		s.setStatus(ctx, prev.ID, prev.AppID, "superseded", "")
+		p.s.setStatus(ctx, prev.ID, prev.AppID, "superseded", "")
 	}
-	return nil
 }
 
 // cleanup remove imagens antigas (fora das 3 mais recentes). Falhas aqui não
@@ -730,17 +907,8 @@ func (p *pipeline) cleanup(ctx context.Context) {
 	p.out.line("Deploy concluído")
 }
 
-// fail desfaz o que o deploy criou (só o container novo), registra o motivo e
-// grava failed, ou cancelled se ctx foi cancelado.
+// fail grava failed (ou cancelled, se ctx foi cancelado) com o motivo do erro.
 func (p *pipeline) fail(ctx context.Context, err error) {
-	s := p.s
-	bg := context.WithoutCancel(ctx)
-	if p.cid != "" {
-		if rerr := s.Docker.RemoveForce(bg, p.cid); rerr != nil {
-			log.Printf("deploy %d: remover container novo: %v", p.d.ID, rerr)
-		}
-		p.cid = ""
-	}
 	status, reason := "failed", "erro: "+err.Error()
 	var f *failure
 	if errors.As(err, &f) {
@@ -749,13 +917,43 @@ func (p *pipeline) fail(ctx context.Context, err error) {
 	if ctx.Err() != nil {
 		status, reason = "cancelled", "cancelado"
 	}
+	p.abort(ctx, status, reason)
+}
+
+// abort desfaz só o que este deploy fez — porta da app trocada sem rota
+// confirmada (volta a porta e reaplica), container novo, porta Compose alocada
+// agora — registra o motivo e grava o status. Nunca toca no anterior.
+func (p *pipeline) abort(ctx context.Context, status, reason string) {
+	s := p.s
+	bg := context.WithoutCancel(ctx)
+	if p.portSwapped {
+		if back, err := s.DB.GetApp(bg, p.app.ID); err == nil {
+			back.HostPort = p.oldPort
+			if err := s.DB.UpdateApp(bg, &back); err != nil {
+				log.Printf("deploy %d: restaurar porta: %v", p.d.ID, err)
+			}
+		}
+		if err := p.reapply(bg); err != nil {
+			log.Printf("deploy %d: reaplicar rota antiga: %v", p.d.ID, err)
+		}
+		p.portSwapped = false
+	}
+	if p.cid != "" {
+		if err := s.Docker.RemoveForce(bg, p.cid); err != nil {
+			log.Printf("deploy %d: remover container novo: %v", p.d.ID, err)
+		}
+		p.cid = ""
+	}
+	if p.composeAllocated {
+		s.releaseComposePort(bg, p.app.ID, p.port)
+		p.composeAllocated = false
+	}
 	reason = redactString(reason, p.secrets)
 	if status == "cancelled" {
 		p.out.step("==> Cancelado")
 	} else {
 		p.out.step("==> Falhou: " + reason)
 	}
-	p.out.Close()
 	s.setStatus(bg, p.d.ID, p.d.AppID, status, reason)
 }
 
@@ -815,7 +1013,8 @@ func (c *logChain) line(text string) {
 // step marca o início de um passo.
 func (c *logChain) step(header string) { c.line(header) }
 
-// Close descarrega tudo e fecha o arquivo. Pode ser chamado mais de uma vez.
+// Close descarrega tudo e fecha o arquivo (o DeployLog grava o marcador de
+// fim). Pode ser chamado mais de uma vez.
 func (c *logChain) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

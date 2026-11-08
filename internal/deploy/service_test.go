@@ -118,7 +118,7 @@ func (s *scriptRunner) Run(ctx context.Context, c Cmd, out io.Writer) error {
 	}
 	switch {
 	case isCmd(c, "git", "clone"):
-		return os.MkdirAll(c.Args[len(c.Args)-1], 0o700)
+		return os.MkdirAll(filepath.Join(c.Args[len(c.Args)-1], ".git"), 0o700)
 	case isCmd(c, "git", "-C") && slices.Contains(c.Args, "rev-parse"):
 		_, _ = io.WriteString(out, fakeSHA+"\n")
 	case isCmd(c, "git", "-C") && slices.Contains(c.Args, "log"):
@@ -208,6 +208,9 @@ func newHarness(t *testing.T, mut func(a *store.App)) *harness {
 		},
 		RemoveForceFn: func(_ context.Context, id string) error {
 			h.rec.add("remove:%s", id)
+			if a, err := h.db.GetApp(context.Background(), h.app.ID); err == nil && a.CurrentDeployID != nil {
+				h.rec.add("current-at-remove:%s=%d", id, *a.CurrentDeployID)
+			}
 			return nil
 		},
 		ImagesFn:      func(context.Context, string) ([]docker.Image, error) { return nil, nil },
@@ -291,7 +294,7 @@ func (h *harness) wait(id int64, statuses ...string) store.Deploy {
 		var err error
 		d, err = h.db.GetDeploy(h.ctx, id)
 		require.NoError(h.t, err)
-		return slices.Contains(statuses, d.Status)
+		return slices.Contains(statuses, d.Status) && LogFinished(h.svc.DataDir, id)
 	}, 10*time.Second, 5*time.Millisecond, "deploy %d não chegou em %v", id, statuses)
 	return d
 }
@@ -351,6 +354,8 @@ func TestDeploy_DockerfileHappyPath(t *testing.T) {
 	assert.Equal(t, "reapply:20001", h.rec.list()[reapply], "host_port atualizado antes do Reapply")
 	assert.Greater(t, reapply, healthy)
 	assert.Greater(t, removeOld, reapply)
+	assert.Contains(t, h.rec.list(), fmt.Sprintf("current-at-remove:old-cid=%d", d.ID),
+		"SetCurrentDeploy antes de remover o antigo")
 	assert.Equal(t, -1, h.rec.first("remove:"+newCID))
 
 	// comandos: clone https, sem file://, build com a tag certa
@@ -573,7 +578,9 @@ func TestDeploy_SecretsRedactedInLog(t *testing.T) {
 	for loop := true; loop; {
 		select {
 		case ev := <-ch:
-			topic.WriteString(ev.Data.(LogEntry).Text + "\n")
+			if e, ok := ev.Data.(LogEntry); ok {
+				topic.WriteString(e.Text + "\n")
+			}
 		case <-time.After(200 * time.Millisecond):
 			loop = false
 		}
@@ -770,7 +777,7 @@ func TestRecover_InterruptedAndOrphans(t *testing.T) {
 	assert.Equal(t, "failed", gi.Status)
 	assert.Equal(t, "interrompido", gi.Reason)
 	gs, _ := h.db.GetDeploy(h.ctx, starting.ID)
-	assert.Equal(t, "failed", gs.Status)
+	assert.Equal(t, "running", gs.Status, "o atual interrompido volta a running")
 
 	assert.GreaterOrEqual(t, h.rec.first("remove:c-orfao"), 0)
 	assert.Equal(t, -1, h.rec.first("remove:c-starting"), "deploy atual preservado")
@@ -789,13 +796,19 @@ func TestRecover_InterruptedAndOrphans(t *testing.T) {
 	assert.Equal(t, "superseded", prev.Status)
 }
 
+func asCompose(a *store.App) {
+	a.BuildType = "compose"
+	a.ComposePath = "docker-compose.yml"
+	a.ComposeService = "web"
+	a.InternalPort = 80
+}
+
 func TestDeploy_ComposeKeepsPort(t *testing.T) {
-	h := newHarness(t, func(a *store.App) {
-		a.BuildType = "compose"
-		a.ComposePath = "docker-compose.yml"
-		a.ComposeService = "web"
-		a.InternalPort = 80
-	})
+	h := newHarness(t, asCompose)
+	const value = "valor-do-compose"
+	enc, err := h.box.Encrypt([]byte(value))
+	require.NoError(t, err)
+	require.NoError(t, h.db.SetAppEnv(h.ctx, h.app.ID, map[string]string{"DB_PASS": enc}, nil))
 	h.mu.Lock()
 	h.labeled["com.docker.compose.project=korego-blog"] = []docker.Container{
 		{ID: "c-db", Service: "db"}, {ID: "c-web", Service: "web"},
@@ -811,17 +824,60 @@ func TestDeploy_ComposeKeepsPort(t *testing.T) {
 	assert.Equal(t, 20000, h.getApp().HostPort)
 	assert.GreaterOrEqual(t, h.rec.first("inspect:c-web"), 0)
 
-	override := filepath.Join(h.svc.DataDir, "builds", fmt.Sprint(d1.ID), "docker-compose.korego.yml")
+	appDir := AppDir(h.svc.DataDir, "blog")
+	override := filepath.Join(appDir, "docker-compose.korego.yml")
 	cmds := h.runner.list()
-	assert.True(t, slices.ContainsFunc(cmds, func(c Cmd) bool {
-		return isCmd(c, "docker", "compose") && slices.Contains(c.Args, "up") && slices.Contains(c.Args, override)
-	}))
+	assert.Equal(t, appDir, cmds[0].Args[len(cmds[0].Args)-1], "clone no diretório persistente")
+	var up, build *Cmd
+	for i := range cmds {
+		c := &cmds[i]
+		if isCmd(*c, "docker", "compose") && slices.Contains(c.Args, "up") {
+			up = c
+		}
+		if isCmd(*c, "docker", "compose") && slices.Contains(c.Args, "build") {
+			build = c
+		}
+	}
+	require.NotNil(t, up)
+	require.NotNil(t, build)
+	assert.Contains(t, up.Args, override)
+	assert.Contains(t, up.Args, filepath.Join(appDir, "docker-compose.yml"))
+	for _, c := range []*Cmd{up, build} {
+		assert.Contains(t, c.Env, "DB_PASS="+value, "variáveis para a interpolação ${VAR}")
+		for _, a := range c.Args {
+			assert.NotContains(t, a, value)
+		}
+	}
+	st, err := os.Stat(appDir)
+	require.NoError(t, err, "diretório da app sobrevive ao deploy")
+	assert.True(t, st.IsDir())
+	_, err = os.Stat(override)
+	assert.NoError(t, err)
+	_, err = os.Stat(filepath.Join(h.svc.DataDir, "builds", fmt.Sprint(d1.ID)))
+	assert.True(t, os.IsNotExist(err), "builds/<id> não é usado no Compose")
+	raw, err := os.ReadFile(override)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), value, "variáveis nunca em disco")
 
 	d2, err := h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
 	require.NoError(t, err)
 	g2 := h.wait(d2.ID)
 	require.Equal(t, "running", g2.Status, g2.Reason)
 	assert.Equal(t, 20000, g2.HostPort, "porta fixa da app")
+	// 2º deploy: fetch + reset no diretório existente, sem clone nem clean
+	cmds = h.runner.list()
+	var second []Cmd
+	for _, c := range cmds {
+		if c.Name == "git" {
+			second = append(second, c)
+		}
+	}
+	require.GreaterOrEqual(t, len(second), 8)
+	assert.Equal(t, []string{"-C", appDir, "fetch", "--depth", "1", "origin", "main"}, second[4].Args)
+	assert.Equal(t, []string{"-C", appDir, "reset", "--hard", "FETCH_HEAD"}, second[5].Args)
+	for _, c := range cmds {
+		assert.NotContains(t, c.Args, "clean")
+	}
 	p1 := h.wait(d1.ID, "superseded")
 	assert.Equal(t, "superseded", p1.Status)
 	assert.Equal(t, -1, h.rec.first("remove:"), "Compose não remove containers")
