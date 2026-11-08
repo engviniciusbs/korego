@@ -68,7 +68,13 @@ type Service struct {
 	// PanelPort é a porta do painel; a rota do domínio do painel vai para
 	// 127.0.0.1:<PanelPort>.
 	PanelPort int
+	// ListenAddr é o endereço de escuta configurado (cfg.ListenAddr), usado
+	// com a porta pública ligada; desligada, vale 127.0.0.1:<porta>.
+	ListenAddr string
+	// OnListenChange troca o endereço de escuta do painel (nil = nada).
+	OnListenChange func(addr string) error
 
+	panelMu   sync.Mutex // serializa as alterações do painel
 	applyMu   sync.Mutex // serializa Routes+Apply
 	statusMu  sync.Mutex
 	status    proxy.Status

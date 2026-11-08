@@ -20,10 +20,12 @@ import (
 	"github.com/engviniciusbs/korego/internal/audit"
 	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/config"
+	"github.com/engviniciusbs/korego/internal/domains"
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/monitor"
 	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/secrets"
+	"github.com/engviniciusbs/korego/internal/serve"
 	"github.com/engviniciusbs/korego/internal/store"
 	"github.com/engviniciusbs/korego/internal/update"
 	"github.com/engviniciusbs/korego/internal/version"
@@ -38,7 +40,7 @@ func main() {
 	}
 	switch cmd {
 	case "serve":
-		if err := serve(args); err != nil {
+		if err := runServe(args); err != nil {
 			log.Fatalf("erro: %v", err)
 		}
 	case "version":
@@ -47,13 +49,15 @@ func main() {
 		if err := updateFinish(args); err != nil {
 			log.Fatalf("erro: %v", err)
 		}
+	case "painel":
+		os.Exit(runPainel(args, os.Stdout, os.Stderr))
 	default:
-		fmt.Fprintf(os.Stderr, "comando desconhecido: %s\nuso: korego [serve|version|update-finish]\n", cmd)
+		fmt.Fprintf(os.Stderr, "comando desconhecido: %s\nuso: korego [serve|version|update-finish|painel]\n", cmd)
 		os.Exit(2)
 	}
 }
 
-func serve(args []string) error {
+func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	cfgPath := fs.String("config", "/etc/korego/config.toml", "caminho do arquivo de configuração")
 	_ = fs.Parse(args)
@@ -66,7 +70,7 @@ func serve(args []string) error {
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return fmt.Errorf("criar diretório de dados %s: %w", cfg.DataDir, err)
 	}
-	db, err := store.Open(filepath.Join(cfg.DataDir, "korego.db"))
+	db, err := store.Open(dbPath(cfg.DataDir))
 	if err != nil {
 		return err
 	}
@@ -143,8 +147,34 @@ func serve(args []string) error {
 		handler = api.SecurityHeaders(handler)
 	}
 
+	// Endereço efetivo: com a porta pública desligada, só 127.0.0.1:<porta>
+	// (o painel fica acessível pelo domínio, via proxy).
+	publicPort, err := domains.PublicPort(context.Background(), db)
+	if err != nil {
+		return err
+	}
+	listenAddr, err := domains.EffectiveListenAddr(cfg.ListenAddr, publicPort)
+	if err != nil {
+		return err
+	}
+	panelPort, err := domains.ListenPort(cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
+	listener, err := serve.NewListener(listenAddr)
+	if err != nil {
+		return fmt.Errorf("escutar em %s: %w", listenAddr, err)
+	}
+	defer listener.Close()
+
+	domSvc := &domains.Service{
+		DB: db, Proxy: nd.Proxy(), Hub: hub, PublicIP: cfg.PublicIP,
+		PanelPort: panelPort, ListenAddr: cfg.ListenAddr,
+		OnListenChange: listener.Switch,
+	}
+	_ = domSvc // exposto pela API na próxima tarefa
+
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -169,8 +199,8 @@ func serve(args []string) error {
 	defer func() { stop(); <-collectorDone }()
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ListenAndServe() }()
-	log.Printf("KoreGO %s ouvindo em %s", version.Version, cfg.ListenAddr)
+	go func() { errCh <- srv.Serve(listener) }()
+	log.Printf("KoreGO %s ouvindo em %s", version.Version, listenAddr)
 
 	select {
 	case err := <-errCh:
@@ -214,6 +244,28 @@ func healthURL(listenAddr string) (string, error) {
 	return "http://" + net.JoinHostPort(host, port) + "/api/health", nil
 }
 
+// healthURLs devolve as URLs de /api/health a tentar depois de uma
+// atualização: a do endereço configurado e, se for outra, a de
+// 127.0.0.1:<porta>, que responde também com a porta pública desligada.
+func healthURLs(listenAddr string) ([]string, error) {
+	u, err := healthURL(listenAddr)
+	if err != nil {
+		return nil, err
+	}
+	local, err := domains.EffectiveListenAddr(listenAddr, false)
+	if err != nil {
+		return nil, err
+	}
+	l, err := healthURL(local)
+	if err != nil {
+		return nil, err
+	}
+	if l == u {
+		return []string{u}, nil
+	}
+	return []string{u, l}, nil
+}
+
 // updateFinish reinicia o serviço após uma atualização e reverte o binário se
 // o novo não responder em /api/health. Roda a partir do binário anterior.
 func updateFinish(args []string) error {
@@ -228,7 +280,7 @@ func updateFinish(args []string) error {
 	if err != nil {
 		return err
 	}
-	url, err := healthURL(cfg.ListenAddr)
+	urls, err := healthURLs(cfg.ListenAddr)
 	if err != nil {
 		return err
 	}
@@ -241,19 +293,15 @@ func updateFinish(args []string) error {
 			return exec.CommandContext(ctx, "systemctl", "restart", "korego").Run()
 		},
 		Health: func(ctx context.Context) error {
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-			if err != nil {
-				return err
+			var errs []error
+			for _, url := range urls {
+				err := checkHealth(ctx, httpc, url)
+				if err == nil {
+					return nil
+				}
+				errs = append(errs, err)
 			}
-			resp, err := httpc.Do(req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("health retornou %d", resp.StatusCode)
-			}
-			return nil
+			return errors.Join(errs...)
 		},
 	}
 	err = f.Run(context.Background())
@@ -262,4 +310,21 @@ func updateFinish(args []string) error {
 		return nil
 	}
 	return err
+}
+
+// checkHealth faz GET em url e exige 200.
+func checkHealth(ctx context.Context, httpc *http.Client, url string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := httpc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s retornou %d", url, resp.StatusCode)
+	}
+	return nil
 }
