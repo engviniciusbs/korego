@@ -20,6 +20,10 @@ const SettingPublicPort = "panel.public_port"
 // sendo acessado pelo próprio domínio, com HTTPS e certificado ativo.
 var ErrPanelNotHTTPS = errors.New("acesse o painel pelo domínio com HTTPS antes de desativar a porta pública")
 
+// ErrPanelPortOff recusa alterar ou remover o domínio do painel com a porta
+// pública desligada: o domínio é o único acesso ao painel.
+var ErrPanelPortOff = errors.New("Reative a porta 8000 pública antes de alterar ou remover o domínio do painel.")
+
 // PanelSettings são as configurações de acesso ao painel.
 type PanelSettings struct {
 	Domain     string         `json:"domain"`
@@ -86,7 +90,8 @@ func (s *Service) Panel(ctx context.Context) (PanelSettings, error) {
 
 // SetPanelDomain define o domínio do painel (vazio remove) e recarrega o
 // proxy. Há no máximo uma linha is_panel: trocar o host atualiza a mesma.
-// Proxy inativo não é erro.
+// Proxy inativo não é erro. Com a porta pública desligada, só é permitido
+// regravar o mesmo host (outro host ou vazio → ErrPanelPortOff).
 func (s *Service) SetPanelDomain(ctx context.Context, host string) error {
 	s.panelMu.Lock()
 	defer s.panelMu.Unlock()
@@ -95,6 +100,13 @@ func (s *Service) SetPanelDomain(ctx context.Context, host string) error {
 	cur, exists, err := s.DB.PanelDomain(ctx)
 	if err != nil {
 		return err
+	}
+	public, err := PublicPort(ctx, s.DB)
+	if err != nil {
+		return err
+	}
+	if !public && (!exists || host != cur.Hostname) {
+		return ErrPanelPortOff
 	}
 	if host == "" {
 		if !exists {

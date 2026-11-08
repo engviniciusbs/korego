@@ -192,3 +192,35 @@ func TestPublicPortSetting(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, on)
 }
+
+func TestPanel_SetDomainBlockedWithPublicPortOff(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newPanelService(t)
+
+	// Porta ligada: trocar é permitido.
+	require.NoError(t, s.SetPanelDomain(ctx, "painel.exemplo.com"))
+	require.NoError(t, s.SetPanelDomain(ctx, "admin.exemplo.com"))
+
+	require.NoError(t, s.SetPublicPort(ctx, false, true))
+
+	// Remover → recusado e a linha continua.
+	assert.ErrorIs(t, s.SetPanelDomain(ctx, ""), ErrPanelPortOff)
+	d, ok, err := s.DB.PanelDomain(ctx)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "admin.exemplo.com", d.Hostname)
+
+	// Outro host → recusado.
+	assert.ErrorIs(t, s.SetPanelDomain(ctx, "painel.exemplo.com"), ErrPanelPortOff)
+	d, _, err = s.DB.PanelDomain(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "admin.exemplo.com", d.Hostname)
+
+	// Mesmo host → permitido.
+	require.NoError(t, s.SetPanelDomain(ctx, " admin.exemplo.com "))
+
+	// Porta religada: trocar volta a ser permitido.
+	require.NoError(t, s.SetPublicPort(ctx, true, false))
+	require.NoError(t, s.SetPanelDomain(ctx, "painel.exemplo.com"))
+	require.NoError(t, s.SetPanelDomain(ctx, ""))
+}

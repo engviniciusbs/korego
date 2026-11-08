@@ -177,6 +177,9 @@ func runServe(args []string) error {
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Conexões keep-alive abertas pela porta pública terminam em tempo
+		// limitado depois que ela é desligada.
+		IdleTimeout: 120 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
