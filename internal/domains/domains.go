@@ -125,24 +125,37 @@ func (s *Service) validate(ctx context.Context, in DomainInput, excludeID int64)
 	default:
 		return d, invalid("targetType", "Destino inválido. Use app ou address.")
 	}
-	switch d.WWWRedirect {
-	case "", WWWNone:
+	if d.WWWRedirect == "" {
 		d.WWWRedirect = WWWNone
-	case WWWToApex:
-		if strings.HasPrefix(d.Hostname, "www.") {
-			return d, invalid("wwwRedirect", "Para redirecionar www para o domínio sem www, cadastre o domínio sem www.")
-		}
-	case WWWApexToWWW:
-		if !strings.HasPrefix(d.Hostname, "www.") {
-			return d, invalid("wwwRedirect", "Para redirecionar para www, cadastre o domínio com www.")
-		}
-	default:
-		return d, invalid("wwwRedirect", "Redirecionamento www inválido. Use none, www_to_apex ou apex_to_www.")
 	}
-	if err := s.checkCollision(ctx, d, excludeID); err != nil {
+	if msg := wwwMismatch(d.Hostname, d.WWWRedirect); msg != "" {
+		return d, invalid("wwwRedirect", msg)
+	}
+	if err := s.CheckCollision(ctx, d.Hostname, d.WWWRedirect, excludeID); err != nil {
 		return d, err
 	}
 	return d, nil
+}
+
+// wwwMismatch devolve a mensagem de erro se o redirecionamento www não for
+// conhecido ou não combinar com o hostname; "" se estiver certo.
+func wwwMismatch(hostname, www string) string {
+	switch www {
+	case "", WWWNone:
+		return ""
+	case WWWToApex:
+		if strings.HasPrefix(hostname, "www.") {
+			return "Para redirecionar www para o domínio sem www, cadastre o domínio sem www."
+		}
+		return ""
+	case WWWApexToWWW:
+		if !strings.HasPrefix(hostname, "www.") {
+			return "Para redirecionar para www, cadastre o domínio com www."
+		}
+		return ""
+	default:
+		return "Redirecionamento www inválido. Use none, www_to_apex ou apex_to_www."
+	}
 }
 
 // hostsOf devolve o hostname e, com redirecionamento www, o seu par.
@@ -157,17 +170,18 @@ func hostsOf(hostname, www string) []string {
 	}
 }
 
-// checkCollision recusa um domínio cujo hostname ou par www coincida com o
-// hostname ou o par www de outro domínio. Hostname igual fica para o banco
+// CheckCollision recusa (ErrInvalid, campo hostname) um domínio cujo hostname
+// ou par www coincida com o hostname ou o par www de outro domínio. exceptID é
+// o domínio sendo editado (0 = nenhum). Hostname idêntico fica para o banco
 // (ErrConflict).
-func (s *Service) checkCollision(ctx context.Context, d store.Domain, excludeID int64) error {
+func (s *Service) CheckCollision(ctx context.Context, hostname, www string, exceptID int64) error {
 	list, err := s.DB.ListDomains(ctx)
 	if err != nil {
 		return err
 	}
-	mine := hostsOf(d.Hostname, d.WWWRedirect)
+	mine := hostsOf(hostname, www)
 	for _, o := range list {
-		if o.ID == excludeID || o.Hostname == d.Hostname {
+		if o.ID == exceptID || o.Hostname == hostname {
 			continue
 		}
 		for _, h := range hostsOf(o.Hostname, o.WWWRedirect) {

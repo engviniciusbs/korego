@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -56,5 +57,38 @@ func TestCheckDNS_ResolverError(t *testing.T) {
 	c := s.CheckDNS(context.Background(), "exemplo.com")
 	assert.False(t, c.OK)
 	assert.Empty(t, c.Resolved)
+	assert.Equal(t, "Não foi possível resolver exemplo.com.", c.Message)
+}
+
+func TestCheckDNS_SuggestsFirstPublicIPv4(t *testing.T) {
+	s, _ := newTestService(t)
+	s.HostIPs = func() ([]net.IP, error) {
+		return []net.IP{net.ParseIP("172.17.0.1"), net.ParseIP("10.0.0.5"), net.ParseIP("203.0.113.10")}, nil
+	}
+	s.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("198.51.100.1")}}
+	c := s.CheckDNS(context.Background(), "exemplo.com")
+	assert.False(t, c.OK)
+	assert.Equal(t, "Crie um registro A para exemplo.com apontando para 203.0.113.10.", c.Message)
+}
+
+// slowResolver só responde quando o contexto acaba.
+type slowResolver struct{}
+
+func (slowResolver) LookupIP(ctx context.Context, _ string) ([]net.IP, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestCheckDNS_Timeout(t *testing.T) {
+	old := dnsTimeout
+	dnsTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { dnsTimeout = old })
+
+	s, _ := newTestService(t)
+	s.Resolver = slowResolver{}
+	start := time.Now()
+	c := s.CheckDNS(context.Background(), "exemplo.com")
+	assert.Less(t, time.Since(start), 2*time.Second)
+	assert.False(t, c.OK)
 	assert.Equal(t, "Não foi possível resolver exemplo.com.", c.Message)
 }

@@ -4,7 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 )
+
+// dnsTimeout limita a resolução em CheckDNS, para um resolver lento não
+// travar Create/Update.
+var dnsTimeout = 5 * time.Second
 
 // Resolver resolve um hostname nos seus IPs.
 type Resolver interface {
@@ -68,11 +73,17 @@ func (s *Service) expectedIPs() []string {
 	return out
 }
 
-// suggestedIP escolhe o IP do registro A sugerido: o público, se houver,
-// senão o primeiro IPv4 esperado, senão o primeiro esperado.
+// suggestedIP escolhe o IP do registro A sugerido: o PublicIP, se houver;
+// senão o primeiro IPv4 esperado que não seja privado nem loopback; senão o
+// primeiro IPv4; senão o primeiro esperado.
 func (s *Service) suggestedIP(expected []string) string {
 	if ip := net.ParseIP(s.PublicIP); ip != nil {
 		return ip.String()
+	}
+	for _, e := range expected {
+		if ip := net.ParseIP(e); ip != nil && ip.To4() != nil && !ip.IsPrivate() && !ip.IsLoopback() {
+			return e
+		}
 	}
 	for _, e := range expected {
 		if ip := net.ParseIP(e); ip != nil && ip.To4() != nil {
@@ -94,6 +105,8 @@ func (s *Service) CheckDNS(ctx context.Context, host string) DNSCheck {
 	if r == nil {
 		r = netResolver{}
 	}
+	ctx, cancel := context.WithTimeout(ctx, dnsTimeout)
+	defer cancel()
 	ips, err := r.LookupIP(ctx, host)
 	if err != nil {
 		c.Message = fmt.Sprintf("Não foi possível resolver %s.", host)
