@@ -72,7 +72,7 @@ func TestClassify_Precedence(t *testing.T) {
 }
 
 func TestClassify_PM2CicloNaoTrava(t *testing.T) {
-	l := Lookup{PM2: map[int]string{}, Parent: map[int]int{1: 2, 2: 1}}
+	l := Lookup{PM2: map[int]string{999: "x"}, Parent: map[int]int{1: 2, 2: 1}}
 	got := Classify(procs.Proc{PID: 1, PPID: 2, Cmdline: []string{"x"}}, l)
 	assert.Equal(t, KindOther, got.Kind)
 }
