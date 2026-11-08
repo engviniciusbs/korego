@@ -169,6 +169,29 @@ describe("AppForm", () => {
     expect(screen.getByLabelText(/^Nome/)).toHaveAttribute("aria-invalid", "true");
   });
 
+  it("Compose e Railpack não têm campo de Dockerfile nem o enviam", async () => {
+    routes["POST /api/apps"] = () => json({ app: { ...created, sourceType: "git", buildType: "compose" } }, 201);
+    renderForm();
+    fireEvent.click(screen.getByRole("radio", { name: /URL Git/ }));
+    expect(screen.getByLabelText(/^Caminho do Dockerfile/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/^Tipo de build/), { target: { value: "railpack" } });
+    expect(screen.queryByLabelText(/^Caminho do Dockerfile/)).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/^Tipo de build/), { target: { value: "compose" } });
+    expect(screen.queryByLabelText(/^Caminho do Dockerfile/)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/^URL do repositório/), {
+      target: { value: "https://github.com/exemplo/site.git" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Serviço de entrada/), { target: { value: "web" } });
+    fireEvent.change(screen.getByLabelText(/^Nome/), { target: { value: "site" } });
+    fireEvent.change(screen.getByLabelText(/^Porta interna/), { target: { value: "80" } });
+    fireEvent.click(screen.getByRole("button", { name: "Criar aplicação" }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    const body = JSON.parse(posts()[0][1].body);
+    expect(body).toMatchObject({ buildType: "compose", composePath: "docker-compose.yml", composeService: "web" });
+    expect(body.dockerfilePath ?? "").toBe("");
+  });
+
   it("compose mostra o aviso de recriação e de rollback", async () => {
     renderForm();
     const warning = "Compose recria os containers a cada deploy: alguns segundos fora do ar. Rollback não disponível.";

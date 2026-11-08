@@ -155,7 +155,8 @@ function toInput(s: FormState, projectId: number): AppInput {
     repo: image ? "" : s.repo.trim(),
     image: image ? s.image.trim() : "",
     branch: image ? "" : s.branch.trim(),
-    dockerfilePath: image || s.buildType === "railpack" ? "" : s.dockerfilePath.trim(),
+    // Só o build dockerfile usa o caminho; vazio, o servidor aplica o padrão "Dockerfile".
+    dockerfilePath: !image && s.buildType === "dockerfile" ? s.dockerfilePath.trim() : "",
     composePath: compose ? s.composePath.trim() : "",
     composeService: compose ? s.composeService.trim() : "",
     internalPort: Number(s.internalPort),

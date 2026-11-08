@@ -55,7 +55,9 @@ export function EnvEditor({ appId }: { appId: number }) {
   const [savedAt, setSavedAt] = useState(false);
 
   const names = env.data ?? [];
-  const dirty = added.length > 0 || Object.keys(replacing).length > 0 || removing.length > 0;
+  // Substituição ainda vazia não é mudança: ela é ignorada ao salvar e o valor antigo fica.
+  const replaced = Object.fromEntries(Object.entries(replacing).filter(([, v]) => v !== ""));
+  const dirty = added.length > 0 || Object.keys(replaced).length > 0 || removing.length > 0;
   const errId = (k: RowKey) => `${uid}-${k}-error`;
 
   // Avisa antes de sair da página com alterações não salvas.
@@ -134,7 +136,7 @@ export function EnvEditor({ appId }: { appId: number }) {
       focusRow(first);
       return;
     }
-    const set: Record<string, string> = { ...replacing };
+    const set: Record<string, string> = { ...replaced };
     for (const r of added) set[r.name.trim()] = r.value;
     save.mutate(
       { set, remove: removing },
@@ -244,17 +246,23 @@ export function EnvEditor({ appId }: { appId: number }) {
                                 placeholder="Novo valor…"
                                 value={replacing[n]}
                                 invalid={Boolean(errors[k])}
-                                aria-describedby={errors[k] ? errId(k) : undefined}
+                                aria-describedby={errors[k] ? errId(k) : replacing[n] === "" ? `${uid}-e-${n}-hint` : undefined}
                                 onChange={(e) => {
                                   const v = e.target.value;
                                   setReplacing((r) => ({ ...r, [n]: v }));
                                   touch(k);
                                 }}
                               />
-                              {errors[k] && (
+                              {errors[k] ? (
                                 <p id={errId(k)} className="mt-1 text-xs text-danger">
                                   {errors[k]}
                                 </p>
+                              ) : (
+                                replacing[n] === "" && (
+                                  <p id={`${uid}-e-${n}-hint`} className="mt-1 text-xs text-fg-subtle">
+                                    Digite o novo valor ou cancele.
+                                  </p>
+                                )
                               )}
                             </>
                           ) : (

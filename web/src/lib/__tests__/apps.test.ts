@@ -8,8 +8,10 @@ describe("defaultsFor", () => {
     const d = defaultsFor("github", "compose");
     expect(d.required).toContain("composeService");
     expect(d.visible).toEqual(
-      expect.arrayContaining(["repo", "branch", "dockerfilePath", "composePath", "composeService"]),
+      expect.arrayContaining(["repo", "branch", "composePath", "composeService"]),
     );
+    // O Dockerfile só vale para o build dockerfile.
+    expect(d.visible).not.toContain("dockerfilePath");
     expect(d.composePath).toBe("docker-compose.yml");
   });
   it("image esconde branch e caminhos", () => {

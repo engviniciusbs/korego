@@ -97,6 +97,28 @@ describe("EnvEditor", () => {
     expect(screen.queryByText("postgres://novo")).not.toBeInTheDocument();
   });
 
+  it("substituição vazia é ignorada e não apaga o valor", async () => {
+    renderEditor();
+    await screen.findByText("DB_URL");
+
+    // Só abrir a substituição não conta como alteração e não envia nada.
+    fireEvent.click(within(rowOf("DB_URL")).getByRole("button", { name: /Substituir valor/ }));
+    expect(screen.getByText("Digite o novo valor ou cancele.")).toBeInTheDocument();
+    expect(screen.queryByText("Alterações não salvas")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Salvar variáveis" })).toBeDisabled();
+
+    // Com outra mudança, o nome com substituição vazia fica fora do pedido.
+    fireEvent.click(within(rowOf("SECRET_KEY")).getByRole("button", { name: /Substituir valor/ }));
+    fireEvent.change(screen.getByLabelText("Novo valor de SECRET_KEY"), { target: { value: "novo" } });
+    // Variável nova pode ter valor vazio.
+    fireEvent.click(screen.getByRole("button", { name: "Adicionar variável" }));
+    fireEvent.change(screen.getByLabelText("Nome da nova variável 1"), { target: { value: "VAZIA" } });
+    expect(screen.getByText("Alterações não salvas")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Salvar variáveis" }));
+    await waitFor(() => expect(putBodies).toHaveLength(1));
+    expect(putBodies[0]).toEqual({ set: { SECRET_KEY: "novo", VAZIA: "" }, remove: [] });
+  });
+
   it("nome repetido e erro do servidor aparecem na variável", async () => {
     putResponse = () =>
       json({ error: { code: "INVALID_ENV", message: "Nome de variável inválido: API_KEY", field: "API_KEY" } }, 400);

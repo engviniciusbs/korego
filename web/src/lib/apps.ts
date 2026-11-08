@@ -90,7 +90,8 @@ export function defaultsFor(sourceType: SourceType, buildType: BuildType): AppFo
   } else {
     d.visible.push("repo", "branch");
     d.required.push("repo", "branch");
-    if (buildType === "dockerfile" || buildType === "compose") d.visible.push("dockerfilePath");
+    // O caminho do Dockerfile só vale para o build dockerfile (o servidor usa "Dockerfile" quando vem vazio).
+    if (buildType === "dockerfile") d.visible.push("dockerfilePath");
     if (buildType === "compose") {
       d.visible.push("composePath", "composeService");
       d.required.push("composeService");
