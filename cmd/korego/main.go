@@ -20,8 +20,10 @@ import (
 	"github.com/engviniciusbs/korego/internal/audit"
 	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/config"
+	"github.com/engviniciusbs/korego/internal/deploy"
 	"github.com/engviniciusbs/korego/internal/domains"
 	"github.com/engviniciusbs/korego/internal/events"
+	"github.com/engviniciusbs/korego/internal/jobs"
 	"github.com/engviniciusbs/korego/internal/monitor"
 	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/node/proxy"
@@ -166,10 +168,26 @@ func runServe(args []string) error {
 		OnListenChange: listener.Switch,
 	}
 
+	queue := jobs.NewQueue(cfg.MaxBuilds)
+	// Declarado depois do defer db.Close, roda antes dele: cancela os deploys
+	// em andamento e espera terminarem. Os que esperavam ficam queued e voltam
+	// à fila no Recover da próxima subida.
+	defer queue.Close()
+	deploySvc := &deploy.Service{
+		DB: db, Docker: nd.Docker(), Runner: deploy.ExecRunner{}, Box: box, Hub: hub,
+		Queue: queue, Router: domSvc, Tokens: nil, // Tokens: GitHub App (Tarefa 15)
+		DataDir: cfg.DataDir,
+	}
+	// Antes de reaplicar as rotas e de servir: marca interrompidos, remove
+	// containers órfãos e reenfileira os queued.
+	if err := deploySvc.Recover(context.Background()); err != nil {
+		log.Printf("deploy: recuperar deploys na subida: %v", err)
+	}
+
 	handler := api.NewRouter(api.Deps{
 		Auth: svc, Node: nd, Hub: hub, Web: web, Metrics: collector, DB: db,
 		Updater: &update.System{ExePath: exe, ConfigPath: *cfgPath},
-		Domains: domSvc,
+		Domains: domSvc, Deploys: deploySvc,
 	})
 	if cfg.DevProxy == "" {
 		handler = api.SecurityHeaders(handler)

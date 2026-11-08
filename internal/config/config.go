@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strconv"
 
 	"github.com/BurntSushi/toml"
 )
@@ -24,6 +25,8 @@ type Config struct {
 	// PublicIP é o IP público da máquina, usado na verificação de DNS dos
 	// domínios (vazio = só os IPs das interfaces).
 	PublicIP string `toml:"public_ip"`
+	// MaxBuilds é o número máximo de deploys construindo ao mesmo tempo.
+	MaxBuilds int `toml:"max_builds"`
 }
 
 // Load lê o arquivo TOML em path (inexistente não é erro) e aplica as
@@ -33,6 +36,7 @@ func Load(path string) (Config, error) {
 		ListenAddr: ":8000",
 		DataDir:    "/var/lib/korego",
 		ConfigDir:  "/etc/korego",
+		MaxBuilds:  2,
 	}
 	if _, err := toml.DecodeFile(path, &c); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return Config{}, fmt.Errorf("lendo configuração %s: %w", path, err)
@@ -44,6 +48,13 @@ func Load(path string) (Config, error) {
 	override(&c.PM2Path, "KOREGO_PM2_PATH")
 	override(&c.PM2Home, "KOREGO_PM2_HOME")
 	override(&c.PublicIP, "KOREGO_PUBLIC_IP")
+	if v := os.Getenv("KOREGO_MAX_BUILDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("KOREGO_MAX_BUILDS inválido %q: %w", v, err)
+		}
+		c.MaxBuilds = n
+	}
 	return c, nil
 }
 

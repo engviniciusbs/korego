@@ -21,7 +21,12 @@ type Source struct {
 
 // Fetch faz um clone raso do branch em dir e devolve o SHA e o assunto do commit.
 func Fetch(ctx context.Context, r Runner, dir string, src Source, out io.Writer) (sha, msg string, err error) {
-	if !ValidGitURL(src.URL) {
+	return fetch(ctx, r, dir, src, out, false)
+}
+
+// fetch é o Fetch; allowFile aceita também file:// (só testes de integração).
+func fetch(ctx context.Context, r Runner, dir string, src Source, out io.Writer, allowFile bool) (sha, msg string, err error) {
+	if !ValidGitURL(src.URL) && !(allowFile && validFileURL(src.URL)) {
 		return "", "", errors.New("URL do repositório inválida")
 	}
 	if !ValidBranch(src.Branch) {
@@ -46,6 +51,11 @@ func Fetch(ctx context.Context, r Runner, dir string, src Source, out io.Writer)
 		return "", "", fmt.Errorf("git log: %w", err)
 	}
 	return sha, msg, nil
+}
+
+// validFileURL aceita file:///caminho sem espaços nem caracteres de controle.
+func validFileURL(s string) bool {
+	return strings.HasPrefix(s, "file:///") && !strings.ContainsAny(s, " \t\r\n\x00")
 }
 
 func tokenCred(token string) string {

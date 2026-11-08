@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/engviniciusbs/korego/internal/auth"
+	"github.com/engviniciusbs/korego/internal/deploy"
 	"github.com/engviniciusbs/korego/internal/domains"
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/node"
@@ -33,6 +34,8 @@ type Deps struct {
 	Now func() time.Time
 	// Domains atende /api/proxy, /api/domains e /api/settings/panel (nil as desativa).
 	Domains *domains.Service
+	// Deploys executa e consulta os deploys das aplicações (rotas na Tarefa 13).
+	Deploys *deploy.Service
 }
 
 // NewRouter monta o roteador principal, com a API sob /api.
