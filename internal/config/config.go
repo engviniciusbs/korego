@@ -27,6 +27,10 @@ type Config struct {
 	PublicIP string `toml:"public_ip"`
 	// MaxBuilds é o número máximo de deploys construindo ao mesmo tempo.
 	MaxBuilds int `toml:"max_builds"`
+	// GitHubAPIURL e GitHubWebURL permitem apontar o cliente do GitHub App para
+	// outro servidor (testes, GitHub Enterprise).
+	GitHubAPIURL string `toml:"github_api_url"`
+	GitHubWebURL string `toml:"github_web_url"`
 }
 
 // Load lê o arquivo TOML em path (inexistente não é erro) e aplica as
@@ -37,6 +41,9 @@ func Load(path string) (Config, error) {
 		DataDir:    "/var/lib/korego",
 		ConfigDir:  "/etc/korego",
 		MaxBuilds:  2,
+
+		GitHubAPIURL: "https://api.github.com",
+		GitHubWebURL: "https://github.com",
 	}
 	if _, err := toml.DecodeFile(path, &c); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return Config{}, fmt.Errorf("lendo configuração %s: %w", path, err)
@@ -48,6 +55,8 @@ func Load(path string) (Config, error) {
 	override(&c.PM2Path, "KOREGO_PM2_PATH")
 	override(&c.PM2Home, "KOREGO_PM2_HOME")
 	override(&c.PublicIP, "KOREGO_PUBLIC_IP")
+	override(&c.GitHubAPIURL, "KOREGO_GITHUB_API_URL")
+	override(&c.GitHubWebURL, "KOREGO_GITHUB_WEB_URL")
 	if v := os.Getenv("KOREGO_MAX_BUILDS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {

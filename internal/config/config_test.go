@@ -100,3 +100,24 @@ func TestLoad_MaxBuilds(t *testing.T) {
 	_, err = config.Load(p)
 	assert.Error(t, err)
 }
+
+func TestLoad_GitHubURLs(t *testing.T) {
+	t.Setenv("KOREGO_GITHUB_API_URL", "")
+	t.Setenv("KOREGO_GITHUB_WEB_URL", "")
+	c, err := config.Load(filepath.Join(t.TempDir(), "nao-existe.toml"))
+	require.NoError(t, err)
+	assert.Equal(t, "https://api.github.com", c.GitHubAPIURL)
+	assert.Equal(t, "https://github.com", c.GitHubWebURL)
+
+	p := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(p, []byte("github_api_url = \"http://a\"\ngithub_web_url = \"http://w\"\n"), 0o600))
+	c, err = config.Load(p)
+	require.NoError(t, err)
+	assert.Equal(t, "http://a", c.GitHubAPIURL)
+	assert.Equal(t, "http://w", c.GitHubWebURL)
+
+	t.Setenv("KOREGO_GITHUB_API_URL", "http://env-a")
+	c, err = config.Load(p)
+	require.NoError(t, err)
+	assert.Equal(t, "http://env-a", c.GitHubAPIURL)
+}
