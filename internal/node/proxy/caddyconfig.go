@@ -37,6 +37,11 @@ package proxy
 //     automation policies explicitly specified for them", autohttps.go); sem
 //     "issuers", valem os emissores ACME padrão.
 //
+//   - Os dois servidores terminam com uma rota sem matcher (static_response
+//     404 "Domínio não configurado no KoreGO."): sem ela o Caddy responde um
+//     200 vazio a hosts não cadastrados. Os desafios HTTP-01 não passam por
+//     ela, porque o Caddy os atende antes das rotas (ver acima).
+//
 //   - reverse_proxy mantém o Host original e define X-Forwarded-For/-Proto/
 //     -Host por padrão, então não acrescentamos cabeçalhos.
 
@@ -55,6 +60,8 @@ const (
 	httpsServerName = "korego_https"
 	httpServerName  = "korego_http"
 	forceHTTPSURL   = "https://{http.request.host}{http.request.uri}"
+	// notConfiguredBody é a resposta da rota final para hosts não cadastrados.
+	notConfiguredBody = "Domínio não configurado no KoreGO."
 )
 
 type caddyConfig struct {
@@ -86,7 +93,7 @@ type caddyAutoHTTPS struct {
 }
 
 type caddyRoute struct {
-	Match    []caddyMatch   `json:"match"`
+	Match    []caddyMatch   `json:"match,omitempty"`
 	Handle   []caddyHandler `json:"handle"`
 	Terminal bool           `json:"terminal"`
 }
@@ -100,6 +107,7 @@ type caddyHandler struct {
 	Upstreams  []caddyUpstream     `json:"upstreams,omitempty"`
 	StatusCode int                 `json:"status_code,omitempty"`
 	Headers    map[string][]string `json:"headers,omitempty"`
+	Body       string              `json:"body,omitempty"`
 }
 
 type caddyUpstream struct {
@@ -134,8 +142,8 @@ func BuildConfig(routes []Route) ([]byte, error) {
 		return nil, err
 	}
 
-	httpsRoutes := make([]caddyRoute, 0, len(entries))
-	httpRoutes := make([]caddyRoute, 0, len(entries))
+	httpsRoutes := make([]caddyRoute, 0, len(entries)+1)
+	httpRoutes := make([]caddyRoute, 0, len(entries)+1)
 	subjects := make([]string, 0, len(entries))
 	for _, e := range entries {
 		subjects = append(subjects, e.host)
@@ -155,6 +163,9 @@ func BuildConfig(routes []Route) ([]byte, error) {
 			httpRoutes = append(httpRoutes, route(e.host, reverseProxy(e.upstream)))
 		}
 	}
+
+	httpsRoutes = append(httpsRoutes, catchAll())
+	httpRoutes = append(httpRoutes, catchAll())
 
 	cfg := caddyConfig{
 		Admin: caddyAdmin{Listen: AdminListen},
@@ -244,6 +255,14 @@ func route(host string, h caddyHandler) caddyRoute {
 	return caddyRoute{
 		Match:    []caddyMatch{{Host: []string{host}}},
 		Handle:   []caddyHandler{h},
+		Terminal: true,
+	}
+}
+
+// catchAll é a rota final, sem matcher: 404 para hosts não cadastrados.
+func catchAll() caddyRoute {
+	return caddyRoute{
+		Handle:   []caddyHandler{{Handler: "static_response", StatusCode: 404, Body: notConfiguredBody}},
 		Terminal: true,
 	}
 }

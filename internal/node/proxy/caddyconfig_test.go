@@ -44,10 +44,42 @@ func TestBuildConfig_Empty(t *testing.T) {
 	require.Len(t, servers, 2)
 	for _, name := range []string{"korego_https", "korego_http"} {
 		srv := servers[name].(map[string]any)
-		assert.Empty(t, srv["routes"], name)
+		routes := srv["routes"].([]any)
+		require.Len(t, routes, 1, name)
+		assertCatchAll(t, routes[0].(map[string]any), name)
 	}
 	assert.Equal(t, []any{":443"}, servers["korego_https"].(map[string]any)["listen"])
 	assert.Equal(t, []any{":80"}, servers["korego_http"].(map[string]any)["listen"])
+}
+
+// assertCatchAll confere a rota final sem matcher que responde 404 a hosts
+// não cadastrados (sem ela o Caddy devolve 200 vazio).
+func assertCatchAll(t *testing.T, r map[string]any, name string) {
+	t.Helper()
+	assert.NotContains(t, r, "match", name)
+	assert.Equal(t, true, r["terminal"], name)
+	h := r["handle"].([]any)
+	require.Len(t, h, 1, name)
+	assert.Equal(t, map[string]any{
+		"handler": "static_response", "status_code": float64(404),
+		"body": "Domínio não configurado no KoreGO.",
+	}, h[0], name)
+}
+
+func TestBuildConfig_CatchAllLast(t *testing.T) {
+	got, err := BuildConfig(threeRoutes())
+	require.NoError(t, err)
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal(got, &cfg))
+	servers := cfg["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)
+	for _, name := range []string{"korego_https", "korego_http"} {
+		routes := servers[name].(map[string]any)["routes"].([]any)
+		require.Len(t, routes, 5, name)
+		assertCatchAll(t, routes[4].(map[string]any), name)
+		for _, r := range routes[:4] {
+			assert.Contains(t, r.(map[string]any), "match", name)
+		}
+	}
 }
 
 func TestBuildConfig_Deterministic(t *testing.T) {
@@ -93,7 +125,7 @@ func TestBuildConfig_ApexToWWW(t *testing.T) {
 	require.NoError(t, json.Unmarshal(got, &cfg))
 
 	https := cfg.Apps.HTTP.Servers["korego_https"].Routes
-	require.Len(t, https, 2)
+	require.Len(t, https, 3)
 	assert.Equal(t, []string{"exemplo.com"}, https[0].Match[0]["host"])
 	assert.Equal(t, "static_response", https[0].Handle[0]["handler"])
 	assert.Equal(t, []any{"https://www.exemplo.com{http.request.uri}"}, location(https[0].Handle[0]))
@@ -102,7 +134,7 @@ func TestBuildConfig_ApexToWWW(t *testing.T) {
 
 	// sem ForceHTTPS, o host secundário na porta 80 redireciona para o principal em http
 	plain := cfg.Apps.HTTP.Servers["korego_http"].Routes
-	require.Len(t, plain, 2)
+	require.Len(t, plain, 3)
 	assert.Equal(t, []any{"http://www.exemplo.com{http.request.uri}"}, location(plain[0].Handle[0]))
 	assert.Equal(t, "reverse_proxy", plain[1].Handle[0]["handler"])
 
