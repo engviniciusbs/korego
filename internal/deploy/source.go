@@ -29,10 +29,10 @@ func Fetch(ctx context.Context, r Runner, dir string, src Source, out io.Writer)
 	}
 	clone := Cmd{Name: "git", Args: []string{"clone", "--depth", "1", "--branch", src.Branch, "--single-branch", src.URL, dir}}
 	if src.Token != "" {
-		cred := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + src.Token))
+		cred := tokenCred(src.Token)
 		clone.Env = []string{
 			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=http.extraHeader",
+			"GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader",
 			"GIT_CONFIG_VALUE_0=Authorization: Basic " + cred,
 		}
 	}
@@ -46,6 +46,19 @@ func Fetch(ctx context.Context, r Runner, dir string, src Source, out io.Writer)
 		return "", "", fmt.Errorf("git log: %w", err)
 	}
 	return sha, msg, nil
+}
+
+func tokenCred(token string) string {
+	return base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+}
+
+// TokenSecrets devolve o que o Redactor deve mascarar para um token do GitHub:
+// o token e a credencial base64 enviada no cabeçalho.
+func TokenSecrets(token string) []string {
+	if token == "" {
+		return nil
+	}
+	return []string{token, tokenCred(token)}
 }
 
 // capture roda c e devolve a saída sem espaços nas pontas.

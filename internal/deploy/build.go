@@ -31,7 +31,8 @@ func Build(ctx context.Context, r Runner, app store.App, dir, tag string, out io
 		if _, err := LookPath("railpack"); err != nil {
 			return ErrRailpackMissing
 		}
-		plan := filepath.Join(dir, "railpack-plan.json")
+		// Plano fora do clone: um symlink commitado no repo não pode redirecionar a escrita.
+		plan := filepath.Clean(dir) + ".railpack-plan.json"
 		if err := r.Run(ctx, Cmd{Name: "railpack", Args: []string{"prepare", dir, "--plan-out", plan}}, out); err != nil {
 			return fmt.Errorf("railpack prepare: %w", err)
 		}

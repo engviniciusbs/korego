@@ -38,7 +38,7 @@ func TestFetch_TokenOnlyInEnv(t *testing.T) {
 			assert.NotContains(t, a, b64)
 		}
 	}
-	assert.Equal(t, []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.extraHeader",
+	assert.Equal(t, []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader",
 		"GIT_CONFIG_VALUE_0=Authorization: Basic " + b64}, f.cmds[0].Env)
 }
 
@@ -81,4 +81,10 @@ func TestPullImage_ReturnsID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "sha256:0123456789abcdef", id)
 	assert.Equal(t, []string{"image", "inspect", "--format", "{{.Id}}", "nginx"}, f.cmds[0].Args)
+}
+
+func TestTokenSecrets(t *testing.T) {
+	assert.Nil(t, TokenSecrets(""))
+	b64 := base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_X"))
+	assert.Equal(t, []string{"ghs_X", b64}, TokenSecrets("ghs_X"))
 }

@@ -56,7 +56,7 @@ func TestBuild_RailpackArgs(t *testing.T) {
 	f := &fakeRunner{}
 	require.NoError(t, Build(context.Background(), f, store.App{Slug: "a", BuildType: "railpack"}, "/b/1", "korego/a:abc", &bytes.Buffer{}))
 	require.Len(t, f.cmds, 2)
-	plan := filepath.Join("/b/1", "railpack-plan.json")
+	plan := filepath.Clean("/b/1") + ".railpack-plan.json"
 	assert.Equal(t, "railpack", f.cmds[0].Name)
 	assert.Equal(t, []string{"prepare", "/b/1", "--plan-out", plan}, f.cmds[0].Args)
 	assert.Equal(t, "docker", f.cmds[1].Name)

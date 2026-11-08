@@ -70,3 +70,44 @@ func TestRedactor_ConcurrentAndLong(t *testing.T) {
 	require.NoError(t, r.Close())
 	assert.Equal(t, 8*50*101, buf.Len())
 }
+
+func TestRedactor_NestedSecretsEverySplit(t *testing.T) {
+	text := "val=prod-XYZsecretkey fim"
+	for i := 0; i <= len(text); i++ {
+		var buf bytes.Buffer
+		r := NewRedactor(&buf, []string{"prod", "prod-XYZsecretkey"})
+		_, _ = r.Write([]byte(text[:i]))
+		_, _ = r.Write([]byte(text[i:]))
+		require.NoError(t, r.Close())
+		assert.NotContains(t, buf.String(), "XYZsecretkey", "split %d", i)
+		assert.NotContains(t, buf.String(), "prod", "split %d", i)
+		assert.Equal(t, "val=•••• fim", buf.String(), "split %d", i)
+	}
+}
+
+func TestRedactor_OverlappingSecrets(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewRedactor(&buf, []string{"abcdXY", "XYzzzz"})
+	_, _ = r.Write([]byte("abcdXYzzzz"))
+	require.NoError(t, r.Close())
+	assert.Equal(t, "••••", buf.String())
+	for i := 0; i <= 10; i++ {
+		buf.Reset()
+		r = NewRedactor(&buf, []string{"abcdXY", "XYzzzz"})
+		_, _ = r.Write([]byte("abcdXYzzzz"[:i]))
+		_, _ = r.Write([]byte("abcdXYzzzz"[i:]))
+		require.NoError(t, r.Close())
+		assert.Equal(t, "••••", buf.String(), "split %d", i)
+	}
+}
+
+func TestRedactor_Flush(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewRedactor(&buf, []string{"segredo123"})
+	_, _ = r.Write([]byte("abc segredo123 fim seg"))
+	require.NoError(t, r.Flush())
+	assert.Equal(t, "abc •••• fim ", buf.String())
+	_, _ = r.Write([]byte("redo123 x"))
+	require.NoError(t, r.Close())
+	assert.Equal(t, "abc •••• fim •••• x", buf.String())
+}
