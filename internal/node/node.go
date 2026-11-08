@@ -7,6 +7,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/node/metrics"
 	"github.com/engviniciusbs/korego/internal/node/pm2"
+	"github.com/engviniciusbs/korego/internal/node/procs"
 	"github.com/engviniciusbs/korego/internal/node/proxy"
 )
 
@@ -34,4 +35,6 @@ type Node interface {
 	PM2() pm2.Reader
 	// Proxy devolve o proxy reverso (Caddy) do node.
 	Proxy() proxy.Proxy
+	// Procs devolve a fonte de leitura de processos do host.
+	Procs() procs.Source
 }
