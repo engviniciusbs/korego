@@ -243,7 +243,7 @@ func newHarness(t *testing.T, mut func(a *store.App)) *harness {
 		DB: db, Docker: h.dock, Runner: h.runner, Box: box, Hub: h.hub, Queue: q, Router: h.router,
 		DataDir: dataDir,
 		Now:     func() time.Time { return testNow },
-		Dial:    func(string) error { return errors.New("sem conexão") },
+		Probe:   func(string) error { return errors.New("sem conexão") },
 	}
 	h.svc.listen = func(string) error { return nil }
 

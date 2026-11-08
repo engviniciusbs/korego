@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"errors"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -72,7 +73,7 @@ func TestWaitHealthy_UsesHealthcheck(t *testing.T) {
 	fastPoll(t)
 	d := inspectSeq(det("running", "starting"), det("running", "starting"), det("running", "healthy"))
 	err := WaitHealthy(context.Background(), d, "c", 20000, time.Second, func(string) error {
-		t.Error("não deve usar dial com healthcheck")
+		t.Error("não deve usar a sonda com healthcheck")
 		return nil
 	})
 	assert.NoError(t, err)
@@ -86,7 +87,7 @@ func TestWaitHealthy_Unhealthy(t *testing.T) {
 	assert.Contains(t, err.Error(), "unhealthy")
 }
 
-func TestWaitHealthy_TCPFallback(t *testing.T) {
+func TestWaitHealthy_ProbeFallback(t *testing.T) {
 	fastPoll(t)
 	d := inspectSeq(det("running", ""))
 	var calls int
@@ -139,4 +140,60 @@ func TestWaitHealthy_InspectError(t *testing.T) {
 	}}
 	err := WaitHealthy(context.Background(), d, "c", 20000, time.Second, nil)
 	assert.ErrorIs(t, err, docker.ErrNotFound)
+}
+
+// listenTCP abre um listener local e trata cada conexão com handle.
+func listenTCP(t *testing.T, handle func(net.Conn)) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				handle(c)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// Como o docker-proxy: aceita a conexão e fecha sem responder.
+func TestHTTPProbe_AcceptAndCloseIsNotReady(t *testing.T) {
+	addr := listenTCP(t, func(net.Conn) {})
+	assert.Error(t, HTTPProbe(addr))
+}
+
+func TestHTTPProbe_AnyResponseIsReady(t *testing.T) {
+	addr := listenTCP(t, func(c net.Conn) {
+		buf := make([]byte, 512)
+		_, _ = c.Read(buf)
+		_, _ = c.Write([]byte("HTTP/1.0 500 Internal Server Error\r\n\r\n"))
+	})
+	assert.NoError(t, HTTPProbe(addr))
+}
+
+func TestHTTPProbe_SendsGET(t *testing.T) {
+	got := make(chan string, 1)
+	addr := listenTCP(t, func(c net.Conn) {
+		buf := make([]byte, 512)
+		n, _ := c.Read(buf)
+		got <- string(buf[:n])
+		_, _ = c.Write([]byte("H"))
+	})
+	require.NoError(t, HTTPProbe(addr))
+	assert.Equal(t, "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n", <-got)
+}
+
+func TestHTTPProbe_RefusedIsNotReady(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	assert.Error(t, HTTPProbe(addr))
 }

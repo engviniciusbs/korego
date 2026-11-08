@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -70,13 +72,14 @@ func StartContainer(ctx context.Context, d docker.Client, app store.App, deployI
 
 // WaitHealthy espera o container ficar saudável. A cada verificação: exited ou
 // dead → ErrContainerExited (com o código de saída); Health unhealthy →
-// ErrUnhealthy; healthy → ok; sem healthcheck, ok quando dial("127.0.0.1:<porta>")
-// funciona. Health starting segue esperando. Passado timeout → ErrHealthTimeout;
-// ctx cancelado → ctx.Err().
+// ErrUnhealthy; healthy → ok; sem healthcheck, ok quando probe("127.0.0.1:<porta>")
+// funciona (padrão do Service: HTTPProbe). Health starting segue esperando.
+// Passado timeout → ErrHealthTimeout; ctx cancelado → ctx.Err().
 //
-// Limitação (v1): sem healthcheck, o Docker-in-Docker e o Docker Desktop
-// aceitam TCP na porta publicada antes de o app ouvir; o dial pode dar ok cedo.
-func WaitHealthy(ctx context.Context, d docker.Client, id string, hostPort int, timeout time.Duration, dial func(addr string) error) error {
+// Sem healthcheck não basta um dial TCP: no Docker padrão do Linux a porta
+// publicada é atendida pelo docker-proxy, que aceita a conexão antes de o app
+// dentro do container ouvir. Por isso a sonda exige uma resposta HTTP.
+func WaitHealthy(ctx context.Context, d docker.Client, id string, hostPort int, timeout time.Duration, probe func(addr string) error) error {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	tick := time.NewTicker(healthInterval)
@@ -97,7 +100,7 @@ func WaitHealthy(ctx context.Context, d docker.Client, id string, hostPort int, 
 			return fmt.Errorf("%w (status do docker: %s)", ErrUnhealthy, det.Health)
 		case det.Health == "healthy":
 			return nil
-		case det.Health == "" && dial != nil && dial(addr) == nil:
+		case det.Health == "" && probe != nil && probe(addr) == nil:
 			return nil
 		}
 		select {
@@ -108,4 +111,36 @@ func WaitHealthy(ctx context.Context, d docker.Client, id string, hostPort int, 
 		case <-tick.C:
 		}
 	}
+}
+
+// probeTimeout limita cada tentativa de HTTPProbe (conexão + primeira resposta).
+const probeTimeout = 2 * time.Second
+
+// errNoResponse indica que a conexão abriu, mas nada foi respondido.
+var errNoResponse = errors.New("sem resposta HTTP")
+
+// HTTPProbe conecta em addr, envia "GET / HTTP/1.0" e espera (até 2 s) pelo
+// menos um byte de resposta. Qualquer resposta conta como pronto, até 4xx/5xx:
+// o app está ouvindo. EOF, reset ou timeout sem bytes → não pronto.
+func HTTPProbe(addr string) error {
+	c, err := net.DialTimeout("tcp", addr, probeTimeout)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.SetDeadline(time.Now().Add(probeTimeout)); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(c, "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n"); err != nil {
+		return err
+	}
+	var b [1]byte
+	n, err := c.Read(b[:])
+	if n > 0 {
+		return nil
+	}
+	if err == nil || errors.Is(err, io.EOF) {
+		return errNoResponse
+	}
+	return err
 }

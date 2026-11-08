@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -96,9 +95,9 @@ type Service struct {
 	// DataDir guarda builds/, logs/ e apps/ (diretórios persistentes do Compose).
 	DataDir string
 	Now     func() time.Time
-	// Dial testa a porta quando o container não tem healthcheck (padrão:
-	// net.DialTimeout de 2 s).
-	Dial func(addr string) error
+	// Probe testa se o app responde quando o container não tem healthcheck
+	// (padrão: HTTPProbe).
+	Probe func(addr string) error
 	// AllowFileURLs aceita file:// em origens Git; só testes de integração.
 	AllowFileURLs bool
 
@@ -120,17 +119,11 @@ func (s *Service) now() time.Time {
 	return time.Now()
 }
 
-func (s *Service) dial() func(string) error {
-	if s.Dial != nil {
-		return s.Dial
+func (s *Service) probe() func(string) error {
+	if s.Probe != nil {
+		return s.Probe
 	}
-	return func(addr string) error {
-		c, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err != nil {
-			return err
-		}
-		return c.Close()
-	}
+	return HTTPProbe
 }
 
 func (s *Service) listenFn() func(string) error {
@@ -825,7 +818,7 @@ func (p *pipeline) health(ctx context.Context, cid string) error {
 	if timeout <= 0 {
 		timeout = defaultHealthTimeout
 	}
-	err := WaitHealthy(ctx, s.Docker, cid, p.port, timeout, s.dial())
+	err := WaitHealthy(ctx, s.Docker, cid, p.port, timeout, s.probe())
 	switch {
 	case err == nil:
 		p.out.line("Container saudável")

@@ -239,3 +239,85 @@ func TestIntegration_DeployZeroDowntimeAndHealthFail(t *testing.T) {
 	assert.Equal(t, []int{g1.HostPort, g2.HostPort}, router.calls)
 	router.mu.RUnlock()
 }
+
+// probeRouter faz uma requisição à porta nova no momento em que a rota seria
+// trocada e guarda o resultado.
+type probeRouter struct {
+	db  *store.DB
+	mu  sync.Mutex
+	got []string
+}
+
+func (r *probeRouter) ReapplyApp(ctx context.Context, appID int64) error {
+	a, err := r.db.GetApp(ctx, appID)
+	if err != nil {
+		return err
+	}
+	c := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	res := ""
+	resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/", a.HostPort))
+	if err != nil {
+		res = "erro: " + err.Error()
+	} else {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		res = fmt.Sprintf("%d %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	r.mu.Lock()
+	r.got = append(r.got, res)
+	r.mu.Unlock()
+	return nil
+}
+
+// Sem HEALTHCHECK, o app só passa a ouvir depois de ~5 s. O docker-proxy aceita
+// TCP na porta publicada antes disso; a rota só pode ser trocada quando o app
+// já responde.
+func TestIntegration_NoHealthcheckWaitsForHTTP(t *testing.T) {
+	ctx := context.Background()
+	dock := docker.NewLocal()
+	require.NoError(t, dock.Ping(ctx))
+	slug := fmt.Sprintf("itest-slow-%d", time.Now().UnixNano()%1_000_000)
+	t.Cleanup(func() {
+		cs, _ := dock.ListByLabel(ctx, "korego.app", slug)
+		for _, c := range cs {
+			_ = dock.RemoveForce(ctx, c.ID)
+		}
+		imgs, _ := dock.Images(ctx, "korego/"+slug)
+		for _, img := range imgs {
+			_ = dock.RemoveImage(ctx, img.Ref)
+		}
+	})
+
+	repo := t.TempDir()
+	dockerfile := "FROM busybox:1.37\n" +
+		`CMD ["sh", "-c", "sleep 5; mkdir -p /w; echo ok > /w/index.html; httpd -f -p 80 -h /w"]` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "Dockerfile"), []byte(dockerfile), 0o644))
+	gitIn(t, repo, "init", "-q", "-b", "main")
+	gitIn(t, repo, "add", "-A")
+	gitIn(t, repo, "commit", "-q", "-m", "app lenta")
+
+	db := store.OpenMemory(t)
+	p := &store.Project{Name: "integração lenta"}
+	require.NoError(t, db.InsertProject(ctx, p))
+	app := store.App{ProjectID: p.ID, Slug: slug, SourceType: "git", Repo: "file://" + repo,
+		BuildType: "dockerfile", Branch: "main", DockerfilePath: "Dockerfile", InternalPort: 80, HealthTimeoutS: 90}
+	require.NoError(t, db.InsertApp(ctx, &app))
+
+	box, err := secrets.NewBox(make([]byte, 32))
+	require.NoError(t, err)
+	router := &probeRouter{db: db}
+	dataDir := t.TempDir()
+	q := jobs.NewQueue(1)
+	t.Cleanup(q.Close)
+	svc := &Service{DB: db, Docker: dock, Runner: ExecRunner{}, Box: box, Hub: events.NewHub(), Queue: q,
+		Router: router, DataDir: dataDir, AllowFileURLs: true}
+
+	d, err := svc.Deploy(ctx, app.ID, "manual", "", "")
+	require.NoError(t, err)
+	g := waitDeploy(t, db, d.ID, 5*time.Minute)
+	entries, _ := ReadLog(dataDir, d.ID, 0)
+	require.Equal(t, "running", g.Status, "%s\n%v", g.Reason, entries)
+	router.mu.Lock()
+	defer router.mu.Unlock()
+	assert.Equal(t, []string{"200 ok"}, router.got)
+}
