@@ -26,3 +26,19 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 func WriteError(w http.ResponseWriter, status int, code, message string) {
 	WriteJSON(w, status, errorBody{Error: errorDetail{Code: code, Message: message}})
 }
+
+// writeFieldError escreve um erro de validação com o campo afetado:
+// {"error":{"code","message","field"}}.
+func writeFieldError(w http.ResponseWriter, status int, code, message, field string) {
+	WriteJSON(w, status, fieldErrorBody{Error: fieldErrorDetail{Code: code, Message: message, Field: field}})
+}
+
+type fieldErrorBody struct {
+	Error fieldErrorDetail `json:"error"`
+}
+
+type fieldErrorDetail struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Field   string `json:"field"`
+}

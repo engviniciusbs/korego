@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/engviniciusbs/korego/internal/auth"
+	"github.com/engviniciusbs/korego/internal/domains"
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/node/docker"
@@ -30,6 +31,8 @@ type Deps struct {
 	DB *store.DB
 	// Now é o relógio do histórico de métricas (nil = time.Now).
 	Now func() time.Time
+	// Domains atende /api/proxy, /api/domains e /api/settings/panel (nil as desativa).
+	Domains *domains.Service
 }
 
 // NewRouter monta o roteador principal, com a API sob /api.
@@ -79,6 +82,21 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/containers/{id}/logs", containersH.logs)
 			r.Get("/containers/{id}/logs/download", containersH.download)
 			r.Get("/ws", wsH.serve)
+			if d.Domains != nil {
+				proxyH := proxyHandlers{dom: d.Domains}
+				domainsH := domainHandlers{svc: d.Auth, dom: d.Domains}
+				settingsH := settingsHandlers{svc: d.Auth, dom: d.Domains}
+				r.Get("/proxy", proxyH.status)
+				r.Post("/proxy/retry", proxyH.retry)
+				r.Get("/domains", domainsH.list)
+				r.Post("/domains", domainsH.create)
+				r.Put("/domains/{id}", domainsH.update)
+				r.Delete("/domains/{id}", domainsH.remove)
+				r.Get("/domains/{id}/dns", domainsH.dns)
+				r.Get("/settings/panel", settingsH.panel)
+				r.Put("/settings/panel/domain", settingsH.setDomain)
+				r.Put("/settings/panel/public-port", settingsH.setPublicPort)
+			}
 			if d.Updater != nil {
 				r.Get("/update", updateH.status)
 				r.Post("/update", updateH.apply)

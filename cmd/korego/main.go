@@ -24,6 +24,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/monitor"
 	"github.com/engviniciusbs/korego/internal/node"
+	"github.com/engviniciusbs/korego/internal/node/proxy"
 	"github.com/engviniciusbs/korego/internal/secrets"
 	"github.com/engviniciusbs/korego/internal/serve"
 	"github.com/engviniciusbs/korego/internal/store"
@@ -139,14 +140,6 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("localizar executável: %w", err)
 	}
-	handler := api.NewRouter(api.Deps{
-		Auth: svc, Node: nd, Hub: hub, Web: web, Metrics: collector, DB: db,
-		Updater: &update.System{ExePath: exe, ConfigPath: *cfgPath},
-	})
-	if cfg.DevProxy == "" {
-		handler = api.SecurityHeaders(handler)
-	}
-
 	// Endereço efetivo: com a porta pública desligada, só 127.0.0.1:<porta>
 	// (o painel fica acessível pelo domínio, via proxy).
 	publicPort, err := domains.PublicPort(context.Background(), db)
@@ -172,7 +165,15 @@ func runServe(args []string) error {
 		PanelPort: panelPort, ListenAddr: cfg.ListenAddr,
 		OnListenChange: listener.Switch,
 	}
-	_ = domSvc // exposto pela API na próxima tarefa
+
+	handler := api.NewRouter(api.Deps{
+		Auth: svc, Node: nd, Hub: hub, Web: web, Metrics: collector, DB: db,
+		Updater: &update.System{ExePath: exe, ConfigPath: *cfgPath},
+		Domains: domSvc,
+	})
+	if cfg.DevProxy == "" {
+		handler = api.SecurityHeaders(handler)
+	}
 
 	srv := &http.Server{
 		Handler:           handler,
@@ -184,6 +185,19 @@ func runServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	domainsDone := make(chan struct{})
+	go func() {
+		defer close(domainsDone)
+		domSvc.Run(ctx)
+	}()
+	defer func() { stop(); <-domainsDone }()
+	// Reaplica as rotas na subida (o proxy pode ter sido reiniciado).
+	go func() {
+		if err := domSvc.Reapply(ctx); err != nil && ctx.Err() == nil && !errors.Is(err, proxy.ErrInactive) {
+			log.Printf("proxy: reaplicar rotas na subida: %v", err)
+		}
+	}()
 
 	cleanupDone := make(chan struct{})
 	go func() {
