@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"bytes"
+	"math/rand"
 	"strings"
 	"sync"
 	"testing"
@@ -110,4 +111,52 @@ func TestRedactor_Flush(t *testing.T) {
 	_, _ = r.Write([]byte("redo123 x"))
 	require.NoError(t, r.Close())
 	assert.Equal(t, "abc •••• fim •••• x", buf.String())
+}
+
+func TestRedactor_FlushInsideOpenToken(t *testing.T) {
+	tok := "ghs_ABCDEFGH1234"
+	text := "url https://x-access-token:" + tok + "@github.com/o/r end"
+	for i := 0; i <= len(text); i++ {
+		for j := i; j <= len(text); j += 7 {
+			var buf bytes.Buffer
+			r := NewRedactor(&buf, nil)
+			_, _ = r.Write([]byte(text[:i]))
+			require.NoError(t, r.Flush())
+			_, _ = r.Write([]byte(text[i:j]))
+			require.NoError(t, r.Flush())
+			_, _ = r.Write([]byte(text[j:]))
+			require.NoError(t, r.Close())
+			assert.NotContains(t, buf.String(), "ghs_", "split %d/%d", i, j)
+			assert.NotContains(t, buf.String(), "ABCD", "split %d/%d", i, j)
+			assert.Equal(t, "url https://••••github.com/o/r end", buf.String(), "split %d/%d", i, j)
+		}
+	}
+}
+
+func TestRedactor_RandomChunksWithFlush(t *testing.T) {
+	cases := []struct {
+		secrets []string
+		text    string
+		frags   []string
+	}{
+		{nil, "a https://x-access-token:ghs_ABCDEFGH1234@github.com/o/r b", []string{"ghs_", "ABCD", "EFGH", "1234"}},
+		{[]string{"prod", "prod-XYZsecretkey"}, "val=prod-XYZsecretkey;x=prod-XYZsecretkey", []string{"XYZs", "ecre", "tkey", "prod"}},
+	}
+	rng := rand.New(rand.NewSource(1))
+	for _, c := range cases {
+		for n := 0; n < 3000; n++ {
+			var buf bytes.Buffer
+			r := NewRedactor(&buf, c.secrets)
+			for rest := c.text; rest != ""; {
+				k := 1 + rng.Intn(len(rest))
+				_, _ = r.Write([]byte(rest[:k]))
+				rest = rest[k:]
+				require.NoError(t, r.Flush())
+			}
+			require.NoError(t, r.Close())
+			for _, f := range c.frags {
+				require.NotContains(t, buf.String(), f)
+			}
+		}
+	}
 }

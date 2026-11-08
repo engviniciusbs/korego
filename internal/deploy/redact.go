@@ -49,9 +49,11 @@ func NewRedactor(w io.Writer, secrets []string) *Redactor {
 	return &Redactor{w: w, secrets: ss, hold: maxLen - 1}
 }
 
-// spans devolve as faixas a mascarar em r.buf, já fundidas. openToken inclui um
-// "x-access-token:..." ainda sem "@" (sempre, se final; senão só dentro do limite).
-func (r *Redactor) spans(final bool) []span {
+// spans devolve as faixas a mascarar em r.buf, já fundidas, e o início de um
+// "x-access-token:..." ainda aberto (sem "@" nem espaço), ou -1. Fora do final,
+// o chamador nunca emite além desse início; no final (Close) o trecho é mascarado.
+func (r *Redactor) spans(final bool) ([]span, int) {
+	open := -1
 	var sp []span
 	for _, sec := range r.secrets {
 		for off := 0; off < len(r.buf); {
@@ -68,6 +70,9 @@ func (r *Redactor) spans(final bool) []span {
 	}
 	if loc := tokenOpenRe.FindStringIndex(r.buf); loc != nil && (final || len(r.buf)-loc[0] <= maxPending) {
 		sp = append(sp, span{loc[0], len(r.buf)})
+		if !final {
+			open = loc[0]
+		}
 	}
 	sort.Slice(sp, func(i, j int) bool { return sp[i].s < sp[j].s })
 	var merged []span
@@ -80,7 +85,7 @@ func (r *Redactor) spans(final bool) []span {
 		}
 		merged = append(merged, x)
 	}
-	return merged
+	return merged, open
 }
 
 // partialStart devolve o menor índice i tal que r.buf[i:] é prefixo próprio de
@@ -132,7 +137,12 @@ func (r *Redactor) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.buf += string(p)
-	if err := r.emit(max(0, len(r.buf)-r.hold), r.spans(false)); err != nil {
+	sp, open := r.spans(false)
+	cut := max(0, len(r.buf)-r.hold)
+	if open >= 0 && open < cut {
+		cut = open
+	}
+	if err := r.emit(cut, sp); err != nil {
 		return 0, err
 	}
 	return len(p), nil
@@ -143,9 +153,12 @@ func (r *Redactor) Write(p []byte) (int, error) {
 func (r *Redactor) Flush() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	sp := r.spans(false)
+	sp, open := r.spans(false)
 	cut := r.partialStart()
-	// um token aberto também segura a saída (já está em sp como faixa até o fim)
+	// um token aberto segura a saída até fechar (@ ou espaço) ou passar de maxPending
+	if open >= 0 && open < cut {
+		cut = open
+	}
 	return r.emit(cut, sp)
 }
 
@@ -153,5 +166,6 @@ func (r *Redactor) Flush() error {
 func (r *Redactor) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.emit(len(r.buf), r.spans(true))
+	sp, _ := r.spans(true)
+	return r.emit(len(r.buf), sp)
 }
