@@ -60,6 +60,7 @@ type Details struct {
 	EnvNames     []string  `json:"envNames"` // só os nomes, em ordem alfabética
 	Networks     []string  `json:"networks"`
 	Mounts       []Mount   `json:"mounts"`
+	ExitCode     int       `json:"exitCode"` // código de saída da última execução (State.ExitCode)
 }
 
 // LogLine é uma linha de log de um container.
