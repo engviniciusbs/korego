@@ -28,6 +28,8 @@ export interface DialogProps {
   onCancel: () => void;
   /** Ação em andamento: confirmar fica ocupado e cancelar (botão ou Esc) fica bloqueado. */
   loading?: boolean;
+  /** Confirmar indisponível (ex.: confirmação digitada ainda incorreta). */
+  confirmDisabled?: boolean;
 }
 
 const FOCUSABLE =
@@ -56,6 +58,7 @@ function OpenDialog({
   onConfirm,
   onCancel,
   loading = false,
+  confirmDisabled = false,
 }: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -180,6 +183,7 @@ function OpenDialog({
           form={formId}
           variant={variant === "danger" ? "danger" : "primary"}
           loading={loading}
+          disabled={confirmDisabled}
           onClick={formId ? undefined : onConfirm}
         >
           {confirmLabel}
