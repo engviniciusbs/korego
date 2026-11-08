@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 
 	"github.com/engviniciusbs/korego/internal/audit"
 	"github.com/engviniciusbs/korego/internal/auth"
@@ -13,6 +14,9 @@ import (
 )
 
 const maxWebhookBody = 10 << 20
+
+// signatureHeader é o formato exigido de X-Hub-Signature-256.
+var signatureHeader = regexp.MustCompile(`^sha256=[0-9a-f]{64}$`)
 
 type webhookHandlers struct {
 	svc        *auth.Service
@@ -24,6 +28,12 @@ type webhookHandlers struct {
 // github serves POST /api/webhooks/github. É pública: a assinatura HMAC com o
 // segredo do App autentica a entrega.
 func (h webhookHandlers) github(w http.ResponseWriter, r *http.Request) {
+	// Cabeçalho ausente ou fora do formato: recusa antes de ler o corpo,
+	// consultar o banco ou decifrar o segredo.
+	if !signatureHeader.MatchString(r.Header.Get("X-Hub-Signature-256")) {
+		WriteError(w, http.StatusUnauthorized, "INVALID_SIGNATURE", "Assinatura do webhook inválida.")
+		return
+	}
 	app, ok, err := h.gh.Connected(r.Context())
 	if err != nil {
 		internalError(w, err)

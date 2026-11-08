@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/engviniciusbs/korego/internal/secrets"
 	"github.com/engviniciusbs/korego/internal/store"
 )
 
@@ -99,6 +101,53 @@ func TestWebhook_InvalidSignature401(t *testing.T) {
 	w = g.hook(t, "push", "d-1", body, "")
 	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
 	assert.EqualValues(t, 1, decode(t, w)["queued"])
+}
+
+// failReader falha o teste se o corpo for lido.
+type failReader struct{ t *testing.T }
+
+func (f failReader) Read([]byte) (int, error) {
+	f.t.Error("o corpo não pode ser lido antes de validar o cabeçalho da assinatura")
+	return 0, io.EOF
+}
+
+// Cabeçalho de assinatura ausente ou fora do formato: 401 antes de ler o
+// corpo, consultar o banco ou decifrar o segredo.
+func TestWebhook_BadSignatureHeaderRejectedEarly(t *testing.T) {
+	g := newGHFx(t, true)
+	send := func(sig string, set bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/api/webhooks/github", failReader{t})
+		r.Header.Set("X-GitHub-Event", "push")
+		if set {
+			r.Header.Set("X-Hub-Signature-256", sig)
+		}
+		w := httptest.NewRecorder()
+		g.h.ServeHTTP(w, r)
+		return w
+	}
+	bad := []string{"sha256=nao-e-hex", "sha256=" + strings.Repeat("A", 64), "sha1=" + strings.Repeat("a", 40),
+		"sha256=" + strings.Repeat("a", 63), " sha256=" + strings.Repeat("a", 64)}
+
+	// Sem App conectado o banco responderia 404 NOT_CONNECTED: o 401 mostra
+	// que ele não foi consultado.
+	w := send("", false)
+	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+	assert.Equal(t, "INVALID_SIGNATURE", errCode(decode(t, w)))
+	for _, sig := range bad {
+		w := send(sig, true)
+		require.Equal(t, http.StatusUnauthorized, w.Code, sig)
+		assert.Equal(t, "INVALID_SIGNATURE", errCode(decode(t, w)), sig)
+	}
+
+	// Conectado, mas com uma chave que não decifra o segredo: decifrar daria
+	// 500. O 401 mostra que o segredo não foi tocado.
+	g.connect(t)
+	other, err := secrets.NewBox(bytes.Repeat([]byte{7}, 32))
+	require.NoError(t, err)
+	g.ghs.Box = other
+	w = send("", false)
+	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+	assert.Equal(t, "INVALID_SIGNATURE", errCode(decode(t, w)))
 }
 
 func TestWebhook_PushEnqueuesMatchingApps(t *testing.T) {
