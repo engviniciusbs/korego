@@ -216,3 +216,30 @@ func TestService_BeginDeleteBlocksDeployAndRollback(t *testing.T) {
 	_, err = h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
 	require.NotErrorIs(t, err, ErrAppDeleting)
 }
+
+// Se gravar o deploy atual falhar, current segue apontando o anterior: o
+// container anterior não pode sair (um Recover depois removeria o novo e
+// restauraria uma porta morta). Os dois ficam; o próximo deploy limpa.
+func TestDeploy_SetCurrentFailKeepsOldContainer(t *testing.T) {
+	h := newHarness(t, nil)
+	prev := h.seedCurrent(20000, "old-cid")
+	_, err := h.db.SQL().ExecContext(h.ctx, `CREATE TRIGGER falha_current BEFORE UPDATE OF current_deploy_id ON apps
+		BEGIN SELECT RAISE(ABORT, 'falha simulada'); END`)
+	require.NoError(t, err)
+	d, err := h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
+	require.NoError(t, err)
+	got := h.wait(d.ID)
+	assert.Equal(t, "running", got.Status, got.Reason)
+	assert.Equal(t, -1, h.rec.first("remove:old-cid"), "container anterior mantido")
+	assert.Equal(t, -1, h.rec.first("remove:cid-"+fmt.Sprint(d.ID)), "container novo mantido")
+	a := h.getApp()
+	require.NotNil(t, a.CurrentDeployID)
+	assert.Equal(t, prev.ID, *a.CurrentDeployID)
+	entries, err := ReadLog(h.svc.DataDir, d.ID, 0)
+	require.NoError(t, err)
+	var log strings.Builder
+	for _, e := range entries {
+		log.WriteString(e.Text + "\n")
+	}
+	assert.Contains(t, log.String(), "falha simulada")
+}

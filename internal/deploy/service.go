@@ -885,12 +885,16 @@ func (p *pipeline) swap(ctx context.Context) error {
 	}
 	// A rota já é do novo: daqui em diante nada é desfeito nem cancelado.
 	newCID := p.cid
-	p.record(bg, newCID)
+	recorded := p.record(bg, newCID)
 	var prev *store.Deploy
 	if prevID != nil && *prevID != p.d.ID {
 		if d, err := s.DB.GetDeploy(bg, *prevID); err == nil {
 			prev = &d
-			if d.ContainerID != "" && d.ContainerID != newCID {
+			if !recorded {
+				// current segue no anterior: removê-lo deixaria o Recover
+				// apagar o novo e restaurar uma porta morta.
+				p.out.line("Container anterior mantido: o deploy atual não foi gravado")
+			} else if d.ContainerID != "" && d.ContainerID != newCID {
 				if err := s.Docker.RemoveForce(bg, d.ContainerID); err != nil {
 					p.out.line("não foi possível remover o container anterior: " + err.Error())
 				} else {
@@ -928,16 +932,24 @@ func (p *pipeline) swapCompose(ctx context.Context, cid string) error {
 }
 
 // record grava o resultado e aponta a app para este deploy. A partir daqui o
-// deploy é o atual (live) e não é mais desfeito.
-func (p *pipeline) record(ctx context.Context, cid string) {
+// deploy é o atual (live) e não é mais desfeito. Devolve false se alguma
+// gravação falhou (o erro vai para o log do deploy); aí o container anterior
+// não pode ser removido, e o próximo deploy ou o Recover limpam.
+func (p *pipeline) record(ctx context.Context, cid string) bool {
 	s := p.s
 	p.cid, p.portSwapped, p.composeAllocated, p.live = "", false, false, true
+	ok := true
 	if err := s.DB.SetDeployResult(ctx, p.d.ID, p.image, p.port, cid, p.sha, p.msg); err != nil {
 		log.Printf("deploy %d: gravar resultado: %v", p.d.ID, err)
+		p.out.line("falha ao gravar o resultado do deploy: " + err.Error())
+		ok = false
 	}
 	if err := s.DB.SetCurrentDeploy(ctx, p.app.ID, p.d.ID); err != nil {
 		log.Printf("deploy %d: definir deploy atual: %v", p.d.ID, err)
+		p.out.line("falha ao definir o deploy atual: " + err.Error())
+		ok = false
 	}
+	return ok
 }
 
 // markRunning grava running e marca o anterior como superseded (D4).
