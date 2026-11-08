@@ -20,6 +20,13 @@ type Fake struct {
 	LogsFn    func(ctx context.Context, id string, o docker.LogOptions, fn func(docker.LogLine)) error
 	StatsFn   func(ctx context.Context, id string, fn func(docker.Stats)) error
 	EventsFn  func(ctx context.Context, fn func(docker.Event)) error
+
+	PullFn        func(ctx context.Context, ref string, fn func(line string)) error
+	RunFn         func(ctx context.Context, s docker.RunSpec) (string, error)
+	RemoveForceFn func(ctx context.Context, id string) error
+	ImagesFn      func(ctx context.Context, repo string) ([]docker.Image, error)
+	RemoveImageFn func(ctx context.Context, ref string) error
+	ListByLabelFn func(ctx context.Context, key, value string) ([]docker.Container, error)
 }
 
 var _ docker.Client = (*Fake)(nil)
@@ -102,4 +109,52 @@ func (f *Fake) Events(ctx context.Context, fn func(docker.Event)) error {
 		return docker.ErrUnavailable
 	}
 	return f.EventsFn(ctx, fn)
+}
+
+// Pull chama PullFn.
+func (f *Fake) Pull(ctx context.Context, ref string, fn func(line string)) error {
+	if f.PullFn == nil {
+		return docker.ErrUnavailable
+	}
+	return f.PullFn(ctx, ref, fn)
+}
+
+// Run chama RunFn.
+func (f *Fake) Run(ctx context.Context, s docker.RunSpec) (string, error) {
+	if f.RunFn == nil {
+		return "", docker.ErrUnavailable
+	}
+	return f.RunFn(ctx, s)
+}
+
+// RemoveForce chama RemoveForceFn.
+func (f *Fake) RemoveForce(ctx context.Context, id string) error {
+	if f.RemoveForceFn == nil {
+		return docker.ErrUnavailable
+	}
+	return f.RemoveForceFn(ctx, id)
+}
+
+// Images chama ImagesFn.
+func (f *Fake) Images(ctx context.Context, repo string) ([]docker.Image, error) {
+	if f.ImagesFn == nil {
+		return nil, docker.ErrUnavailable
+	}
+	return f.ImagesFn(ctx, repo)
+}
+
+// RemoveImage chama RemoveImageFn.
+func (f *Fake) RemoveImage(ctx context.Context, ref string) error {
+	if f.RemoveImageFn == nil {
+		return docker.ErrUnavailable
+	}
+	return f.RemoveImageFn(ctx, ref)
+}
+
+// ListByLabel chama ListByLabelFn.
+func (f *Fake) ListByLabel(ctx context.Context, key, value string) ([]docker.Container, error) {
+	if f.ListByLabelFn == nil {
+		return nil, docker.ErrUnavailable
+	}
+	return f.ListByLabelFn(ctx, key, value)
 }

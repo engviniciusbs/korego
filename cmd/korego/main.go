@@ -20,10 +20,16 @@ import (
 	"github.com/engviniciusbs/korego/internal/audit"
 	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/config"
+	"github.com/engviniciusbs/korego/internal/deploy"
+	"github.com/engviniciusbs/korego/internal/domains"
 	"github.com/engviniciusbs/korego/internal/events"
+	"github.com/engviniciusbs/korego/internal/github"
+	"github.com/engviniciusbs/korego/internal/jobs"
 	"github.com/engviniciusbs/korego/internal/monitor"
 	"github.com/engviniciusbs/korego/internal/node"
+	"github.com/engviniciusbs/korego/internal/node/proxy"
 	"github.com/engviniciusbs/korego/internal/secrets"
+	"github.com/engviniciusbs/korego/internal/serve"
 	"github.com/engviniciusbs/korego/internal/store"
 	"github.com/engviniciusbs/korego/internal/update"
 	"github.com/engviniciusbs/korego/internal/version"
@@ -38,7 +44,7 @@ func main() {
 	}
 	switch cmd {
 	case "serve":
-		if err := serve(args); err != nil {
+		if err := runServe(args); err != nil {
 			log.Fatalf("erro: %v", err)
 		}
 	case "version":
@@ -47,13 +53,15 @@ func main() {
 		if err := updateFinish(args); err != nil {
 			log.Fatalf("erro: %v", err)
 		}
+	case "painel":
+		os.Exit(runPainel(args, os.Stdout, os.Stderr))
 	default:
-		fmt.Fprintf(os.Stderr, "comando desconhecido: %s\nuso: korego [serve|version|update-finish]\n", cmd)
+		fmt.Fprintf(os.Stderr, "comando desconhecido: %s\nuso: korego [serve|version|update-finish|painel]\n", cmd)
 		os.Exit(2)
 	}
 }
 
-func serve(args []string) error {
+func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	cfgPath := fs.String("config", "/etc/korego/config.toml", "caminho do arquivo de configuração")
 	_ = fs.Parse(args)
@@ -66,7 +74,7 @@ func serve(args []string) error {
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return fmt.Errorf("criar diretório de dados %s: %w", cfg.DataDir, err)
 	}
-	db, err := store.Open(filepath.Join(cfg.DataDir, "korego.db"))
+	db, err := store.Open(dbPath(cfg.DataDir))
 	if err != nil {
 		return err
 	}
@@ -135,22 +143,84 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("localizar executável: %w", err)
 	}
+	// Endereço efetivo: com a porta pública desligada, só 127.0.0.1:<porta>
+	// (o painel fica acessível pelo domínio, via proxy).
+	publicPort, err := domains.PublicPort(context.Background(), db)
+	if err != nil {
+		return err
+	}
+	listenAddr, err := domains.EffectiveListenAddr(cfg.ListenAddr, publicPort)
+	if err != nil {
+		return err
+	}
+	panelPort, err := domains.ListenPort(cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
+	listener, err := serve.NewListener(listenAddr)
+	if err != nil {
+		return fmt.Errorf("escutar em %s: %w", listenAddr, err)
+	}
+	defer listener.Close()
+
+	domSvc := &domains.Service{
+		DB: db, Proxy: nd.Proxy(), Hub: hub, PublicIP: cfg.PublicIP,
+		PanelPort: panelPort, ListenAddr: cfg.ListenAddr,
+		OnListenChange: listener.Switch,
+	}
+
+	queue := jobs.NewQueue(cfg.MaxBuilds)
+	// Declarado depois do defer db.Close, roda antes dele: cancela os deploys
+	// em andamento e espera terminarem. Os que esperavam ficam queued e voltam
+	// à fila no Recover da próxima subida.
+	defer queue.Close()
+	ghSvc := &github.Service{DB: db, Box: box, Client: &github.Client{APIURL: cfg.GitHubAPIURL, WebURL: cfg.GitHubWebURL}}
+	// Tokens antes do Recover: os deploys github reenfileirados pedem o token ao rodar.
+	deploySvc := &deploy.Service{
+		DB: db, Docker: nd.Docker(), Runner: deploy.ExecRunner{}, Box: box, Hub: hub,
+		Queue: queue, Router: domSvc, Tokens: ghSvc,
+		DataDir: cfg.DataDir,
+	}
+	// Antes de reaplicar as rotas e de servir: marca interrompidos, remove
+	// containers órfãos e reenfileira os queued.
+	if err := deploySvc.Recover(context.Background()); err != nil {
+		log.Printf("deploy: recuperar deploys na subida: %v", err)
+	}
+
 	handler := api.NewRouter(api.Deps{
 		Auth: svc, Node: nd, Hub: hub, Web: web, Metrics: collector, DB: db,
 		Updater: &update.System{ExePath: exe, ConfigPath: *cfgPath},
+		Domains: domSvc, Deploys: deploySvc, DataDir: cfg.DataDir, Runner: deploy.ExecRunner{}, Box: box,
+		GitHub:          ghSvc,
+		GitHubConnected: ghSvc.Ready,
 	})
 	if cfg.DevProxy == "" {
-		handler = api.SecurityHeaders(handler)
+		handler = api.SecurityHeaders(handler, cfg.GitHubWebURL)
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Conexões keep-alive abertas pela porta pública terminam em tempo
+		// limitado depois que ela é desligada.
+		IdleTimeout: 120 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	domainsDone := make(chan struct{})
+	go func() {
+		defer close(domainsDone)
+		domSvc.Run(ctx)
+	}()
+	defer func() { stop(); <-domainsDone }()
+	// Reaplica as rotas na subida (o proxy pode ter sido reiniciado).
+	go func() {
+		if err := domSvc.Reapply(ctx); err != nil && ctx.Err() == nil && !errors.Is(err, proxy.ErrInactive) {
+			log.Printf("proxy: reaplicar rotas na subida: %v", err)
+		}
+	}()
 
 	cleanupDone := make(chan struct{})
 	go func() {
@@ -169,8 +239,8 @@ func serve(args []string) error {
 	defer func() { stop(); <-collectorDone }()
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ListenAndServe() }()
-	log.Printf("KoreGO %s ouvindo em %s", version.Version, cfg.ListenAddr)
+	go func() { errCh <- srv.Serve(listener) }()
+	log.Printf("KoreGO %s ouvindo em %s", version.Version, listenAddr)
 
 	select {
 	case err := <-errCh:
@@ -214,6 +284,28 @@ func healthURL(listenAddr string) (string, error) {
 	return "http://" + net.JoinHostPort(host, port) + "/api/health", nil
 }
 
+// healthURLs devolve as URLs de /api/health a tentar depois de uma
+// atualização: a do endereço configurado e, se for outra, a de
+// 127.0.0.1:<porta>, que responde também com a porta pública desligada.
+func healthURLs(listenAddr string) ([]string, error) {
+	u, err := healthURL(listenAddr)
+	if err != nil {
+		return nil, err
+	}
+	local, err := domains.EffectiveListenAddr(listenAddr, false)
+	if err != nil {
+		return nil, err
+	}
+	l, err := healthURL(local)
+	if err != nil {
+		return nil, err
+	}
+	if l == u {
+		return []string{u}, nil
+	}
+	return []string{u, l}, nil
+}
+
 // updateFinish reinicia o serviço após uma atualização e reverte o binário se
 // o novo não responder em /api/health. Roda a partir do binário anterior.
 func updateFinish(args []string) error {
@@ -228,7 +320,7 @@ func updateFinish(args []string) error {
 	if err != nil {
 		return err
 	}
-	url, err := healthURL(cfg.ListenAddr)
+	urls, err := healthURLs(cfg.ListenAddr)
 	if err != nil {
 		return err
 	}
@@ -241,19 +333,15 @@ func updateFinish(args []string) error {
 			return exec.CommandContext(ctx, "systemctl", "restart", "korego").Run()
 		},
 		Health: func(ctx context.Context) error {
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-			if err != nil {
-				return err
+			var errs []error
+			for _, url := range urls {
+				err := checkHealth(ctx, httpc, url)
+				if err == nil {
+					return nil
+				}
+				errs = append(errs, err)
 			}
-			resp, err := httpc.Do(req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("health retornou %d", resp.StatusCode)
-			}
-			return nil
+			return errors.Join(errs...)
 		},
 	}
 	err = f.Run(context.Background())
@@ -262,4 +350,21 @@ func updateFinish(args []string) error {
 		return nil
 	}
 	return err
+}
+
+// checkHealth faz GET em url e exige 200.
+func checkHealth(ctx context.Context, httpc *http.Client, url string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := httpc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s retornou %d", url, resp.StatusCode)
+	}
+	return nil
 }

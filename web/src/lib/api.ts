@@ -1,12 +1,15 @@
 export class ApiError extends Error {
   code: string;
   status: number;
+  /** Campo do formulário a que o erro se refere (INVALID_APP, INVALID_DOMAIN...). */
+  field?: string;
 
-  constructor(code: string, message: string, status: number) {
+  constructor(code: string, message: string, status: number, field?: string) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.status = status;
+    if (field) this.field = field;
   }
 }
 
@@ -51,11 +54,13 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   if (!res.ok) {
     let code = `HTTP_${res.status}`;
     let message = res.statusText || code;
+    let field: string | undefined;
     try {
       const parsed = JSON.parse(text);
       if (parsed?.error?.code) {
         code = String(parsed.error.code);
         message = String(parsed.error.message ?? message);
+        if (parsed.error.field) field = String(parsed.error.field);
       }
     } catch {
       // corpo não-JSON: mantém HTTP_<status>
@@ -63,7 +68,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     if (res.status === 401 && typeof window !== "undefined") {
       window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
     }
-    throw new ApiError(code, message, res.status);
+    throw new ApiError(code, message, res.status, field);
   }
 
   if (res.status === 204 || text === "") return undefined as T;

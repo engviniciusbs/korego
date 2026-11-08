@@ -7,6 +7,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/node/metrics"
 	"github.com/engviniciusbs/korego/internal/node/pm2"
+	"github.com/engviniciusbs/korego/internal/node/proxy"
 )
 
 // HostInfo descreve o host.
@@ -31,4 +32,6 @@ type Node interface {
 	Docker() docker.Client
 	// PM2 devolve o leitor (somente leitura) do PM2.
 	PM2() pm2.Reader
+	// Proxy devolve o proxy reverso (Caddy) do node.
+	Proxy() proxy.Proxy
 }

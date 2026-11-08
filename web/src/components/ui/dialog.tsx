@@ -12,10 +12,24 @@ export interface DialogProps {
   confirmLabel: string;
   cancelLabel?: string;
   variant?: "danger";
-  onConfirm: () => void;
+  /** Texto acima do título. Padrão: "Confirmar ação". */
+  eyebrow?: ReactNode;
+  /**
+   * Diálogo de formulário: o botão de confirmar vira o submit do `<form id={formId}>`
+   * renderizado nos filhos, o foco começa no primeiro campo e o corpo deixa de
+   * ser a descrição acessível. `onConfirm` não é chamado; trate o `onSubmit`.
+   */
+  formId?: string;
+  /** Esconde "Cancelar" (ex.: um único botão "Fechar"); Esc continua chamando `onCancel`. */
+  hideCancel?: boolean;
+  /** Largura máxima maior, para formulários. */
+  size?: "md" | "lg";
+  onConfirm?: () => void;
   onCancel: () => void;
   /** Ação em andamento: confirmar fica ocupado e cancelar (botão ou Esc) fica bloqueado. */
   loading?: boolean;
+  /** Confirmar indisponível (ex.: confirmação digitada ainda incorreta). */
+  confirmDisabled?: boolean;
 }
 
 const FOCUSABLE =
@@ -37,13 +51,21 @@ function OpenDialog({
   confirmLabel,
   cancelLabel = "Cancelar",
   variant,
+  eyebrow = "Confirmar ação",
+  formId,
+  hideCancel = false,
+  size = "md",
   onConfirm,
   onCancel,
   loading = false,
+  confirmDisabled = false,
 }: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // Lido só na abertura: o foco inicial não acompanha mudanças posteriores.
+  const isForm = useRef(Boolean(formId));
   const titleId = useId();
   const bodyId = useId();
 
@@ -57,7 +79,10 @@ function OpenDialog({
     } else {
       el.setAttribute("open", "");
     }
-    cancelRef.current?.focus();
+    const field = isForm.current
+      ? bodyRef.current?.querySelector<HTMLElement>("input:not(:disabled), select:not(:disabled), textarea:not(:disabled)")
+      : null;
+    (field ?? cancelRef.current ?? confirmRef.current)?.focus();
     return () => {
       if (typeof el.close === "function") {
         if (el.open) el.close();
@@ -118,12 +143,13 @@ function OpenDialog({
     <dialog
       ref={ref}
       aria-labelledby={titleId}
-      aria-describedby={bodyId}
+      aria-describedby={formId ? undefined : bodyId}
       aria-busy={loading || undefined}
       onKeyDown={onKeyDown}
       onCancel={onNativeCancel}
       className={cn(
-        "fixed inset-0 m-auto h-fit max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-md overflow-y-auto overscroll-contain border border-line-strong bg-surface p-0 text-left text-fg",
+        "fixed inset-0 m-auto h-fit max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] overflow-y-auto overscroll-contain border border-line-strong bg-surface p-0 text-left text-fg",
+        size === "lg" ? "max-w-lg" : "max-w-md",
         "backdrop:bg-black/75",
         variant === "danger" && "shadow-[inset_2px_0_0_0_var(--color-danger)]",
       )}
@@ -136,22 +162,30 @@ function OpenDialog({
             variant === "danger" ? "text-danger" : "text-fg-subtle",
           )}
         >
-          Confirmar ação
+          {eyebrow}
         </p>
         <h2 id={titleId} className="mt-1 text-[15px] font-semibold tracking-tight text-balance">
           {title}
         </h2>
       </div>
-      <div id={bodyId} className="space-y-3 px-5 py-4 text-[13px] text-fg-muted">
+      <div ref={bodyRef} id={bodyId} className="space-y-3 px-5 py-4 text-[13px] text-fg-muted">
         {children}
       </div>
       <div className="flex flex-wrap justify-end gap-2 border-t border-line bg-bg/40 px-5 py-3">
-        <Button ref={cancelRef} variant="secondary" disabled={loading} onClick={cancel}>
-          {cancelLabel}
-        </Button>
+        {!hideCancel && (
+          <Button ref={cancelRef} variant="secondary" disabled={loading} onClick={cancel}>
+            {cancelLabel}
+          </Button>
+        )}
         <Button
           ref={confirmRef}
-          variant={variant === "danger" ? "danger" : "primary"} loading={loading} onClick={onConfirm}>
+          type={formId ? "submit" : "button"}
+          form={formId}
+          variant={variant === "danger" ? "danger" : "primary"}
+          loading={loading}
+          disabled={confirmDisabled}
+          onClick={formId ? undefined : onConfirm}
+        >
           {confirmLabel}
         </Button>
       </div>

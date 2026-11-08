@@ -17,3 +17,7 @@ func TestLocal_Info(t *testing.T) {
 	assert.GreaterOrEqual(t, info.CPUs, 1)
 	assert.Greater(t, info.MemoryTotalBytes, uint64(0))
 }
+
+func TestLocal_Proxy(t *testing.T) {
+	assert.NotNil(t, node.NewLocal("", "").Proxy())
+}

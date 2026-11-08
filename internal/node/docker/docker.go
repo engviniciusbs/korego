@@ -60,6 +60,7 @@ type Details struct {
 	EnvNames     []string  `json:"envNames"` // só os nomes, em ordem alfabética
 	Networks     []string  `json:"networks"`
 	Mounts       []Mount   `json:"mounts"`
+	ExitCode     int       `json:"exitCode"` // código de saída da última execução (State.ExitCode)
 }
 
 // LogLine é uma linha de log de um container.
@@ -102,6 +103,13 @@ type Client interface {
 	Logs(ctx context.Context, id string, o LogOptions, fn func(LogLine)) error // bloqueia até o fim do stream ou de ctx
 	Stats(ctx context.Context, id string, fn func(Stats)) error                // stream; bloqueia
 	Events(ctx context.Context, fn func(Event)) error                          // filtro type=container e as ações publicadas; bloqueia
+
+	Pull(ctx context.Context, ref string, fn func(line string)) error // fn recebe o progresso em texto ("<id>: <status> <progresso>")
+	Run(ctx context.Context, s RunSpec) (id string, err error)        // create + start; ErrConflict se o nome já existe
+	RemoveForce(ctx context.Context, id string) error                 // force, sem apagar volumes; ErrNotFound → nil
+	Images(ctx context.Context, repo string) ([]Image, error)         // imagens com tag em repo (ex.: "korego/blog"), mais nova primeiro
+	RemoveImage(ctx context.Context, ref string) error                // sem force; em uso → ErrConflict
+	ListByLabel(ctx context.Context, key, value string) ([]Container, error)
 }
 
 // EventActions são as ações de container repassadas por Events.
@@ -200,4 +208,34 @@ func (w *lineWriter) flush() {
 	if len(w.buf) > 0 {
 		w.emit()
 	}
+}
+
+// PortMapping publica uma porta do container no host.
+type PortMapping struct {
+	HostIP        string // "" = todas as interfaces
+	HostPort      uint16 // 0 = o Docker escolhe
+	ContainerPort uint16
+	Proto         string // "tcp" por padrão
+}
+
+// VolumeMount monta um volume nomeado em Target; o Docker o cria no primeiro uso.
+type VolumeMount struct{ Volume, Target string }
+
+// RunSpec descreve um container a criar e iniciar.
+type RunSpec struct {
+	Name, Image   string
+	Labels        map[string]string
+	Env           []string // "NOME=valor"; nunca registrado em log nem em erro
+	Ports         []PortMapping
+	Volumes       []VolumeMount
+	Cmd           []string
+	NetworkMode   string // "" = padrão; "host" para o Caddy
+	RestartPolicy string // "unless-stopped" por padrão
+}
+
+// Image é uma imagem local, vista por uma de suas tags.
+type Image struct {
+	ID        string
+	Ref       string // primeira tag do repositório consultado, ex.: "korego/blog:abc123"
+	CreatedAt time.Time
 }

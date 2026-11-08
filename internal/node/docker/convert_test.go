@@ -9,6 +9,8 @@ import (
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/events"
+	"github.com/moby/moby/api/types/jsonstream"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -182,4 +184,80 @@ func TestToEvent(t *testing.T) {
 	e := toEvent(events.Message{Action: "health_status: healthy", Actor: events.Actor{ID: "abc", Attributes: map[string]string{"name": "web"}}})
 	assert.Equal(t, Event{Action: "health_status", ID: "abc", Name: "web"}, e)
 	assert.Equal(t, "start", toEvent(events.Message{Action: events.ActionStart}).Action)
+}
+
+func TestToCreateConfig_PortsLabelsRestart(t *testing.T) {
+	cfg, host, err := toCreateConfig(RunSpec{
+		Name:    "blog",
+		Image:   "korego/blog:abc",
+		Labels:  map[string]string{"korego.managed": "true", "korego.app": "blog"},
+		Ports:   []PortMapping{{HostIP: "127.0.0.1", HostPort: 20001, ContainerPort: 8080}},
+		Volumes: []VolumeMount{{Volume: "blog-data", Target: "/data"}},
+		Cmd:     []string{"serve"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "korego/blog:abc", cfg.Image)
+	assert.Equal(t, []string{"serve"}, cfg.Cmd)
+	assert.Equal(t, map[string]string{"korego.managed": "true", "korego.app": "blog"}, cfg.Labels)
+
+	p := network.MustParsePort("8080/tcp")
+	require.Contains(t, host.PortBindings, p)
+	require.Len(t, host.PortBindings[p], 1)
+	assert.Equal(t, "127.0.0.1", host.PortBindings[p][0].HostIP.String())
+	assert.Equal(t, "20001", host.PortBindings[p][0].HostPort)
+	assert.Contains(t, cfg.ExposedPorts, p)
+
+	assert.Equal(t, container.RestartPolicyUnlessStopped, host.RestartPolicy.Name)
+	require.Len(t, host.Mounts, 1)
+	assert.Equal(t, mount.TypeVolume, host.Mounts[0].Type)
+	assert.Equal(t, "blog-data", host.Mounts[0].Source)
+	assert.Equal(t, "/data", host.Mounts[0].Target)
+
+	// Política explícita é respeitada.
+	_, host, err = toCreateConfig(RunSpec{Image: "x", RestartPolicy: "always"})
+	require.NoError(t, err)
+	assert.Equal(t, container.RestartPolicyAlways, host.RestartPolicy.Name)
+
+	// Rede host: sem port bindings.
+	cfg, host, err = toCreateConfig(RunSpec{
+		Image:       "caddy",
+		NetworkMode: "host",
+		Ports:       []PortMapping{{HostPort: 80, ContainerPort: 80}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, container.NetworkMode("host"), host.NetworkMode)
+	assert.Empty(t, host.PortBindings)
+	assert.Empty(t, cfg.ExposedPorts)
+}
+
+func TestToCreateConfig_EnvNotInError(t *testing.T) {
+	const secret = "s3gredo-super-secreto"
+	cases := []RunSpec{
+		{Image: "", Env: []string{"TOKEN=" + secret}},
+		{Image: "x", Env: []string{"TOKEN=" + secret, "SEM_IGUAL" + secret}},
+		{Image: "x", Env: []string{"=" + secret}},
+		{Image: "x", Env: []string{"A=" + secret}, Ports: []PortMapping{{ContainerPort: 0}}},
+		{Image: "x", Env: []string{"A=" + secret}, Ports: []PortMapping{{HostIP: "nao-ip", ContainerPort: 80}}},
+		{Image: "x", Env: []string{"A=" + secret}, Volumes: []VolumeMount{{Volume: "", Target: "/d"}}},
+	}
+	for i, s := range cases {
+		_, _, err := toCreateConfig(s)
+		require.Error(t, err, "caso %d", i)
+		assert.NotContains(t, err.Error(), secret, "caso %d", i)
+	}
+}
+
+func TestPullLine(t *testing.T) {
+	assert.Equal(t, "Pulling from library/busybox", pullLine(jsonstream.Message{Status: "Pulling from library/busybox"}))
+	assert.Equal(t, "abc123: Pull complete", pullLine(jsonstream.Message{ID: "abc123", Status: "Pull complete"}))
+	assert.Equal(t, "abc123: Downloading 1.0 KiB/2.0 KiB",
+		pullLine(jsonstream.Message{ID: "abc123", Status: "Downloading", Progress: &jsonstream.Progress{Current: 1024, Total: 2048}}))
+	assert.Equal(t, "abc123: Extracting 512 B",
+		pullLine(jsonstream.Message{ID: "abc123", Status: "Extracting", Progress: &jsonstream.Progress{Current: 512}}))
+	assert.Equal(t, "", pullLine(jsonstream.Message{}))
+}
+
+func TestRepoMatch(t *testing.T) {
+	assert.Equal(t, "korego/blog:v2", firstRepoTag([]string{"outra:1", "korego/blog:v2", "korego/blog:v1"}, "korego/blog"))
+	assert.Equal(t, "", firstRepoTag([]string{"korego/blog-x:1", "<none>:<none>"}, "korego/blog"))
 }

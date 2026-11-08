@@ -4,6 +4,7 @@ package docker
 
 import (
 	"context"
+	"net"
 	"os/exec"
 	"strings"
 	"testing"
@@ -169,4 +170,82 @@ func TestLocal_UnavailableSocket(t *testing.T) {
 	assert.ErrorIs(t, l.Ping(ctx), ErrUnavailable)
 	_, err := l.List(ctx)
 	assert.ErrorIs(t, err, ErrUnavailable)
+}
+
+// freePort devolve uma porta TCP livre em 127.0.0.1.
+func freePort(t *testing.T) uint16 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	return uint16(ln.Addr().(*net.TCPAddr).Port)
+}
+
+func TestLocal_RunPullImages(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	l := NewLocal()
+
+	var lines []string
+	require.NoError(t, l.Pull(ctx, "busybox:latest", func(s string) { lines = append(lines, s) }))
+	assert.NotEmpty(t, lines)
+
+	imgs, err := l.Images(ctx, "busybox")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(imgs), 1)
+	assert.Equal(t, "busybox:latest", imgs[0].Ref)
+	assert.NotEmpty(t, imgs[0].ID)
+	assert.False(t, imgs[0].CreatedAt.IsZero())
+
+	label := "korego.test.run" + strings.ReplaceAll(t.Name(), "/", "_")
+	port := freePort(t)
+	id, err := l.Run(ctx, RunSpec{
+		Name:   "korego-test-run-pull",
+		Image:  "busybox:latest",
+		Labels: map[string]string{label: "1"},
+		Env:    []string{"SEGREDO=valor"},
+		Ports:  []PortMapping{{HostIP: "127.0.0.1", HostPort: port, ContainerPort: 8080}},
+		Cmd:    []string{"sleep", "300"},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.RemoveForce(context.Background(), id) })
+
+	got, err := l.ListByLabel(ctx, label, "1")
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, id, got[0].ID)
+	assert.Equal(t, "running", got[0].State)
+
+	d, err := l.Inspect(ctx, id)
+	require.NoError(t, err)
+	assert.Contains(t, d.Ports, Port{IP: "127.0.0.1", PrivatePort: 8080, PublicPort: port, Proto: "tcp"})
+
+	require.NoError(t, l.RemoveForce(ctx, id))
+	got, err = l.ListByLabel(ctx, label, "1")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	// Remover de novo é tolerado.
+	assert.NoError(t, l.RemoveForce(ctx, id))
+}
+
+func TestLocal_RunNameConflict(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	l := NewLocal()
+	require.NoError(t, l.Pull(ctx, "busybox:latest", func(string) {}))
+
+	spec := RunSpec{Name: "korego-test-conflito", Image: "busybox:latest", Cmd: []string{"sleep", "300"}}
+	id, err := l.Run(ctx, spec)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.RemoveForce(context.Background(), id) })
+
+	_, err = l.Run(ctx, spec)
+	assert.ErrorIs(t, err, ErrConflict)
+}
+
+func TestLocal_PullError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	err := NewLocal().Pull(ctx, "korego-inexistente.invalid/x/y:1", func(string) {})
+	assert.Error(t, err)
 }

@@ -12,16 +12,16 @@ interface NavItem {
   href?: string;
   /** Etapa em que o item será liberado; presente = desabilitado. */
   stage?: string;
-  /** Prefixo de rota que marca o item como ativo. */
-  match?: string;
+  /** Prefixos de rota que marcam o item como ativo. */
+  match?: string | string[];
   children?: Array<{ label: string; href: string }>;
 }
 
 const items: NavItem[] = [
   { label: "Visão geral", href: "/" },
   { label: "Containers", href: "/containers/", match: "/containers/" },
-  { label: "Projetos", stage: "Etapa 2" },
-  { label: "Domínios", stage: "Etapa 2" },
+  { label: "Projetos", href: "/projetos/", match: ["/projetos/", "/aplicacoes/"] },
+  { label: "Domínios", href: "/dominios/", match: "/dominios/" },
   {
     label: "Configurações",
     href: "/configuracoes/seguranca/",
@@ -29,6 +29,8 @@ const items: NavItem[] = [
     children: [
       { label: "Segurança", href: "/configuracoes/seguranca/" },
       { label: "Atualização", href: "/configuracoes/atualizacao/" },
+      { label: "Painel", href: "/configuracoes/painel/" },
+      { label: "GitHub", href: "/configuracoes/github/" },
     ],
   },
 ];
@@ -72,7 +74,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                 </li>
               );
             }
-            const active = item.match ? pathname.startsWith(item.match) : pathname === item.href;
+            const prefixes = item.match === undefined ? [] : ([] as string[]).concat(item.match);
+            const active = prefixes.length ? prefixes.some((m) => pathname.startsWith(m)) : pathname === item.href;
             return (
               <li key={item.label}>
                 <Link
