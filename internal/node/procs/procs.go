@@ -29,6 +29,7 @@ type prevEntry struct{ start, ticks uint64 }
 type tracker struct {
 	havePrev  bool
 	prevTotal uint64
+	curTotal  uint64 // total da leitura em andamento; só vira prevTotal no commit
 	prev      map[int]prevEntry
 	next      map[int]prevEntry
 	dTotal    uint64
@@ -41,7 +42,7 @@ func (t *tracker) begin(total uint64) {
 	if t.havePrev && total > t.prevTotal {
 		t.dTotal = total - t.prevTotal
 	}
-	t.prevTotal = total
+	t.curTotal = total
 }
 
 // percent devolve o CPU% de um processo e registra-o para a próxima leitura.
@@ -59,7 +60,9 @@ func (t *tracker) percent(pid int, start, ticks uint64) float64 {
 	return pct
 }
 
-// commit fecha a leitura; PIDs que sumiram são esquecidos.
+// commit fecha a leitura com sucesso: todo o estado (PIDs e total) avança junto,
+// e PIDs que sumiram são esquecidos. Uma leitura abortada não chama commit,
+// então a seguinte compara contra a última leitura completa.
 func (t *tracker) commit() {
-	t.prev, t.next, t.havePrev = t.next, nil, true
+	t.prev, t.next, t.prevTotal, t.havePrev = t.next, nil, t.curTotal, true
 }
