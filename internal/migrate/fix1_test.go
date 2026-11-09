@@ -126,10 +126,12 @@ func TestTakeover_DNSNotReady409(t *testing.T) {
 		site("painel.exemplo.com", proxy.TLSCustom), // próprio: DNS não importa
 	}
 	h.dom.dns = map[string]bool{"loja.exemplo.net": false, "painel.exemplo.com": false}
-	err := h.e.StartTakeover(context.Background(), nil)
+	// Pré-checagem barata, sem pausar: a API recusa antes de gastar o código.
+	err := h.e.PrecheckTakeover(context.Background())
 	var ref *Refusal
 	require.ErrorAs(t, err, &ref)
 	assert.Equal(t, CodeDNSNotReady, ref.Code)
+	assert.Equal(t, 0, h.dom.pauses, "DNS é conferido fora da pausa")
 	assert.Contains(t, ref.Message, "loja.exemplo.net")
 	assert.NotContains(t, ref.Message, "painel.exemplo.com")
 	assert.NotContains(t, ref.Message, "exemplo.com,")

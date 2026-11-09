@@ -77,9 +77,10 @@ func isAuto(s proxy.Site) bool {
 // validar a cadeia; a folha vai no resultado) e, por rota, um GET no caminho
 // da rota com Host = host, sem seguir redirecionamentos.
 //
-// Passa com o handshake ok, a folha cobrindo o host e no prazo, e todo status
-// abaixo de 500 e diferente de 403. 403 só passa em site cloudflareOnly (no
-// modo normal o loopback não está nas faixas da Cloudflare). Com trial, um
+// Passa (D5) com o handshake ok, a folha cobrindo o host e no prazo, e todo
+// status abaixo de 500 (403 inclusive: um site cloudflareOnly recusa o
+// loopback no modo normal, e um site comum pode responder 403 na raiz; a
+// folha é o que prova o certificado). Com trial, um
 // site auto (o certificado só sai depois de assumir as portas) é Pending:
 // falha de handshake não o reprova e a folha (emissor interno) não é
 // conferida. A saída segue a ordem de sites.
@@ -165,7 +166,7 @@ func checkSite(ctx context.Context, s proxy.Site, addr string, trial bool) SiteC
 
 	sc.OK = true
 	for _, r := range s.Routes {
-		pc := checkPath(ctx, client, s.Host, r, s.CloudflareOnly)
+		pc := checkPath(ctx, client, s.Host, r)
 		sc.Paths = append(sc.Paths, pc)
 		if !pc.OK && sc.OK {
 			sc.OK = false
@@ -196,7 +197,7 @@ func leafProblem(leaf *x509.Certificate, host string, now time.Time) string {
 	return ""
 }
 
-func checkPath(ctx context.Context, client *http.Client, host string, r proxy.SiteRoute, cfOnly bool) PathCheck {
+func checkPath(ctx context.Context, client *http.Client, host string, r proxy.SiteRoute) PathCheck {
 	pc := PathCheck{Path: r.Path, Static: r.Static != nil}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+r.Path, nil)
 	if err != nil {
@@ -212,7 +213,7 @@ func checkPath(ctx context.Context, client *http.Client, host string, r proxy.Si
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, checkBodyLimit))
 	pc.Status = resp.StatusCode
-	pc.OK = resp.StatusCode < 500 && (resp.StatusCode != http.StatusForbidden || cfOnly)
+	pc.OK = resp.StatusCode < 500
 	pc.Headers = map[string]string{}
 	for _, h := range checkHeaders {
 		if v := resp.Header.Get(h); v != "" {

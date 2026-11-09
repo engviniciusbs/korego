@@ -144,21 +144,23 @@ func TestCheck_ExpiredLeafFails(t *testing.T) {
 	assert.Contains(t, got[0].Message, "vencido")
 }
 
-func TestCheck_403OnlyPassesForCloudflareOnly(t *testing.T) {
+func TestCheck_403PassesWithValidLeaf(t *testing.T) {
 	forbidden := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) })
 	addr := tlsServer(t, forbidden, time.Now().Add(30*24*time.Hour), "exemplo.com", "loja.exemplo.net")
 	cf := custom("loja.exemplo.net")
 	cf.CloudflareOnly = true
 	got := Check(context.Background(), []proxy.Site{custom("exemplo.com"), cf}, addr, false)
 	require.Len(t, got, 2)
-	assert.False(t, got[0].OK, "403 reprova um host comum")
-	assert.Contains(t, got[0].Message, "403")
-	assert.True(t, got[1].OK, "403 passa num host só Cloudflare com a folha certa: %s", got[1].Message)
+	// D5: abaixo de 500 passa, inclusive 403 num host comum, com a folha válida.
+	assert.True(t, got[0].OK, got[0].Message)
+	assert.Equal(t, http.StatusForbidden, got[0].Paths[0].Status)
+	assert.True(t, got[1].OK, got[1].Message)
 
-	// Só Cloudflare com a folha errada continua reprovado.
+	// 403 com a folha errada continua reprovado (a folha vem antes do status).
 	addr = tlsServer(t, forbidden, time.Now().Add(30*24*time.Hour), "outro.exemplo.org")
-	got = Check(context.Background(), []proxy.Site{cf}, addr, false)
+	got = Check(context.Background(), []proxy.Site{custom("exemplo.com"), cf}, addr, false)
 	assert.False(t, got[0].OK)
+	assert.False(t, got[1].OK)
 }
 
 func TestCheck_HandshakeFailure(t *testing.T) {

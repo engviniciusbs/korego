@@ -593,9 +593,12 @@ func (e *Engine) RecoverInterrupted(ctx context.Context) error {
 	return nil
 }
 
-// PrecheckTakeover são as recusas baratas de assumir (sem pausar nada), para
-// a API responder 409 antes de consumir o código de confirmação.
-func (e *Engine) PrecheckTakeover(context.Context) error {
+// PrecheckTakeover são as recusas de assumir que não mexem em nada nem
+// pausam a reconciliação (troca ou atualização em andamento, estado trial,
+// dono suportado, DNS dos domínios auto), para a API responder 409 antes de
+// consumir o código de confirmação. StartTakeover confere de novo o estado e
+// o dono sob a pausa.
+func (e *Engine) PrecheckTakeover(ctx context.Context) error {
 	if err := e.busy(); err != nil {
 		return err
 	}
@@ -605,6 +608,14 @@ func (e *Engine) PrecheckTakeover(context.Context) error {
 	}
 	if _, ok := e.Systemd.UnitForProcess(st.Process); !ok {
 		return unsupportedOwner(st)
+	}
+	sites, err := e.Domains.Sites(ctx)
+	if err != nil {
+		return fmt.Errorf("montar os sites: %w", err)
+	}
+	if bad := e.dnsProblems(ctx, sites); len(bad) > 0 {
+		return &Refusal{Code: CodeDNSNotReady, Message: "O DNS destes domínios com certificado automático não aponta para este servidor: " +
+			strings.Join(bad, ", ") + ". Sem isso o certificado não sai e a troca volta sozinha; corrija o DNS antes de assumir as portas."}
 	}
 	return nil
 }
@@ -625,8 +636,7 @@ func unsupportedOwner(st proxy.Status) *Refusal {
 }
 
 // StartTakeover confere as pré-condições (estado trial; dono das portas é
-// nginx ou apache2 do systemd, com a unit existente e ativa; DNS dos
-// domínios auto apontando para cá) e, passando, assume as portas em segundo
+// nginx ou apache2 do systemd, com a unit existente e ativa) e, passando, assume as portas em segundo
 // plano; onDone recebe o resultado. Recusa com *Refusal sem mexer em nada.
 func (e *Engine) StartTakeover(ctx context.Context, onDone func(Result)) error {
 	ss, err := e.begin(ctx)
@@ -644,11 +654,6 @@ func (e *Engine) StartTakeover(ctx context.Context, onDone func(Result)) error {
 	if err != nil {
 		ss.end(ss.st)
 		return fmt.Errorf("montar os sites: %w", err)
-	}
-	if bad := e.dnsProblems(ctx, sites); len(bad) > 0 {
-		ss.end(ss.st)
-		return &Refusal{Code: CodeDNSNotReady, Message: "O DNS destes domínios com certificado automático não aponta para este servidor: " +
-			strings.Join(bad, ", ") + ". Sem isso o certificado não sai e a troca volta sozinha; corrija o DNS antes de assumir as portas."}
 	}
 	if err := e.mark(ctx, OpTakeover, unit); err != nil {
 		ss.end(ss.st)

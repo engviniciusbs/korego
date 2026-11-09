@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"sync"
 	"testing"
@@ -338,4 +339,26 @@ func TestAPI_CodeRateLimitedAndRequiredAudited(t *testing.T) {
 	assert.EqualValues(t, http.StatusTooManyRequests, b["_status"])
 	assert.Equal(t, "RATE_LIMITED", errCode(b))
 	assert.False(t, m.mig.Running())
+}
+
+func TestAPI_DNSNotReadyKeepsCodeUnconsumed(t *testing.T) {
+	m := newMigEnv(t)
+	m.svc.HostIPs = func() ([]net.IP, error) { return []net.IP{net.ParseIP("203.0.113.10")}, nil }
+	m.svc.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("192.0.2.9")}} // aponta para outro servidor
+	_, _, err := m.svc.Create(context.Background(), domains.DomainInput{
+		Hostname: "exemplo.com", TargetType: "address", Address: "127.0.0.1:5000"}) // TLS auto
+	require.NoError(t, err)
+
+	code := m.freshCode(t)
+	b := m.post(t, "/api/proxy/takeover", map[string]string{"code": code})
+	assert.EqualValues(t, http.StatusConflict, b["_status"])
+	assert.Equal(t, "DNS_NOT_READY", errCode(b))
+	assert.Contains(t, b["error"].(map[string]any)["message"], "exemplo.com")
+	assert.True(t, m.units.isActive("nginx"))
+
+	// DNS corrigido: o mesmo código ainda vale (não foi gasto pela recusa).
+	m.svc.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("203.0.113.10")}}
+	b = m.post(t, "/api/proxy/takeover", map[string]string{"code": code})
+	require.EqualValues(t, http.StatusAccepted, b["_status"], b)
+	m.waitIdle(t)
 }
