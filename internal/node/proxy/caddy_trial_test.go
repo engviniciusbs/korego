@@ -378,3 +378,42 @@ func TestSwitch_RefusedWhenNotRunning(t *testing.T) {
 	assert.ErrorIs(t, c.Switch(context.Background(), nil, ListenNormal, nil), ErrInactive)
 	assert.Zero(t, fa.loads)
 }
+
+const unknownOwner = "outro processo"
+
+func TestEnsure_UnknownOwnerOn2019IsOursWhenAdminAnswers(t *testing.T) {
+	fa, admin := newFakeAdmin(t)
+	fa.config = normalCfg
+	c := newCaddy(&dockertest.Fake{ListFn: runningOwn(specLabels)}, admin)
+	c.PortOwner = func(int) (string, bool) { return unknownOwner, true } // 2019, 80, 443
+	st := c.Ensure(context.Background())
+	assert.Equal(t, StateActive, st.State)
+	assert.Equal(t, ListenNormal, st.Mode)
+	assert.NoError(t, c.Apply(context.Background(), []Site{simple("exemplo.com", "127.0.0.1:20001", false, "")}, ListenNormal, nil))
+}
+
+func TestEnsure_UnknownOwnerOn80And443(t *testing.T) {
+	fa, admin := newFakeAdmin(t) // config null
+	c := newCaddy(&dockertest.Fake{ListFn: runningOwn(specLabels)}, admin)
+	c.PortOwner = func(int) (string, bool) { return unknownOwner, true }
+	assert.Equal(t, StateTrial, c.Ensure(context.Background()).State, "config vazia")
+
+	cfg, err := BuildConfig([]Site{simple("exemplo.com", "127.0.0.1:20001", false, "")}, ListenTrial, nil)
+	require.NoError(t, err)
+	fa.config = string(cfg)
+	assert.Equal(t, StateTrial, c.Ensure(context.Background()).State, "config de ensaio")
+
+	fa.config = normalCfg
+	assert.Equal(t, StateActive, c.Ensure(context.Background()).State, "config escuta :443")
+}
+
+func TestEnsure_IdentifiedForeignPidStillForeign(t *testing.T) {
+	fa, admin := newFakeAdmin(t)
+	fa.config = normalCfg
+	c := newCaddy(withPid(&dockertest.Fake{ListFn: runningOwn(specLabels)}, 100), admin)
+	c.Descends = func(int, int) bool { return false }
+	c.PortOwner = func(int) (string, bool) { return "caddy (pid 555)", true }
+	assert.Equal(t, StateError, c.Ensure(context.Background()).State, "2019 alheia")
+	c.PortOwner = func(p int) (string, bool) { return onlyWeb(p, "nginx (pid 555)") }
+	assert.Equal(t, StateTrial, c.Ensure(context.Background()).State, "80/443 alheias")
+}

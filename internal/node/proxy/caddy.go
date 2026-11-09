@@ -246,7 +246,7 @@ func (c *Caddy) probe(ctx context.Context, ct docker.Container) (Status, verdict
 		// Sem o PID não dá para saber de quem são as portas: não conclui nada.
 		return Status{State: StateStarting, Message: "falha ao inspecionar o container " + ContainerName}, unknown
 	}
-	if owner, busy := c.PortOwner(adminPort); busy && !c.ours(owner, pid) {
+	if owner, busy := c.PortOwner(adminPort); busy && c.foreign(owner, pid) {
 		return Status{
 			State:   StateError,
 			Process: owner,
@@ -262,7 +262,7 @@ func (c *Caddy) probe(ctx context.Context, ct docker.Container) (Status, verdict
 	listens := listensOn443(cfg)
 	for _, port := range []int{80, 443} {
 		owner, busy := c.PortOwner(port)
-		if busy && (!listens || !c.ours(owner, pid)) {
+		if busy && (!listens || c.foreign(owner, pid)) {
 			return Status{
 				State:   StateTrial,
 				Mode:    ListenTrial,
@@ -289,14 +289,25 @@ func (c *Caddy) containerPid(ctx context.Context, ct docker.Container) (int, err
 	return d.Pid, nil
 }
 
-// ours diz se o dono ("nome (pid N)") é o processo do container ou descende dele.
-func (c *Caddy) ours(owner string, containerPid int) bool {
+// foreign diz se o dono ("nome (pid N)") é um processo alheio: tem PID
+// identificado que não é o do container nem descende dele. Sem PID (sem
+// permissão para ler /proc), o dono é desconhecido, não alheio: vale o
+// container como referência (Admin API respondendo; config escutando :443).
+func (c *Caddy) foreign(owner string, containerPid int) bool {
 	p := ownerPid(owner)
-	if p <= 0 || containerPid <= 0 {
+	if p <= 0 {
+		noPermOnce.Do(func() {
+			log.Printf("proxy: sem permissão para identificar o dono das portas; usando o container %s como referência", ContainerName)
+		})
 		return false
 	}
-	return p == containerPid || (c.Descends != nil && c.Descends(p, containerPid))
+	if containerPid <= 0 {
+		return true
+	}
+	return p != containerPid && (c.Descends == nil || !c.Descends(p, containerPid))
 }
+
+var noPermOnce sync.Once
 
 // ownerPid extrai N de "nome (pid N)"; 0 se não houver.
 func ownerPid(owner string) int {
