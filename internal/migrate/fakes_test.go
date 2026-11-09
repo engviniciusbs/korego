@@ -143,6 +143,8 @@ type fakeDomains struct {
 	resumed []proxy.Status
 	// dns: host → aponta para cá (ausente = true).
 	dns map[string]bool
+	// skipped: domínios fora da config (SitesReport).
+	skipped []proxy.SkippedSite
 	// reconcile: o que Reconcile devolve (nil = status atual).
 	reconcile func(ctx context.Context) proxy.Status
 	// onResume roda depois de cada Resume (fora do lock).
@@ -170,7 +172,10 @@ func (d *fakeDomains) Reconcile(ctx context.Context) proxy.Status {
 }
 
 func (d *fakeDomains) Sites(context.Context) ([]proxy.Site, error) { return slices.Clone(d.sites), nil }
-func (d *fakeDomains) CFRanges() []string                          { return []string{"203.0.113.0/24"} }
+func (d *fakeDomains) SitesReport(context.Context) ([]proxy.Site, []proxy.SkippedSite, error) {
+	return slices.Clone(d.sites), slices.Clone(d.skipped), nil
+}
+func (d *fakeDomains) CFRanges() []string { return []string{"203.0.113.0/24"} }
 func (d *fakeDomains) Status() proxy.Status {
 	d.mu.Lock()
 	defer d.mu.Unlock()

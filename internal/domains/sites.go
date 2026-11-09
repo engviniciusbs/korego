@@ -116,13 +116,25 @@ func (s *Service) panelRoutes() []store.DomainRoute {
 // log. O domínio do painel reserva os seus hosts primeiro; depois vale a
 // ordem por hostname. A saída segue por hostname.
 func (s *Service) Sites(ctx context.Context) ([]proxy.Site, error) {
+	sites, _, err := s.SitesReport(ctx)
+	return sites, err
+}
+
+// SitesReport é Sites mais a lista dos domínios gravados que ficaram de fora,
+// com o motivo de cada um (na ordem por hostname). A troca nginx → Caddy
+// recusa assumir as portas com algum domínio de fora: ele sumiria do ar.
+func (s *Service) SitesReport(ctx context.Context) ([]proxy.Site, []proxy.SkippedSite, error) {
 	list, err := s.DB.ListDomains(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("montar sites: %w", err)
+		return nil, nil, fmt.Errorf("montar sites: %w", err)
 	}
 	apps, err := s.appsByID(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("montar sites: %w", err)
+		return nil, nil, fmt.Errorf("montar sites: %w", err)
+	}
+	var skipped []proxy.SkippedSite
+	skip := func(d store.Domain, reason string) {
+		skipped = append(skipped, proxy.SkippedSite{Host: d.Hostname, Reason: reason})
 	}
 	appUpstream := func(id int64) string {
 		if a, ok := apps[id]; ok && a.HostPort > 0 {
@@ -139,16 +151,19 @@ func (s *Service) Sites(ctx context.Context) ([]proxy.Site, error) {
 	for _, d := range list {
 		if d.IsPanel {
 			if s.PanelPort <= 0 {
+				skip(d, "domínio do painel sem porta do painel")
 				continue
 			}
 			d.Routes = s.panelRoutes()
 		}
 		site, err := siteOf(d, appUpstream)
 		if errors.Is(err, errNoRootUpstream) {
+			skip(d, "rota / aponta para uma app sem porta (sem deploy)")
 			continue
 		}
 		if err != nil {
 			log.Printf("proxy: domínio %s (id %d) ignorado: %v", d.Hostname, d.ID, err)
+			skip(d, err.Error())
 			continue
 		}
 		cands = append(cands, cand{d, site})
@@ -169,10 +184,12 @@ func (s *Service) Sites(ctx context.Context) ([]proxy.Site, error) {
 		d := cands[i].d
 		if !ValidHostname(d.Hostname) {
 			log.Printf("proxy: domínio %q ignorado: hostname inválido", d.Hostname)
+			skip(d, "hostname inválido")
 			continue
 		}
 		if msg := wwwMismatch(d.Hostname, d.WWWRedirect); msg != "" {
 			log.Printf("proxy: domínio %s ignorado: %s", d.Hostname, msg)
+			skip(d, msg)
 			continue
 		}
 		if cands[i].site.TLS.Mode == proxy.TLSCustom {
@@ -186,6 +203,7 @@ func (s *Service) Sites(ctx context.Context) ([]proxy.Site, error) {
 				cands[i].site.TLS = proxy.SiteTLS{Mode: proxy.TLSAuto}
 			default:
 				log.Printf("proxy: domínio %s (id %d) ignorado: certificado próprio: %v", d.Hostname, d.ID, err)
+				skip(d, "certificado próprio: "+err.Error())
 				continue
 			}
 		}
@@ -198,6 +216,7 @@ func (s *Service) Sites(ctx context.Context) ([]proxy.Site, error) {
 		}
 		if err != nil {
 			log.Printf("proxy: domínio %s (id %d) ignorado: %v", d.Hostname, d.ID, err)
+			skip(d, err.Error())
 			continue
 		}
 		hosts := hostsOf(d.Hostname, d.WWWRedirect)
@@ -210,6 +229,7 @@ func (s *Service) Sites(ctx context.Context) ([]proxy.Site, error) {
 		}
 		if clash != "" {
 			log.Printf("proxy: domínio %s (id %d) ignorado: %s", d.Hostname, d.ID, clash)
+			skip(d, clash)
 			continue
 		}
 		for _, h := range hosts {
@@ -224,7 +244,8 @@ func (s *Service) Sites(ctx context.Context) ([]proxy.Site, error) {
 			sites = append(sites, c.site)
 		}
 	}
-	return sites, nil
+	sort.SliceStable(skipped, func(a, b int) bool { return skipped[a].Host < skipped[b].Host })
+	return sites, skipped, nil
 }
 
 func (s *Service) appsByID(ctx context.Context) (map[int64]store.App, error) {

@@ -362,3 +362,24 @@ func TestAPI_DNSNotReadyKeepsCodeUnconsumed(t *testing.T) {
 	require.EqualValues(t, http.StatusAccepted, b["_status"], b)
 	m.waitIdle(t)
 }
+
+func TestAPI_DomainsSkipped409(t *testing.T) {
+	m := newMigEnv(t)
+	ctx := context.Background()
+	// Domínio de app sem deploy (sem porta): ficaria fora do Caddy.
+	p := &store.Project{Name: "loja"}
+	require.NoError(t, m.svc.DB.InsertProject(ctx, p))
+	a := &store.App{ProjectID: p.ID, Slug: "nova", SourceType: "image", Image: "nginx:1-alpine",
+		BuildType: "image", InternalPort: 80, HealthTimeoutS: 60}
+	require.NoError(t, m.svc.DB.InsertApp(ctx, a))
+	require.NoError(t, m.svc.DB.InsertDomain(ctx, &store.Domain{Hostname: "nova.exemplo.com",
+		TargetType: domains.TargetApp, AppID: &a.ID, WWWRedirect: "none", TLSMode: proxy.TLSCustom}))
+
+	code := m.freshCode(t)
+	b := m.post(t, "/api/proxy/takeover", map[string]string{"code": code})
+	assert.EqualValues(t, http.StatusConflict, b["_status"])
+	assert.Equal(t, "DOMAINS_SKIPPED", errCode(b))
+	assert.Contains(t, b["error"].(map[string]any)["message"], "nova.exemplo.com (rota / aponta para uma app sem porta")
+	assert.True(t, m.units.isActive("nginx"))
+	assert.False(t, m.mig.Running())
+}

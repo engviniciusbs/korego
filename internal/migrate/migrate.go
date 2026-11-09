@@ -105,6 +105,7 @@ const (
 	CodeNotMigrated      = "PROXY_NOT_MIGRATED"
 	CodeDNSNotReady      = "DNS_NOT_READY"
 	CodeUpdating         = "UPDATE_IN_PROGRESS"
+	CodeDomainsSkipped   = "DOMAINS_SKIPPED"
 )
 
 // InterruptedMessage é o resultado gravado quando o KoreGO reinicia no meio
@@ -165,6 +166,8 @@ type Info struct {
 // Domains é o que o motor usa do serviço de domínios.
 type Domains interface {
 	Sites(ctx context.Context) ([]proxy.Site, error)
+	// SitesReport é Sites mais os domínios gravados que ficaram de fora.
+	SitesReport(ctx context.Context) ([]proxy.Site, []proxy.SkippedSite, error)
 	CFRanges() []string
 	Status() proxy.Status
 	// Pause para a reconciliação e os deploys; Resume os solta publicando o
@@ -660,9 +663,12 @@ func (e *Engine) PrecheckTakeover(ctx context.Context) error {
 	if _, ok := e.Systemd.UnitForProcess(st.Process); st.Process != "" && !ok {
 		return unsupportedOwner(st)
 	}
-	sites, err := e.Domains.Sites(ctx)
+	sites, skipped, err := e.Domains.SitesReport(ctx)
 	if err != nil {
 		return fmt.Errorf("montar os sites: %w", err)
+	}
+	if len(skipped) > 0 {
+		return domainsSkipped(skipped)
 	}
 	if bad := e.dnsProblems(ctx, sites); len(bad) > 0 {
 		return &Refusal{Code: CodeDNSNotReady, Message: "O DNS destes domínios com certificado automático não aponta para este servidor: " +
@@ -678,6 +684,21 @@ func (e *Engine) PrecheckRollback(ctx context.Context) error {
 	}
 	_, err := e.rollbackUnit(ctx)
 	return err
+}
+
+// domainsSkipped recusa assumir com domínios gravados fora da config do
+// proxy: servidos hoje pelo servidor anterior, sumiriam do ar.
+func domainsSkipped(skipped []proxy.SkippedSite) *Refusal {
+	parts := make([]string, 0, len(skipped))
+	for _, s := range skipped {
+		if s.Reason == "" {
+			parts = append(parts, s.Host)
+			continue
+		}
+		parts = append(parts, s.Host+" ("+s.Reason+")")
+	}
+	return &Refusal{Code: CodeDomainsSkipped, Message: "Estes domínios cadastrados ficariam fora do Caddy e sairiam do ar: " +
+		strings.Join(parts, "; ") + ". Corrija ou remova esses domínios antes de assumir as portas."}
 }
 
 func unsupportedOwner(st proxy.Status) *Refusal {
@@ -701,10 +722,14 @@ func (e *Engine) StartTakeover(ctx context.Context, onDone func(Result)) error {
 		ss.end(ss.st)
 		return err
 	}
-	sites, err := e.Domains.Sites(ctx)
+	sites, skipped, err := e.Domains.SitesReport(ctx)
 	if err != nil {
 		ss.end(ss.st)
 		return fmt.Errorf("montar os sites: %w", err)
+	}
+	if len(skipped) > 0 {
+		ss.end(ss.st)
+		return domainsSkipped(skipped)
 	}
 	if err := e.mark(ctx, OpTakeover, unit); err != nil {
 		ss.end(ss.st)

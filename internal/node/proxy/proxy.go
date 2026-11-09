@@ -50,6 +50,13 @@ type Site struct {
 	Compression    bool     // encode com zstd e gzip
 }
 
+// SkippedSite é um domínio gravado que ficou fora da configuração do proxy,
+// com o motivo (certificado ruim, app sem porta, host já usado, ...).
+type SkippedSite struct {
+	Host   string `json:"host"`
+	Reason string `json:"reason"`
+}
+
 // SiteRoute é uma rota de caminho dentro de um Site. Exatamente um entre
 // Upstream e Static vem preenchido.
 type SiteRoute struct {
