@@ -1,0 +1,320 @@
+{
+  "admin": {
+    "listen": "127.0.0.1:2019"
+  },
+  "apps": {
+    "http": {
+      "servers": {
+        "korego_http": {
+          "errors": {
+            "routes": [
+              {
+                "handle": [
+                  {
+                    "handler": "headers",
+                    "response": {
+                      "deferred": true,
+                      "delete": [
+                        "Server",
+                        "Via"
+                      ]
+                    }
+                  },
+                  {
+                    "handler": "static_response",
+                    "status_code": "{http.error.status_code}"
+                  }
+                ],
+                "terminal": true
+              }
+            ]
+          },
+          "listen": [
+            ":80"
+          ],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "deferred": true,
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ]
+                  }
+                },
+                {
+                  "handler": "static_response",
+                  "headers": {
+                    "Location": [
+                      "https://{http.request.host}{http.request.uri}"
+                    ]
+                  },
+                  "status_code": 308
+                }
+              ],
+              "match": [
+                {
+                  "host": [
+                    "app.exemplo.com"
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "deferred": true,
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ]
+                  }
+                },
+                {
+                  "body": "Domínio não configurado no KoreGO.",
+                  "handler": "static_response",
+                  "status_code": 404
+                }
+              ],
+              "terminal": true
+            }
+          ]
+        },
+        "korego_https": {
+          "automatic_https": {
+            "disable_redirects": true
+          },
+          "errors": {
+            "routes": [
+              {
+                "handle": [
+                  {
+                    "handler": "headers",
+                    "response": {
+                      "deferred": true,
+                      "delete": [
+                        "Server",
+                        "Via"
+                      ],
+                      "set": {
+                        "Content-Security-Policy": [
+                          "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "handler": "static_response",
+                    "status_code": "{http.error.status_code}"
+                  }
+                ],
+                "match": [
+                  {
+                    "host": [
+                      "app.exemplo.com"
+                    ]
+                  }
+                ],
+                "terminal": true
+              },
+              {
+                "handle": [
+                  {
+                    "handler": "headers",
+                    "response": {
+                      "deferred": true,
+                      "delete": [
+                        "Server",
+                        "Via"
+                      ]
+                    }
+                  },
+                  {
+                    "handler": "static_response",
+                    "status_code": "{http.error.status_code}"
+                  }
+                ],
+                "terminal": true
+              }
+            ]
+          },
+          "listen": [
+            ":443"
+          ],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "deferred": true,
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "set": {
+                      "Content-Security-Policy": [
+                        "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "encodings": {
+                    "gzip": {},
+                    "zstd": {}
+                  },
+                  "handler": "encode",
+                  "prefer": [
+                    "zstd",
+                    "gzip"
+                  ]
+                },
+                {
+                  "handler": "subroute",
+                  "routes": [
+                    {
+                      "handle": [
+                        {
+                          "handler": "subroute",
+                          "routes": [
+                            {
+                              "handle": [
+                                {
+                                  "handler": "headers",
+                                  "response": {
+                                    "deferred": true,
+                                    "set": {
+                                      "Cache-Control": [
+                                        "public, max-age=31536000, immutable"
+                                      ]
+                                    }
+                                  }
+                                },
+                                {
+                                  "handler": "file_server",
+                                  "root": "/var/www/app/current"
+                                }
+                              ],
+                              "match": [
+                                {
+                                  "path": [
+                                    "/assets/*"
+                                  ]
+                                }
+                              ],
+                              "terminal": true
+                            },
+                            {
+                              "handle": [
+                                {
+                                  "handler": "rewrite",
+                                  "uri": "{http.matchers.file.relative}"
+                                }
+                              ],
+                              "match": [
+                                {
+                                  "file": {
+                                    "root": "/var/www/app/current",
+                                    "try_files": [
+                                      "{http.request.uri.path}",
+                                      "/index.html"
+                                    ]
+                                  }
+                                }
+                              ],
+                              "terminal": false
+                            },
+                            {
+                              "handle": [
+                                {
+                                  "handler": "headers",
+                                  "response": {
+                                    "deferred": true,
+                                    "set": {
+                                      "Cache-Control": [
+                                        "no-cache"
+                                      ]
+                                    }
+                                  }
+                                }
+                              ],
+                              "match": [
+                                {
+                                  "path": [
+                                    "/",
+                                    "/index.html"
+                                  ]
+                                }
+                              ],
+                              "terminal": false
+                            },
+                            {
+                              "handle": [
+                                {
+                                  "handler": "file_server",
+                                  "root": "/var/www/app/current"
+                                }
+                              ],
+                              "terminal": true
+                            }
+                          ]
+                        }
+                      ],
+                      "terminal": true
+                    }
+                  ]
+                }
+              ],
+              "match": [
+                {
+                  "host": [
+                    "app.exemplo.com"
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "deferred": true,
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ]
+                  }
+                },
+                {
+                  "body": "Domínio não configurado no KoreGO.",
+                  "handler": "static_response",
+                  "status_code": 404
+                }
+              ],
+              "terminal": true
+            }
+          ]
+        }
+      }
+    },
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "subjects": [
+              "app.exemplo.com"
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

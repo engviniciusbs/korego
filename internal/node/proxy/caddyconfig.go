@@ -95,12 +95,58 @@ package proxy
 //     ("a negative value disables buffering").
 //     https://caddyserver.com/docs/json/apps/http/servers/routes/handle/request_body/
 //     https://caddyserver.com/docs/json/apps/http/servers/routes/handle/reverse_proxy/flush_interval/
+//
+// Pastas estáticas, certificado próprio, só Cloudflare e ensaio (verificado
+// em 2026-11-09, Caddy 2.11; as formas batem com "caddy adapt" do
+// Caddyfile equivalente):
+//
+//   - Rota estática: um subroute com file_server e root (o caminho pedido
+//     não é cortado, como o "root" do nginx). Com immutablePrefix, uma rota
+//     terminal "<prefixo>*" põe Cache-Control imutável e serve o arquivo
+//     (arquivo ausente é 404, como "try_files $uri =404"). Com spa, um
+//     matcher file com try_files ["{http.request.uri.path}", "/index.html"]
+//     (o {path} do Caddyfile) reescreve para {http.matchers.file.relative};
+//     depois da reescrita, path ["/", "/index.html"] ganha no-cache, então o
+//     fallback também. Os Cache-Control são adiados: num erro (404) não saem.
+//     https://caddyserver.com/docs/json/apps/http/servers/routes/handle/file_server/
+//     https://caddyserver.com/docs/json/apps/http/servers/routes/match/file/
+//     https://caddyserver.com/docs/json/apps/http/servers/routes/handle/rewrite/
+//     https://caddyserver.com/docs/caddyfile/directives/try_files
+//
+//   - Certificado próprio: CertPEM é dividido em cadeia e chave e vai em
+//     apps.tls.certificates.load_pem (um por conteúdo). Esses hosts saem das
+//     políticas de automação e entram em automatic_https.skip_certificates do
+//     servidor HTTPS, para o Caddy nunca pedir ACME por eles (autohttps.go
+//     também pula nomes com certificado carregado).
+//     https://caddyserver.com/docs/json/apps/tls/certificates/load_pem/
+//     https://caddyserver.com/docs/json/apps/http/servers/automatic_https/skip_certificates/
+//
+//   - Só Cloudflare: antes das rotas do host vai, nos dois servidores, uma
+//     rota host + not remote_ip (faixas CF) com static_response 403. O
+//     remote_ip olha o par TCP (r.RemoteAddr), não o IP do cliente; quem lê
+//     o IP do cliente é o client_ip (modules/caddyhttp/ip_matchers.go,
+//     MatchRemoteIP e MatchClientIP). Os servidores ganham trusted_proxies
+//     (source static, faixas CF) e client_ip_headers ["CF-Connecting-IP"];
+//     o X-Real-IP desses sites vira {http.vars.client_ip}.
+//     https://caddyserver.com/docs/json/apps/http/servers/routes/match/remote_ip/
+//     https://caddyserver.com/docs/json/apps/http/servers/trusted_proxies/static/
+//     https://caddyserver.com/docs/json/apps/http/servers/client_ip_headers/
+//     https://github.com/caddyserver/caddy/blob/v2.11.0/modules/caddyhttp/ip_matchers.go
+//
+//   - Ensaio: escuta 127.0.0.1:18080 e 127.0.0.1:18443, com http_port e
+//     https_port iguais, senão o Caddy trata o servidor de 18080 como HTTPS
+//     (autohttps.go, listenersUseAnyPortOtherThan(app.httpPort())). Os
+//     sites só Cloudflare aceitam também 127.0.0.1/32 e ::1/128.
+//     https://caddyserver.com/docs/json/apps/http/http_port/
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
-	"errors"
+	"encoding/pem"
 	"fmt"
+	"net/netip"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -121,16 +167,34 @@ const (
 	errorStatus = "{http.error.status_code}"
 	// keepQuery acrescenta "?query" quando há query string.
 	keepQuery = "{http.request.uri.prefixed_query}"
+	// clientIPValue é o X-Real-IP dos sites só Cloudflare (IP do cliente,
+	// lido de CF-Connecting-IP quando o par é da Cloudflare).
+	clientIPValue = "{http.vars.client_ip}"
+	// cfHeader é o cabeçalho com o IP do cliente enviado pela Cloudflare.
+	cfHeader = "CF-Connecting-IP"
+	// staticRoot é a pasta que o Caddy vê (bind mount somente leitura).
+	staticRoot = "/var/www"
+	// Cache-Control das pastas estáticas.
+	cacheNoCache   = "no-cache"
+	cacheImmutable = "public, max-age=31536000, immutable"
+	// spaFallback é o arquivo servido para caminhos desconhecidos com spa.
+	spaFallback = "/index.html"
 )
+
+// Portas do modo ensaio.
+const (
+	trialHTTPPort  = 18080
+	trialHTTPSPort = 18443
+)
+
+// loopbackRanges são aceitos nos sites só Cloudflare durante o ensaio.
+var loopbackRanges = []string{"127.0.0.1/32", "::1/128"}
 
 // Limites por domínio.
 const (
 	MaxRoutes  = 20
 	MaxHeaders = 30
 )
-
-// errNotYet marca recursos que a configuração ainda não gera.
-var errNotYet = errors.New("não suportado ainda")
 
 var (
 	headerNameRe  = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
@@ -152,14 +216,23 @@ type caddyApps struct {
 }
 
 type caddyHTTPApp struct {
-	Servers map[string]caddyServer `json:"servers"`
+	HTTPPort  int                    `json:"http_port,omitempty"`
+	HTTPSPort int                    `json:"https_port,omitempty"`
+	Servers   map[string]caddyServer `json:"servers"`
 }
 
 type caddyServer struct {
-	Listen         []string        `json:"listen"`
-	AutomaticHTTPS *caddyAutoHTTPS `json:"automatic_https,omitempty"`
-	Routes         []caddyRoute    `json:"routes"`
-	Errors         *caddyErrors    `json:"errors,omitempty"`
+	Listen          []string             `json:"listen"`
+	AutomaticHTTPS  *caddyAutoHTTPS      `json:"automatic_https,omitempty"`
+	Routes          []caddyRoute         `json:"routes"`
+	Errors          *caddyErrors         `json:"errors,omitempty"`
+	TrustedProxies  *caddyTrustedProxies `json:"trusted_proxies,omitempty"`
+	ClientIPHeaders []string             `json:"client_ip_headers,omitempty"`
+}
+
+type caddyTrustedProxies struct {
+	Source string   `json:"source"`
+	Ranges []string `json:"ranges"`
 }
 
 type caddyErrors struct {
@@ -167,7 +240,8 @@ type caddyErrors struct {
 }
 
 type caddyAutoHTTPS struct {
-	DisableRedirects bool `json:"disable_redirects,omitempty"`
+	DisableRedirects bool     `json:"disable_redirects,omitempty"`
+	SkipCerts        []string `json:"skip_certificates,omitempty"`
 }
 
 type caddyRoute struct {
@@ -177,8 +251,20 @@ type caddyRoute struct {
 }
 
 type caddyMatch struct {
-	Host []string `json:"host,omitempty"`
-	Path []string `json:"path,omitempty"`
+	Host     []string        `json:"host,omitempty"`
+	Path     []string        `json:"path,omitempty"`
+	File     *caddyFileMatch `json:"file,omitempty"`
+	RemoteIP *caddyIPRanges  `json:"remote_ip,omitempty"`
+	Not      []caddyMatch    `json:"not,omitempty"`
+}
+
+type caddyFileMatch struct {
+	Root     string   `json:"root,omitempty"`
+	TryFiles []string `json:"try_files"`
+}
+
+type caddyIPRanges struct {
+	Ranges []string `json:"ranges"`
 }
 
 // caddyHandler cobre os handlers usados. Headers muda de forma conforme o
@@ -196,6 +282,8 @@ type caddyHandler struct {
 	Prefer        []string            `json:"prefer,omitempty"`
 	MaxSize       int64               `json:"max_size,omitempty"`
 	Routes        []caddyRoute        `json:"routes,omitempty"`
+	Root          string              `json:"root,omitempty"`
+	URI           string              `json:"uri,omitempty"`
 }
 
 type caddyUpstream struct {
@@ -217,7 +305,17 @@ type caddyRespHeaderOps struct {
 }
 
 type caddyTLSApp struct {
-	Automation caddyAutomation `json:"automation"`
+	Certificates *caddyCertificates `json:"certificates,omitempty"`
+	Automation   *caddyAutomation   `json:"automation,omitempty"`
+}
+
+type caddyCertificates struct {
+	LoadPEM []caddyPEM `json:"load_pem"`
+}
+
+type caddyPEM struct {
+	Certificate string `json:"certificate"`
+	Key         string `json:"key"`
 }
 
 type caddyAutomation struct {
@@ -234,6 +332,8 @@ type entry struct {
 	site       *Site  // nil quando é só redirecionamento
 	redirectTo string // host principal, quando é secundário do www
 	forceHTTPS bool
+	cfOnly     bool      // só Cloudflare (vale também para o secundário)
+	cert       *caddyPEM // certificado próprio (também no secundário)
 }
 
 // BuildConfig monta a configuração completa do Caddy para os sites. O
@@ -242,26 +342,55 @@ type entry struct {
 // Cloudflare em CIDR.
 func BuildConfig(sites []Site, mode Listen, cf []string) ([]byte, error) {
 	switch mode {
-	case ListenNormal, "":
-	case ListenTrial:
-		return nil, fmt.Errorf("modo ensaio: %w", errNotYet)
+	case ListenNormal, ListenTrial, "":
 	default:
 		return nil, fmt.Errorf("modo de escuta desconhecido: %q", mode)
 	}
-	if len(cf) > 0 {
-		return nil, fmt.Errorf("faixas da Cloudflare: %w", errNotYet)
+	ranges, err := checkRanges(cf)
+	if err != nil {
+		return nil, err
 	}
 	entries, err := expand(sites)
 	if err != nil {
 		return nil, err
 	}
 
+	// faixas aceitas nos sites só Cloudflare
+	anyCF := false
+	for _, e := range entries {
+		anyCF = anyCF || e.cfOnly
+	}
+	var allow []string
+	if anyCF {
+		if len(ranges) == 0 {
+			return nil, fmt.Errorf("site só Cloudflare sem faixas da Cloudflare")
+		}
+		allow = append(allow, ranges...)
+		if mode == ListenTrial {
+			allow = append(allow, loopbackRanges...)
+		}
+	}
+
 	httpsRoutes := make([]caddyRoute, 0, len(entries)+1)
 	httpRoutes := make([]caddyRoute, 0, len(entries)+1)
 	var httpsErrors, httpErrors []caddyRoute
-	subjects := make([]string, 0, len(entries))
+	var subjects, skip []string
+	var certs []caddyPEM
+	seenCert := map[caddyPEM]bool{}
 	for _, e := range entries {
-		subjects = append(subjects, e.host)
+		if e.cert != nil {
+			skip = append(skip, e.host)
+			if !seenCert[*e.cert] {
+				seenCert[*e.cert] = true
+				certs = append(certs, *e.cert)
+			}
+		} else {
+			subjects = append(subjects, e.host)
+		}
+		if e.cfOnly {
+			httpsRoutes = append(httpsRoutes, denyRoute(e.host, allow))
+			httpRoutes = append(httpRoutes, denyRoute(e.host, allow))
+		}
 		if e.redirectTo != "" {
 			httpsRoutes = append(httpsRoutes, hostRoute(e.host, stripServer(), redirect("https://"+e.redirectTo+"{http.request.uri}")))
 			scheme := "http://"
@@ -291,30 +420,69 @@ func BuildConfig(sites []Site, mode Listen, cf []string) ([]byte, error) {
 	httpsErrors = append(httpsErrors, errorCatchAll())
 	httpErrors = append(httpErrors, errorCatchAll())
 
-	cfg := caddyConfig{
-		Admin: caddyAdmin{Listen: AdminListen},
-		Apps: caddyApps{
-			HTTP: caddyHTTPApp{Servers: map[string]caddyServer{
-				httpsServerName: {
-					Listen:         []string{":443"},
-					AutomaticHTTPS: &caddyAutoHTTPS{DisableRedirects: true},
-					Routes:         httpsRoutes,
-					Errors:         &caddyErrors{Routes: httpsErrors},
-				},
-				httpServerName: {
-					Listen: []string{":80"},
-					Routes: httpRoutes,
-					Errors: &caddyErrors{Routes: httpErrors},
-				},
-			}},
-		},
+	httpsSrv := caddyServer{
+		Listen:         []string{":443"},
+		AutomaticHTTPS: &caddyAutoHTTPS{DisableRedirects: true, SkipCerts: skip},
+		Routes:         httpsRoutes,
+		Errors:         &caddyErrors{Routes: httpsErrors},
 	}
-	if len(subjects) > 0 {
-		cfg.Apps.TLS = &caddyTLSApp{Automation: caddyAutomation{
-			Policies: []caddyPolicy{{Subjects: subjects}},
-		}}
+	httpSrv := caddyServer{
+		Listen: []string{":80"},
+		Routes: httpRoutes,
+		Errors: &caddyErrors{Routes: httpErrors},
+	}
+	if anyCF {
+		for _, srv := range []*caddyServer{&httpsSrv, &httpSrv} {
+			srv.TrustedProxies = &caddyTrustedProxies{Source: "static", Ranges: ranges}
+			srv.ClientIPHeaders = []string{cfHeader}
+		}
+	}
+	var app caddyHTTPApp
+	if mode == ListenTrial {
+		httpsSrv.Listen = []string{fmt.Sprintf("127.0.0.1:%d", trialHTTPSPort)}
+		httpSrv.Listen = []string{fmt.Sprintf("127.0.0.1:%d", trialHTTPPort)}
+		app.HTTPPort, app.HTTPSPort = trialHTTPPort, trialHTTPSPort
+	}
+	app.Servers = map[string]caddyServer{httpsServerName: httpsSrv, httpServerName: httpSrv}
+
+	cfg := caddyConfig{Admin: caddyAdmin{Listen: AdminListen}, Apps: caddyApps{HTTP: app}}
+	if len(subjects) > 0 || len(certs) > 0 {
+		cfg.Apps.TLS = &caddyTLSApp{}
+		if len(certs) > 0 {
+			cfg.Apps.TLS.Certificates = &caddyCertificates{LoadPEM: certs}
+		}
+		if len(subjects) > 0 {
+			cfg.Apps.TLS.Automation = &caddyAutomation{Policies: []caddyPolicy{{Subjects: subjects}}}
+		}
 	}
 	return json.Marshal(cfg)
+}
+
+// checkRanges valida as faixas da Cloudflare (CIDR) e devolve a forma
+// canônica, na mesma ordem.
+func checkRanges(cf []string) ([]string, error) {
+	out := make([]string, 0, len(cf))
+	for _, c := range cf {
+		p, err := netip.ParsePrefix(strings.TrimSpace(c))
+		if err != nil {
+			return nil, fmt.Errorf("faixa da Cloudflare inválida: %q", c)
+		}
+		out = append(out, p.String())
+	}
+	return out, nil
+}
+
+// denyRoute responde 403 a quem acessa host de fora das faixas permitidas.
+// remote_ip olha o par TCP, não o IP do cliente (ver o comentário do topo).
+func denyRoute(host string, allow []string) caddyRoute {
+	return caddyRoute{
+		Match: []caddyMatch{{
+			Host: []string{host},
+			Not:  []caddyMatch{{RemoteIP: &caddyIPRanges{Ranges: allow}}},
+		}},
+		Handle:   []caddyHandler{stripServer(), {Handler: "static_response", StatusCode: 403}},
+		Terminal: true,
+	}
 }
 
 // expand valida os sites, acrescenta os hosts secundários do www e ordena.
@@ -335,10 +503,14 @@ func expand(sites []Site) ([]entry, error) {
 		if host == "" {
 			return nil, fmt.Errorf("site sem host")
 		}
-		if strings.ContainsAny(host, ":/ ") {
+		if strings.ContainsAny(host, ":/ {}") {
 			return nil, fmt.Errorf("host inválido: %q", s.Host)
 		}
 		site, err := checkSite(host, s)
+		if err != nil {
+			return nil, err
+		}
+		cert, err := siteCert(host, s.TLS)
 		if err != nil {
 			return nil, err
 		}
@@ -360,11 +532,11 @@ func expand(sites []Site) ([]entry, error) {
 			return nil, fmt.Errorf("redirecionamento www desconhecido: %q", s.WWWRedirect)
 		}
 
-		if err := add(entry{host: host, site: site, forceHTTPS: s.ForceHTTPS}); err != nil {
+		if err := add(entry{host: host, site: site, forceHTTPS: s.ForceHTTPS, cfOnly: s.CloudflareOnly, cert: cert}); err != nil {
 			return nil, err
 		}
 		if secondary != "" {
-			if err := add(entry{host: secondary, redirectTo: host, forceHTTPS: s.ForceHTTPS}); err != nil {
+			if err := add(entry{host: secondary, redirectTo: host, forceHTTPS: s.ForceHTTPS, cfOnly: s.CloudflareOnly, cert: cert}); err != nil {
 				return nil, err
 			}
 		}
@@ -378,17 +550,6 @@ func expand(sites []Site) ([]entry, error) {
 // com as rotas ordenadas (prefixo mais longo primeiro, "/" por último). A
 // entrada não é alterada.
 func checkSite(host string, s Site) (*Site, error) {
-	switch s.TLS.Mode {
-	case "", TLSAuto:
-	case TLSCustom:
-		return nil, fmt.Errorf("%s: certificado próprio: %w", host, errNotYet)
-	default:
-		return nil, fmt.Errorf("%s: modo de certificado desconhecido: %q", host, s.TLS.Mode)
-	}
-	if s.CloudflareOnly {
-		return nil, fmt.Errorf("%s: só Cloudflare: %w", host, errNotYet)
-	}
-
 	if len(s.Routes) == 0 {
 		return nil, fmt.Errorf("%s: site sem rotas", host)
 	}
@@ -405,10 +566,19 @@ func checkSite(host string, s Site) (*Site, error) {
 		}
 		paths[r.Path] = true
 		if r.Static != nil {
-			return nil, fmt.Errorf("%s%s: pasta estática: %w", host, r.Path, errNotYet)
+			if strings.TrimSpace(r.Upstream) != "" {
+				return nil, fmt.Errorf("%s%s: rota com upstream e pasta estática", host, r.Path)
+			}
+			if err := checkStatic(r.Path, r.Static); err != nil {
+				return nil, fmt.Errorf("%s%s: %w", host, r.Path, err)
+			}
+			continue
 		}
 		if strings.TrimSpace(r.Upstream) == "" {
 			return nil, fmt.Errorf("%s%s: rota sem upstream", host, r.Path)
+		}
+		if strings.ContainsAny(r.Upstream, "{}") {
+			return nil, fmt.Errorf("%s%s: upstream inválido: %q", host, r.Path, r.Upstream)
 		}
 		if r.MaxBodyBytes < 0 {
 			return nil, fmt.Errorf("%s%s: limite de corpo negativo", host, r.Path)
@@ -438,6 +608,13 @@ func checkSite(host string, s Site) (*Site, error) {
 
 	out := s
 	out.Routes = append([]SiteRoute(nil), s.Routes...)
+	for i, r := range out.Routes {
+		if r.Static != nil {
+			st := *r.Static
+			st.Root = path.Clean(st.Root)
+			out.Routes[i].Static = &st
+		}
+	}
 	sort.Slice(out.Routes, func(i, j int) bool {
 		a, b := out.Routes[i].Path, out.Routes[j].Path
 		if len(a) != len(b) {
@@ -446,6 +623,70 @@ func checkSite(host string, s Site) (*Site, error) {
 		return a < b
 	})
 	return &out, nil
+}
+
+// checkStatic valida a pasta de uma rota estática: root absoluto que, depois
+// de limpo, é /var/www ou fica dentro dele; immutablePrefix vazio ou um
+// caminho "/x/" dentro do caminho da rota. Os caminhos são do Linux (o
+// Caddy roda lá), por isso path e não filepath.
+func checkStatic(routePath string, st *StaticTarget) error {
+	root := st.Root
+	if !strings.HasPrefix(root, "/") {
+		return fmt.Errorf("pasta estática precisa de caminho absoluto: %q", root)
+	}
+	clean := path.Clean(root)
+	if clean != staticRoot && !strings.HasPrefix(clean, staticRoot+"/") {
+		return fmt.Errorf("pasta estática fora de %s: %q", staticRoot, root)
+	}
+	if p := st.ImmutablePrefix; p != "" {
+		if p == "/" || !validPath(p) {
+			return fmt.Errorf("prefixo imutável inválido: %q", p)
+		}
+		if !strings.HasPrefix(p, routePath) {
+			return fmt.Errorf("prefixo imutável %q fora da rota", p)
+		}
+	}
+	return nil
+}
+
+// siteCert divide o CertPEM de um site custom em cadeia e chave (por bloco
+// PEM, na ordem em que aparecem) e confere que a chave é do certificado.
+// Sites auto devolvem nil.
+func siteCert(host string, t SiteTLS) (*caddyPEM, error) {
+	switch t.Mode {
+	case "", TLSAuto:
+		return nil, nil
+	case TLSCustom:
+	default:
+		return nil, fmt.Errorf("%s: modo de certificado desconhecido: %q", host, t.Mode)
+	}
+	var chain, key []byte
+	keys := 0
+	rest := []byte(t.CertPEM)
+	for {
+		var b *pem.Block
+		b, rest = pem.Decode(rest)
+		if b == nil {
+			break
+		}
+		switch {
+		case b.Type == "CERTIFICATE":
+			chain = append(chain, pem.EncodeToMemory(b)...)
+		case strings.HasSuffix(b.Type, "PRIVATE KEY"):
+			key = pem.EncodeToMemory(b)
+			keys++
+		}
+	}
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("%s: certificado próprio sem certificado", host)
+	}
+	if keys != 1 {
+		return nil, fmt.Errorf("%s: certificado próprio precisa de exatamente uma chave (há %d)", host, keys)
+	}
+	if _, err := tls.X509KeyPair(chain, key); err != nil {
+		return nil, fmt.Errorf("%s: certificado próprio inválido: %v", host, err)
+	}
+	return &caddyPEM{Certificate: string(chain), Key: string(key)}, nil
 }
 
 // validPath aceita "/" ou "/seg/.../" com segmentos [a-z0-9._~-].
@@ -493,7 +734,7 @@ func siteHandlers(s *Site) []caddyHandler {
 	routes := make([]caddyRoute, 0, 2*len(s.Routes))
 	for _, r := range s.Routes {
 		if r.Path == "/" {
-			routes = append(routes, caddyRoute{Handle: pathHandlers(r), Terminal: true})
+			routes = append(routes, caddyRoute{Handle: pathHandlers(r, s.CloudflareOnly), Terminal: true})
 			continue
 		}
 		routes = append(routes,
@@ -504,7 +745,7 @@ func siteHandlers(s *Site) []caddyHandler {
 			},
 			caddyRoute{
 				Match:    []caddyMatch{{Path: []string{r.Path + "*"}}},
-				Handle:   pathHandlers(r),
+				Handle:   pathHandlers(r, s.CloudflareOnly),
 				Terminal: true,
 			})
 	}
@@ -539,7 +780,14 @@ func literal(v string) string {
 
 // pathHandlers são os handlers de uma rota de caminho com upstream:
 // request_body (com MaxBodyBytes) e reverse_proxy.
-func pathHandlers(r SiteRoute) []caddyHandler {
+func pathHandlers(r SiteRoute, cfOnly bool) []caddyHandler {
+	if r.Static != nil {
+		return []caddyHandler{staticHandler(r.Static)}
+	}
+	realIP := realIPValue
+	if cfOnly {
+		realIP = clientIPValue
+	}
 	var out []caddyHandler
 	if r.MaxBodyBytes > 0 {
 		out = append(out, caddyHandler{Handler: "request_body", MaxSize: r.MaxBodyBytes})
@@ -548,7 +796,7 @@ func pathHandlers(r SiteRoute) []caddyHandler {
 		Handler:   "reverse_proxy",
 		Upstreams: []caddyUpstream{{Dial: strings.TrimSpace(r.Upstream)}},
 		Headers: &caddyProxyHeaders{Request: &caddyHeaderOps{
-			Set: map[string][]string{"X-Real-IP": {realIPValue}},
+			Set: map[string][]string{"X-Real-IP": {realIP}},
 		}},
 	}
 	if r.NoBuffering {
@@ -556,6 +804,48 @@ func pathHandlers(r SiteRoute) []caddyHandler {
 		rp.FlushInterval = &v
 	}
 	return append(out, rp)
+}
+
+// staticHandler serve a pasta: com immutablePrefix, uma rota terminal com
+// cache imutável (arquivo ausente é 404, sem fallback); com spa, try_files
+// {path} /index.html e no-cache em "/" e "/index.html" depois da reescrita
+// (pega o fallback e o pedido direto); por fim, o file_server. root e o
+// prefixo saem escapados (ver literal).
+func staticHandler(st *StaticTarget) caddyHandler {
+	root := literal(st.Root)
+	fs := caddyHandler{Handler: "file_server", Root: root}
+	var routes []caddyRoute
+	if st.ImmutablePrefix != "" {
+		routes = append(routes, caddyRoute{
+			Match:    []caddyMatch{{Path: []string{literal(st.ImmutablePrefix) + "*"}}},
+			Handle:   []caddyHandler{cacheControl(cacheImmutable), fs},
+			Terminal: true,
+		})
+	}
+	if st.SPA {
+		routes = append(routes,
+			caddyRoute{
+				Match: []caddyMatch{{File: &caddyFileMatch{
+					Root:     root,
+					TryFiles: []string{"{http.request.uri.path}", spaFallback},
+				}}},
+				Handle: []caddyHandler{{Handler: "rewrite", URI: "{http.matchers.file.relative}"}},
+			},
+			caddyRoute{
+				Match:  []caddyMatch{{Path: []string{"/", spaFallback}}},
+				Handle: []caddyHandler{cacheControl(cacheNoCache)},
+			})
+	}
+	routes = append(routes, caddyRoute{Handle: []caddyHandler{fs}, Terminal: true})
+	return caddyHandler{Handler: "subroute", Routes: routes}
+}
+
+// cacheControl define Cache-Control adiado: só vale se a resposta for
+// escrita pela cadeia normal (um 404 do file_server não leva o cache).
+func cacheControl(v string) caddyHandler {
+	return caddyHandler{Handler: "headers", Response: &caddyRespHeaderOps{
+		Set: map[string][]string{"Cache-Control": {v}}, Deferred: true,
+	}}
 }
 
 // stripServer remove Server e Via da resposta (adiado; ver o comentário do

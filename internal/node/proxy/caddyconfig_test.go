@@ -1,10 +1,18 @@
 package proxy
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -518,38 +526,20 @@ func TestBuildConfig_Invalid(t *testing.T) {
 	}
 }
 
-// Recursos que chegam na Task 3: por enquanto, erro claro.
-func TestBuildConfig_NotSupportedYet(t *testing.T) {
+// Modo de escuta desconhecido é erro; TLS "auto" explícito é o mesmo que
+// vazio.
+func TestBuildConfig_ModeAndAuto(t *testing.T) {
 	base := simple("exemplo.com", "127.0.0.1:1", false, "")
-	static := base
-	static.Routes = []SiteRoute{{Path: "/", Static: &StaticTarget{Root: "/var/www/site"}}}
-	custom := base
-	custom.TLS = SiteTLS{Mode: TLSCustom, CertPEM: "x"}
-	cf := base
-	cf.CloudflareOnly = true
+	_, err := BuildConfig([]Site{base}, Listen("outro"), nil)
+	assert.Error(t, err)
 
-	for name, c := range map[string]struct {
-		sites []Site
-		mode  Listen
-		cf    []string
-	}{
-		"static":         {[]Site{static}, ListenNormal, nil},
-		"tls custom":     {[]Site{custom}, ListenNormal, nil},
-		"cloudflareOnly": {[]Site{cf}, ListenNormal, nil},
-		"faixas cf":      {[]Site{base}, ListenNormal, []string{"203.0.113.0/24"}},
-		"trial":          {[]Site{base}, ListenTrial, nil},
-		"modo inválido":  {[]Site{base}, Listen("outro"), nil},
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := BuildConfig(c.sites, c.mode, c.cf)
-			assert.Error(t, err)
-		})
-	}
-
-	// TLS "auto" explícito é o mesmo que vazio
 	auto := base
 	auto.TLS = SiteTLS{Mode: TLSAuto}
 	assert.Equal(t, string(build(t, []Site{base})), string(build(t, []Site{auto})))
+	// "" é o mesmo que normal
+	empty, err := BuildConfig([]Site{base}, "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, string(build(t, []Site{base})), string(empty))
 }
 
 func TestSameConfig(t *testing.T) {
@@ -570,4 +560,405 @@ func TestSameConfig(t *testing.T) {
 	assert.False(t, SameConfig([]byte("  "), cfg))
 	assert.False(t, SameConfig([]byte("{inválido"), cfg))
 	assert.True(t, SameConfig([]byte("null"), nil))
+}
+
+// --- Task 3: estático, certificado próprio, só Cloudflare e modo ensaio ---
+
+// spaSite é o app.exemplo.com de referência: SPA em /var/www/app/current,
+// cache imutável em /assets/, CSP e compressão.
+func spaSite() Site {
+	return Site{
+		Host: "app.exemplo.com", ForceHTTPS: true,
+		Routes: []SiteRoute{{Path: "/", Static: &StaticTarget{
+			Root: "/var/www/app/current", SPA: true, ImmutablePrefix: "/assets/",
+		}}},
+		Headers: []Header{{Name: "Content-Security-Policy",
+			Value: "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"}},
+		Compression: true,
+	}
+}
+
+const (
+	noCache   = "no-cache"
+	immutable = "public, max-age=31536000, immutable"
+)
+
+func cacheHeaders(v string) handler {
+	return handler{"handler": "headers", "response": map[string]any{
+		"set": map[string]any{"Cache-Control": []any{v}}, "deferred": true,
+	}}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return string(b)
+}
+
+func TestBuildConfig_StaticSPAGolden(t *testing.T) {
+	got := build(t, []Site{spaSite()})
+	dump(t, "static-spa.json", got)
+	assertGolden(t, "static-spa.json", got)
+
+	cfg := parse(t, got)
+	// :80 só redireciona (ForceHTTPS); :443 serve a pasta
+	r := cfg.routes("korego_https")[0]
+	require.Len(t, r.Handle, 3)
+	assert.Equal(t, []any{"default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"},
+		r.Handle[0]["response"].(map[string]any)["set"].(map[string]any)["Content-Security-Policy"])
+	subs := subroutes(t, r)
+	require.Len(t, subs, 1)
+	root := subs[0]
+	assert.Empty(t, root.Match)
+	require.Len(t, root.Handle, 1)
+
+	want := `{"handler":"subroute","routes":[
+		{"match":[{"path":["/assets/*"]}],
+		 "handle":[` + mustJSON(t, cacheHeaders(immutable)) + `,{"handler":"file_server","root":"/var/www/app/current"}],
+		 "terminal":true},
+		{"match":[{"file":{"root":"/var/www/app/current","try_files":["{http.request.uri.path}","/index.html"]}}],
+		 "handle":[{"handler":"rewrite","uri":"{http.matchers.file.relative}"}],
+		 "terminal":false},
+		{"match":[{"path":["/","/index.html"]}],
+		 "handle":[` + mustJSON(t, cacheHeaders(noCache)) + `],
+		 "terminal":false},
+		{"handle":[{"handler":"file_server","root":"/var/www/app/current"}],"terminal":true}
+	]}`
+	assert.JSONEq(t, want, mustJSON(t, root.Handle[0]))
+}
+
+// Sem spa nem immutablePrefix, a rota estática é só o file_server; o root
+// sai limpo e com as chaves escapadas.
+func TestBuildConfig_StaticPlain(t *testing.T) {
+	s := Site{Host: "exemplo.com", Routes: []SiteRoute{
+		{Path: "/", Upstream: "127.0.0.1:1"},
+		{Path: "/docs/", Static: &StaticTarget{Root: "/var/www/docs/./{x}/"}},
+	}}
+	cfg := parse(t, build(t, []Site{s}))
+	subs := subroutes(t, cfg.routes("korego_https")[0])
+	docs := findSub(t, subs, "/docs/*")
+	require.Len(t, docs.Handle, 1)
+	assert.JSONEq(t, `{"handler":"subroute","routes":[
+		{"handle":[{"handler":"file_server","root":"/var/www/docs/\\{x\\}"}],"terminal":true}
+	]}`, mustJSON(t, docs.Handle[0]))
+	// o /docs → /docs/ continua
+	findSub(t, subs, "/docs")
+}
+
+// selfSigned gera um certificado autoassinado e a chave, em PEM, para hosts.
+func selfSigned(t *testing.T, hosts ...string) (certPEM, keyPEM string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: hosts[0]},
+		DNSNames:     hosts,
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	kder, err := x509.MarshalPKCS8PrivateKey(key)
+	require.NoError(t, err)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kder}))
+}
+
+type tlsParsed struct {
+	Apps struct {
+		HTTP struct {
+			Servers map[string]struct {
+				AutomaticHTTPS struct {
+					SkipCertificates []string `json:"skip_certificates"`
+				} `json:"automatic_https"`
+			} `json:"servers"`
+		} `json:"http"`
+		TLS struct {
+			Certificates struct {
+				LoadPEM []struct {
+					Certificate string `json:"certificate"`
+					Key         string `json:"key"`
+				} `json:"load_pem"`
+			} `json:"certificates"`
+			Automation *struct {
+				Policies []struct {
+					Subjects []string `json:"subjects"`
+				} `json:"policies"`
+			} `json:"automation"`
+		} `json:"tls"`
+	} `json:"apps"`
+}
+
+func TestBuildConfig_CustomTLS(t *testing.T) {
+	cert, key := selfSigned(t, "exemplo.com", "www.exemplo.com", "loja.exemplo.net")
+	// chave antes da cadeia, com texto solto: a divisão é por bloco PEM
+	bundle := "comentário\n" + key + cert
+
+	a := simple("exemplo.com", "127.0.0.1:1", true, "www_to_apex")
+	a.TLS = SiteTLS{Mode: TLSCustom, CertPEM: bundle}
+	b := simple("loja.exemplo.net", "127.0.0.1:2", false, "")
+	b.TLS = SiteTLS{Mode: TLSCustom, CertPEM: bundle}
+	auto := simple("app.exemplo.com", "127.0.0.1:3", false, "")
+
+	got := build(t, []Site{a, b, auto})
+	dump(t, "custom-tls.json", got)
+	var cfg tlsParsed
+	require.NoError(t, json.Unmarshal(got, &cfg))
+
+	// um único load_pem para os dois sites
+	require.Len(t, cfg.Apps.TLS.Certificates.LoadPEM, 1)
+	assert.Equal(t, cert, cfg.Apps.TLS.Certificates.LoadPEM[0].Certificate)
+	assert.Equal(t, key, cfg.Apps.TLS.Certificates.LoadPEM[0].Key)
+
+	// só o host auto tem política de automação
+	require.NotNil(t, cfg.Apps.TLS.Automation)
+	require.Len(t, cfg.Apps.TLS.Automation.Policies, 1)
+	assert.Equal(t, []string{"app.exemplo.com"}, cfg.Apps.TLS.Automation.Policies[0].Subjects)
+	// e os próprios ficam fora do HTTPS automático (sem ACME)
+	assert.Equal(t, []string{"exemplo.com", "loja.exemplo.net", "www.exemplo.com"},
+		cfg.Apps.HTTP.Servers["korego_https"].AutomaticHTTPS.SkipCertificates)
+
+	// dois PEMs diferentes, duas entradas; só próprios, sem automação
+	cert2, key2 := selfSigned(t, "loja.exemplo.net")
+	b.TLS.CertPEM = cert2 + key2
+	var two tlsParsed
+	require.NoError(t, json.Unmarshal(build(t, []Site{a, b}), &two))
+	assert.Len(t, two.Apps.TLS.Certificates.LoadPEM, 2)
+	assert.Nil(t, two.Apps.TLS.Automation)
+}
+
+var cfRanges = []string{"173.245.48.0/20", "103.21.244.0/22", "2400:cb00::/32"}
+
+type cfParsed struct {
+	Apps struct {
+		HTTP struct {
+			HTTPPort  int `json:"http_port"`
+			HTTPSPort int `json:"https_port"`
+			Servers   map[string]struct {
+				Listen         []string `json:"listen"`
+				TrustedProxies *struct {
+					Source string   `json:"source"`
+					Ranges []string `json:"ranges"`
+				} `json:"trusted_proxies"`
+				ClientIPHeaders []string `json:"client_ip_headers"`
+			} `json:"servers"`
+		} `json:"http"`
+	} `json:"apps"`
+}
+
+type parsedRouteAny struct {
+	Match    []map[string]any `json:"match"`
+	Handle   []handler        `json:"handle"`
+	Terminal bool             `json:"terminal"`
+}
+
+func wantDeny(host string, allow []string) parsedRouteAny {
+	ranges := make([]any, len(allow))
+	for i, r := range allow {
+		ranges[i] = r
+	}
+	return parsedRouteAny{
+		Match: []map[string]any{{
+			"host": []any{host},
+			"not":  []any{map[string]any{"remote_ip": map[string]any{"ranges": ranges}}},
+		}},
+		Handle:   []handler{strip, {"handler": "static_response", "status_code": float64(403)}},
+		Terminal: true,
+	}
+}
+
+func routesAny(t *testing.T, b []byte, server string) []parsedRouteAny {
+	t.Helper()
+	var cfg struct {
+		Apps struct {
+			HTTP struct {
+				Servers map[string]struct {
+					Routes []parsedRouteAny `json:"routes"`
+				} `json:"servers"`
+			} `json:"http"`
+		} `json:"apps"`
+	}
+	require.NoError(t, json.Unmarshal(b, &cfg))
+	return cfg.Apps.HTTP.Servers[server].Routes
+}
+
+func hostOf(r parsedRouteAny) any {
+	if len(r.Match) == 0 {
+		return nil
+	}
+	return r.Match[0]["host"].([]any)[0]
+}
+
+func TestBuildConfig_CloudflareOnly(t *testing.T) {
+	cfSite := Site{Host: "exemplo.com", WWWRedirect: WWWToApex, ForceHTTPS: true, CloudflareOnly: true,
+		Routes: []SiteRoute{
+			{Path: "/", Upstream: "127.0.0.1:8091"},
+			{Path: "/api/", Upstream: "127.0.0.1:8092"},
+		}}
+	other := simple("api.exemplo.com", "127.0.0.1:3", false, "")
+	got, err := BuildConfig([]Site{cfSite, other}, ListenNormal, cfRanges)
+	require.NoError(t, err)
+	dump(t, "cloudflare-only.json", got)
+
+	for _, server := range []string{"korego_https", "korego_http"} {
+		routes := routesAny(t, got, server)
+		// api (sem CF), exemplo.com (deny + rota), www (deny + rota), catch-all
+		require.Len(t, routes, 6, server)
+		assert.Equal(t, "api.exemplo.com", hostOf(routes[0]), server)
+		assert.Equal(t, wantDeny("exemplo.com", cfRanges), routes[1], server)
+		assert.Equal(t, "exemplo.com", hostOf(routes[2]), server)
+		assert.NotContains(t, routes[2].Match[0], "not", server)
+		assert.Equal(t, wantDeny("www.exemplo.com", cfRanges), routes[3], server)
+		assert.Equal(t, "www.exemplo.com", hostOf(routes[4]), server)
+	}
+
+	var cfg cfParsed
+	require.NoError(t, json.Unmarshal(got, &cfg))
+	for _, server := range []string{"korego_https", "korego_http"} {
+		srv := cfg.Apps.HTTP.Servers[server]
+		require.NotNil(t, srv.TrustedProxies, server)
+		assert.Equal(t, "static", srv.TrustedProxies.Source, server)
+		assert.Equal(t, cfRanges, srv.TrustedProxies.Ranges, server)
+		assert.Equal(t, []string{"CF-Connecting-IP"}, srv.ClientIPHeaders, server)
+	}
+
+	// X-Real-IP: client_ip no site CF, endereço do par no outro
+	https := routesAny(t, got, "korego_https")
+	realIP := func(r parsedRoute) any {
+		return last(r)["headers"].(map[string]any)["request"].(map[string]any)["set"].(map[string]any)["X-Real-IP"]
+	}
+	n := 0
+	for _, sub := range subroutes(t, parsedRoute{Handle: https[2].Handle}) {
+		if last(sub)["handler"] == "reverse_proxy" {
+			assert.Equal(t, []any{"{http.vars.client_ip}"}, realIP(sub))
+			n++
+		}
+	}
+	assert.Equal(t, 2, n)
+	assert.Equal(t, []any{"{http.request.remote.host}"}, realIP(subroutes(t, parsedRoute{Handle: https[0].Handle})[0]))
+
+	// sem site CF, as faixas não mudam nada
+	plain, err := BuildConfig([]Site{other}, ListenNormal, cfRanges)
+	require.NoError(t, err)
+	assert.Equal(t, string(build(t, []Site{other})), string(plain))
+}
+
+func TestBuildConfig_TrialListen(t *testing.T) {
+	cfSite := simple("exemplo.com", "127.0.0.1:1", false, "")
+	cfSite.CloudflareOnly = true
+	auto := simple("app.exemplo.com", "127.0.0.1:2", false, "")
+	got, err := BuildConfig([]Site{cfSite, auto}, ListenTrial, cfRanges)
+	require.NoError(t, err)
+	dump(t, "trial.json", got)
+
+	var cfg cfParsed
+	require.NoError(t, json.Unmarshal(got, &cfg))
+	assert.Equal(t, []string{"127.0.0.1:18443"}, cfg.Apps.HTTP.Servers["korego_https"].Listen)
+	assert.Equal(t, []string{"127.0.0.1:18080"}, cfg.Apps.HTTP.Servers["korego_http"].Listen)
+	// as portas do app http acompanham, para o Caddy saber qual servidor é o HTTP
+	assert.Equal(t, 18080, cfg.Apps.HTTP.HTTPPort)
+	assert.Equal(t, 18443, cfg.Apps.HTTP.HTTPSPort)
+
+	allow := append(append([]string(nil), cfRanges...), "127.0.0.1/32", "::1/128")
+	for _, server := range []string{"korego_https", "korego_http"} {
+		routes := routesAny(t, got, server)
+		assert.Equal(t, "app.exemplo.com", hostOf(routes[0]), server)
+		assert.Equal(t, wantDeny("exemplo.com", allow), routes[1], server)
+	}
+
+	var p tlsParsed
+	require.NoError(t, json.Unmarshal(got, &p))
+	require.NotNil(t, p.Apps.TLS.Automation)
+	require.Len(t, p.Apps.TLS.Automation.Policies, 1)
+	assert.Equal(t, []string{"app.exemplo.com", "exemplo.com"}, p.Apps.TLS.Automation.Policies[0].Subjects)
+
+	// modo normal não define portas
+	var normal cfParsed
+	require.NoError(t, json.Unmarshal(build(t, []Site{auto}), &normal))
+	assert.Zero(t, normal.Apps.HTTP.HTTPPort)
+	assert.Zero(t, normal.Apps.HTTP.HTTPSPort)
+}
+
+func TestBuildConfig_RejectsBadInput(t *testing.T) {
+	cert, key := selfSigned(t, "exemplo.com")
+	other, _ := selfSigned(t, "exemplo.com")
+	st := func(root string) Site {
+		return Site{Host: "exemplo.com", Routes: []SiteRoute{{Path: "/", Static: &StaticTarget{Root: root}}}}
+	}
+	tlsSite := func(p string) Site {
+		s := simple("exemplo.com", "127.0.0.1:1", false, "")
+		s.TLS = SiteTLS{Mode: TLSCustom, CertPEM: p}
+		return s
+	}
+	cfSite := simple("exemplo.com", "127.0.0.1:1", false, "")
+	cfSite.CloudflareOnly = true
+	prefix := func(p string) Site {
+		s := st("/var/www/app")
+		s.Routes[0].Static.ImmutablePrefix = p
+		return s
+	}
+	both := Site{Host: "exemplo.com", Routes: []SiteRoute{{Path: "/", Upstream: "127.0.0.1:1",
+		Static: &StaticTarget{Root: "/var/www/a"}}}}
+	outside := Site{Host: "exemplo.com", Routes: []SiteRoute{{Path: "/", Upstream: "127.0.0.1:1"},
+		{Path: "/app/", Static: &StaticTarget{Root: "/var/www/a", ImmutablePrefix: "/assets/"}}}}
+
+	cases := map[string]struct {
+		sites []Site
+		cf    []string
+	}{
+		"root fora de /var/www":  {sites: []Site{st("/etc")}},
+		"root com ..":            {sites: []Site{st("/var/www/../etc")}},
+		"root vizinho":           {sites: []Site{st("/var/www-evil")}},
+		"root relativo":          {sites: []Site{st("var/www/app")}},
+		"root vazio":             {sites: []Site{st("")}},
+		"estático e upstream":    {sites: []Site{both}},
+		"prefixo inválido":       {sites: []Site{prefix("assets")}},
+		"prefixo raiz":           {sites: []Site{prefix("/")}},
+		"prefixo fora da rota":   {sites: []Site{outside}},
+		"pem sem chave":          {sites: []Site{tlsSite(cert)}},
+		"pem sem certificado":    {sites: []Site{tlsSite(key)}},
+		"pem vazio":              {sites: []Site{tlsSite("")}},
+		"pem com duas chaves":    {sites: []Site{tlsSite(cert + key + key)}},
+		"chave não confere":      {sites: []Site{tlsSite(other + key)}},
+		"cf vazio com só CF":     {sites: []Site{cfSite}},
+		"faixa cf inválida":      {sites: []Site{cfSite}, cf: []string{"203.0.113.0/33"}},
+		"host com chave":         {sites: []Site{simple("{env.X}.exemplo.com", "127.0.0.1:1", false, "")}},
+		"upstream com chave":     {sites: []Site{simple("exemplo.com", "{env.UP}", false, "")}},
+		"upstream com chave fim": {sites: []Site{simple("exemplo.com", "127.0.0.1:1}", false, "")}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := BuildConfig(c.sites, ListenNormal, c.cf)
+			assert.Error(t, err)
+		})
+	}
+
+	// as variantes válidas passam
+	for name, c := range map[string]struct {
+		sites []Site
+		cf    []string
+	}{
+		"root /var/www":  {sites: []Site{st("/var/www")}},
+		"prefixo válido": {sites: []Site{prefix("/assets/")}},
+		"pem completo":   {sites: []Site{tlsSite(cert + key)}},
+		"cf com faixas":  {sites: []Site{cfSite}, cf: []string{"203.0.113.0/24"}},
+	} {
+		_, err := BuildConfig(c.sites, ListenNormal, c.cf)
+		assert.NoError(t, err, name)
+	}
+}
+
+// dump grava a config em $KOREGO_CADDY_DUMP/<name>, para validar num Caddy
+// real (caddy validate e checagens em execução). Sem a variável, não faz nada.
+func dump(t *testing.T, name string, b []byte) {
+	t.Helper()
+	dir := os.Getenv("KOREGO_CADDY_DUMP")
+	if dir == "" {
+		return
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), b, 0o644))
 }
