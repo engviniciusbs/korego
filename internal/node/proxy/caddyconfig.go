@@ -100,8 +100,12 @@ package proxy
 // em 2026-11-09, Caddy 2.11; as formas batem com "caddy adapt" do
 // Caddyfile equivalente):
 //
-//   - Rota estática: um subroute com file_server e root (o caminho pedido
-//     não é cortado, como o "root" do nginx). Com immutablePrefix, uma rota
+//   - Rota estática: um subroute com file_server e root. Fora de "/", a
+//     rota tem semântica de alias, como o handle_path do Caddyfile: um
+//     rewrite strip_path_prefix "/app" vem primeiro, então /app/x sai de
+//     root/x e immutablePrefix e o fallback são relativos à rota. O
+//     file_server esconde .git e .env* (hide; .well-known continua servido).
+//     Com immutablePrefix, uma rota
 //     terminal "<prefixo>*" põe Cache-Control imutável e serve o arquivo
 //     (arquivo ausente é 404, como "try_files $uri =404"). Com spa, um
 //     matcher file com try_files ["{http.request.uri.path}", "/index.html"]
@@ -112,6 +116,9 @@ package proxy
 //     https://caddyserver.com/docs/json/apps/http/servers/routes/match/file/
 //     https://caddyserver.com/docs/json/apps/http/servers/routes/handle/rewrite/
 //     https://caddyserver.com/docs/caddyfile/directives/try_files
+//     https://caddyserver.com/docs/caddyfile/directives/handle_path
+//     https://caddyserver.com/docs/json/apps/http/servers/routes/handle/rewrite/strip_path_prefix/
+//     https://caddyserver.com/docs/json/apps/http/servers/routes/handle/file_server/hide/
 //
 //   - Certificado próprio: CertPEM é dividido em cadeia e chave e vai em
 //     apps.tls.certificates.load_pem (um por conteúdo). Esses hosts saem das
@@ -136,7 +143,11 @@ package proxy
 //   - Ensaio: escuta 127.0.0.1:18080 e 127.0.0.1:18443, com http_port e
 //     https_port iguais, senão o Caddy trata o servidor de 18080 como HTTPS
 //     (autohttps.go, listenersUseAnyPortOtherThan(app.httpPort())). Os
-//     sites só Cloudflare aceitam também 127.0.0.1/32 e ::1/128.
+//     sites só Cloudflare aceitam também 127.0.0.1/32 e ::1/128. A política
+//     dos hosts auto usa o emissor internal: enquanto outro processo tem a
+//     :80, um pedido ACME só falharia (e gastaria o limite de falhas do
+//     Let's Encrypt).
+//     https://caddyserver.com/docs/json/apps/tls/automation/policies/issuers/internal/
 //     https://caddyserver.com/docs/json/apps/http/http_port/
 
 import (
@@ -186,6 +197,11 @@ const (
 	trialHTTPPort  = 18080
 	trialHTTPSPort = 18443
 )
+
+// hiddenFiles são escondidos pelo file_server (404): .git e .env* em
+// qualquer nível. Não escondemos todo arquivo com ponto por causa de
+// .well-known.
+var hiddenFiles = []string{".git", ".env*"}
 
 // loopbackRanges são aceitos nos sites só Cloudflare durante o ensaio.
 var loopbackRanges = []string{"127.0.0.1/32", "::1/128"}
@@ -283,7 +299,9 @@ type caddyHandler struct {
 	MaxSize       int64               `json:"max_size,omitempty"`
 	Routes        []caddyRoute        `json:"routes,omitempty"`
 	Root          string              `json:"root,omitempty"`
+	Hide          []string            `json:"hide,omitempty"`
 	URI           string              `json:"uri,omitempty"`
+	StripPrefix   string              `json:"strip_path_prefix,omitempty"`
 }
 
 type caddyUpstream struct {
@@ -323,7 +341,12 @@ type caddyAutomation struct {
 }
 
 type caddyPolicy struct {
-	Subjects []string `json:"subjects"`
+	Subjects []string      `json:"subjects"`
+	Issuers  []caddyIssuer `json:"issuers,omitempty"`
+}
+
+type caddyIssuer struct {
+	Module string `json:"module"`
 }
 
 // entry é um host já resolvido: ou serve o site, ou redireciona.
@@ -346,22 +369,22 @@ func BuildConfig(sites []Site, mode Listen, cf []string) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("modo de escuta desconhecido: %q", mode)
 	}
-	ranges, err := checkRanges(cf)
-	if err != nil {
-		return nil, err
-	}
 	entries, err := expand(sites)
 	if err != nil {
 		return nil, err
 	}
 
-	// faixas aceitas nos sites só Cloudflare
+	// faixas aceitas nos sites só Cloudflare; só são validadas quando algum
+	// site as usa, para uma faixa ruim no cache não derrubar a config toda
 	anyCF := false
 	for _, e := range entries {
 		anyCF = anyCF || e.cfOnly
 	}
-	var allow []string
+	var allow, ranges []string
 	if anyCF {
+		if ranges, err = checkRanges(cf); err != nil {
+			return nil, err
+		}
 		if len(ranges) == 0 {
 			return nil, fmt.Errorf("site só Cloudflare sem faixas da Cloudflare")
 		}
@@ -452,7 +475,11 @@ func BuildConfig(sites []Site, mode Listen, cf []string) ([]byte, error) {
 			cfg.Apps.TLS.Certificates = &caddyCertificates{LoadPEM: certs}
 		}
 		if len(subjects) > 0 {
-			cfg.Apps.TLS.Automation = &caddyAutomation{Policies: []caddyPolicy{{Subjects: subjects}}}
+			pol := caddyPolicy{Subjects: subjects}
+			if mode == ListenTrial {
+				pol.Issuers = []caddyIssuer{{Module: "internal"}}
+			}
+			cfg.Apps.TLS.Automation = &caddyAutomation{Policies: []caddyPolicy{pol}}
 		}
 	}
 	return json.Marshal(cfg)
@@ -569,7 +596,7 @@ func checkSite(host string, s Site) (*Site, error) {
 			if strings.TrimSpace(r.Upstream) != "" {
 				return nil, fmt.Errorf("%s%s: rota com upstream e pasta estática", host, r.Path)
 			}
-			if err := checkStatic(r.Path, r.Static); err != nil {
+			if err := checkStatic(r.Static); err != nil {
 				return nil, fmt.Errorf("%s%s: %w", host, r.Path, err)
 			}
 			continue
@@ -627,9 +654,9 @@ func checkSite(host string, s Site) (*Site, error) {
 
 // checkStatic valida a pasta de uma rota estática: root absoluto que, depois
 // de limpo, é /var/www ou fica dentro dele; immutablePrefix vazio ou um
-// caminho "/x/" dentro do caminho da rota. Os caminhos são do Linux (o
-// Caddy roda lá), por isso path e não filepath.
-func checkStatic(routePath string, st *StaticTarget) error {
+// caminho "/x/" (relativo à rota). Os caminhos são do Linux (o Caddy roda
+// lá), por isso path e não filepath.
+func checkStatic(st *StaticTarget) error {
 	root := st.Root
 	if !strings.HasPrefix(root, "/") {
 		return fmt.Errorf("pasta estática precisa de caminho absoluto: %q", root)
@@ -641,9 +668,6 @@ func checkStatic(routePath string, st *StaticTarget) error {
 	if p := st.ImmutablePrefix; p != "" {
 		if p == "/" || !validPath(p) {
 			return fmt.Errorf("prefixo imutável inválido: %q", p)
-		}
-		if !strings.HasPrefix(p, routePath) {
-			return fmt.Errorf("prefixo imutável %q fora da rota", p)
 		}
 	}
 	return nil
@@ -782,7 +806,7 @@ func literal(v string) string {
 // request_body (com MaxBodyBytes) e reverse_proxy.
 func pathHandlers(r SiteRoute, cfOnly bool) []caddyHandler {
 	if r.Static != nil {
-		return []caddyHandler{staticHandler(r.Static)}
+		return []caddyHandler{staticHandler(r.Path, r.Static)}
 	}
 	realIP := realIPValue
 	if cfOnly {
@@ -806,15 +830,22 @@ func pathHandlers(r SiteRoute, cfOnly bool) []caddyHandler {
 	return append(out, rp)
 }
 
-// staticHandler serve a pasta: com immutablePrefix, uma rota terminal com
+// staticHandler serve a pasta. Fora de "/", tira antes o prefixo da rota
+// (alias, como handle_path), e o resto vale sobre o caminho já cortado:
+// com immutablePrefix, uma rota terminal com
 // cache imutável (arquivo ausente é 404, sem fallback); com spa, try_files
 // {path} /index.html e no-cache em "/" e "/index.html" depois da reescrita
 // (pega o fallback e o pedido direto); por fim, o file_server. root e o
 // prefixo saem escapados (ver literal).
-func staticHandler(st *StaticTarget) caddyHandler {
+func staticHandler(routePath string, st *StaticTarget) caddyHandler {
 	root := literal(st.Root)
-	fs := caddyHandler{Handler: "file_server", Root: root}
+	fs := caddyHandler{Handler: "file_server", Root: root, Hide: hiddenFiles}
 	var routes []caddyRoute
+	if routePath != "/" {
+		routes = append(routes, caddyRoute{Handle: []caddyHandler{{
+			Handler: "rewrite", StripPrefix: strings.TrimSuffix(routePath, "/"),
+		}}})
+	}
 	if st.ImmutablePrefix != "" {
 		routes = append(routes, caddyRoute{
 			Match:    []caddyMatch{{Path: []string{literal(st.ImmutablePrefix) + "*"}}},

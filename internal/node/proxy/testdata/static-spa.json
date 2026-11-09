@@ -199,6 +199,10 @@
                                 },
                                 {
                                   "handler": "file_server",
+                                  "hide": [
+                                    ".git",
+                                    ".env*"
+                                  ],
                                   "root": "/var/www/app/current"
                                 }
                               ],
@@ -259,6 +263,10 @@
                               "handle": [
                                 {
                                   "handler": "file_server",
+                                  "hide": [
+                                    ".git",
+                                    ".env*"
+                                  ],
                                   "root": "/var/www/app/current"
                                 }
                               ],

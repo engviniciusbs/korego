@@ -615,7 +615,7 @@ func TestBuildConfig_StaticSPAGolden(t *testing.T) {
 
 	want := `{"handler":"subroute","routes":[
 		{"match":[{"path":["/assets/*"]}],
-		 "handle":[` + mustJSON(t, cacheHeaders(immutable)) + `,{"handler":"file_server","root":"/var/www/app/current"}],
+		 "handle":[` + mustJSON(t, cacheHeaders(immutable)) + `,{"handler":"file_server","root":"/var/www/app/current","hide":[".git",".env*"]}],
 		 "terminal":true},
 		{"match":[{"file":{"root":"/var/www/app/current","try_files":["{http.request.uri.path}","/index.html"]}}],
 		 "handle":[{"handler":"rewrite","uri":"{http.matchers.file.relative}"}],
@@ -623,7 +623,7 @@ func TestBuildConfig_StaticSPAGolden(t *testing.T) {
 		{"match":[{"path":["/","/index.html"]}],
 		 "handle":[` + mustJSON(t, cacheHeaders(noCache)) + `],
 		 "terminal":false},
-		{"handle":[{"handler":"file_server","root":"/var/www/app/current"}],"terminal":true}
+		{"handle":[{"handler":"file_server","root":"/var/www/app/current","hide":[".git",".env*"]}],"terminal":true}
 	]}`
 	assert.JSONEq(t, want, mustJSON(t, root.Handle[0]))
 }
@@ -640,7 +640,8 @@ func TestBuildConfig_StaticPlain(t *testing.T) {
 	docs := findSub(t, subs, "/docs/*")
 	require.Len(t, docs.Handle, 1)
 	assert.JSONEq(t, `{"handler":"subroute","routes":[
-		{"handle":[{"handler":"file_server","root":"/var/www/docs/\\{x\\}"}],"terminal":true}
+		{"handle":[{"handler":"rewrite","strip_path_prefix":"/docs"}],"terminal":false},
+		{"handle":[{"handler":"file_server","root":"/var/www/docs/\\{x\\}","hide":[".git",".env*"]}],"terminal":true}
 	]}`, mustJSON(t, docs.Handle[0]))
 	// o /docs → /docs/ continua
 	findSub(t, subs, "/docs")
@@ -845,6 +846,10 @@ func TestBuildConfig_CloudflareOnly(t *testing.T) {
 	plain, err := BuildConfig([]Site{other}, ListenNormal, cfRanges)
 	require.NoError(t, err)
 	assert.Equal(t, string(build(t, []Site{other})), string(plain))
+	// e nem são validadas: uma faixa ruim no cache não derruba quem não usa CF
+	bad, err := BuildConfig([]Site{other}, ListenNormal, []string{"lixo", "203.0.113.0/33"})
+	require.NoError(t, err)
+	assert.Equal(t, string(plain), string(bad))
 }
 
 func TestBuildConfig_TrialListen(t *testing.T) {
@@ -875,12 +880,27 @@ func TestBuildConfig_TrialListen(t *testing.T) {
 	require.NotNil(t, p.Apps.TLS.Automation)
 	require.Len(t, p.Apps.TLS.Automation.Policies, 1)
 	assert.Equal(t, []string{"app.exemplo.com", "exemplo.com"}, p.Apps.TLS.Automation.Policies[0].Subjects)
+	// no ensaio, emissor interno: nada de Let's Encrypt enquanto outro dono tem a :80
+	assert.Equal(t, []any{map[string]any{"module": "internal"}}, policyIssuers(t, got))
 
-	// modo normal não define portas
+	// modo normal não define portas nem emissor
+	normalCfg := build(t, []Site{auto})
 	var normal cfParsed
-	require.NoError(t, json.Unmarshal(build(t, []Site{auto}), &normal))
+	require.NoError(t, json.Unmarshal(normalCfg, &normal))
 	assert.Zero(t, normal.Apps.HTTP.HTTPPort)
 	assert.Zero(t, normal.Apps.HTTP.HTTPSPort)
+	assert.Nil(t, policyIssuers(t, normalCfg))
+}
+
+// policyIssuers devolve o campo issuers da única política de automação.
+func policyIssuers(t *testing.T, b []byte) any {
+	t.Helper()
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal(b, &cfg))
+	tls := cfg["apps"].(map[string]any)["tls"].(map[string]any)
+	pols := tls["automation"].(map[string]any)["policies"].([]any)
+	require.Len(t, pols, 1)
+	return pols[0].(map[string]any)["issuers"]
 }
 
 func TestBuildConfig_RejectsBadInput(t *testing.T) {
@@ -903,8 +923,6 @@ func TestBuildConfig_RejectsBadInput(t *testing.T) {
 	}
 	both := Site{Host: "exemplo.com", Routes: []SiteRoute{{Path: "/", Upstream: "127.0.0.1:1",
 		Static: &StaticTarget{Root: "/var/www/a"}}}}
-	outside := Site{Host: "exemplo.com", Routes: []SiteRoute{{Path: "/", Upstream: "127.0.0.1:1"},
-		{Path: "/app/", Static: &StaticTarget{Root: "/var/www/a", ImmutablePrefix: "/assets/"}}}}
 
 	cases := map[string]struct {
 		sites []Site
@@ -918,7 +936,6 @@ func TestBuildConfig_RejectsBadInput(t *testing.T) {
 		"estático e upstream":    {sites: []Site{both}},
 		"prefixo inválido":       {sites: []Site{prefix("assets")}},
 		"prefixo raiz":           {sites: []Site{prefix("/")}},
-		"prefixo fora da rota":   {sites: []Site{outside}},
 		"pem sem chave":          {sites: []Site{tlsSite(cert)}},
 		"pem sem certificado":    {sites: []Site{tlsSite(key)}},
 		"pem vazio":              {sites: []Site{tlsSite("")}},
@@ -961,4 +978,37 @@ func dump(t *testing.T, name string, b []byte) {
 		return
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), b, 0o644))
+}
+
+// Rota estática fora da raiz: semântica de alias (como handle_path). /app/x
+// vem de R/x, o fallback é R/index.html e immutablePrefix é relativo à rota.
+func TestBuildConfig_StaticPrefixGolden(t *testing.T) {
+	s := Site{Host: "exemplo.com", Routes: []SiteRoute{
+		{Path: "/", Upstream: "127.0.0.1:8091"},
+		{Path: "/app/", Static: &StaticTarget{Root: "/var/www/app/current", SPA: true, ImmutablePrefix: "/assets/"}},
+	}}
+	got := build(t, []Site{s})
+	dump(t, "static-prefix.json", got)
+	assertGolden(t, "static-prefix.json", got)
+
+	cfg := parse(t, got)
+	subs := subroutes(t, cfg.routes("korego_https")[0])
+	// /app → /app/ continua
+	assert.Equal(t, []any{"/app/{http.request.uri.prefixed_query}"}, location(last(findSub(t, subs, "/app"))))
+	app := findSub(t, subs, "/app/*")
+	require.Len(t, app.Handle, 1)
+	want := `{"handler":"subroute","routes":[
+		{"handle":[{"handler":"rewrite","strip_path_prefix":"/app"}],"terminal":false},
+		{"match":[{"path":["/assets/*"]}],
+		 "handle":[` + mustJSON(t, cacheHeaders(immutable)) + `,{"handler":"file_server","root":"/var/www/app/current","hide":[".git",".env*"]}],
+		 "terminal":true},
+		{"match":[{"file":{"root":"/var/www/app/current","try_files":["{http.request.uri.path}","/index.html"]}}],
+		 "handle":[{"handler":"rewrite","uri":"{http.matchers.file.relative}"}],
+		 "terminal":false},
+		{"match":[{"path":["/","/index.html"]}],
+		 "handle":[` + mustJSON(t, cacheHeaders(noCache)) + `],
+		 "terminal":false},
+		{"handle":[{"handler":"file_server","root":"/var/www/app/current","hide":[".git",".env*"]}],"terminal":true}
+	]}`
+	assert.JSONEq(t, want, mustJSON(t, app.Handle[0]))
 }
