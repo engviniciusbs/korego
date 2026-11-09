@@ -21,6 +21,10 @@ func (Systemd) run(ctx context.Context, args ...string) (string, error) {
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "systemctl", args...).CombinedOutput()
 	text := strings.TrimSpace(string(out))
+	if ctx.Err() != nil {
+		// Morto pelo prazo: é erro, nunca "inativo" (não embrulha o ExitError).
+		return text, fmt.Errorf("systemctl %s: tempo esgotado (%s): %v", strings.Join(args, " "), systemctlTimeout, ctx.Err())
+	}
 	if err != nil {
 		if text != "" {
 			return text, fmt.Errorf("systemctl %s: %w: %s", strings.Join(args, " "), err, text)

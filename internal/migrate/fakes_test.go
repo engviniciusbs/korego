@@ -44,6 +44,9 @@ type fakeSystemd struct {
 	StopErr, StartErr, EnableErr, DisableErr error
 	// StartNoop: Start devolve nil mas a unit não fica ativa.
 	StartNoop bool
+	// PanicExists: Exists entra em pânico.
+	PanicExists bool
+	existsCalls int
 }
 
 func newFakeSystemd(c *calls) *fakeSystemd {
@@ -109,6 +112,10 @@ func (f *fakeSystemd) Active(_ context.Context, unit string) (bool, error) {
 func (f *fakeSystemd) Exists(_ context.Context, unit string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.PanicExists {
+		panic("Exists quebrou")
+	}
+	f.existsCalls++
 	return f.exists[unit]
 }
 
@@ -134,6 +141,30 @@ type fakeDomains struct {
 	paused  bool
 	pauses  int
 	resumed []proxy.Status
+	// dns: host → aponta para cá (ausente = true).
+	dns map[string]bool
+	// reconcile: o que Reconcile devolve (nil = status atual).
+	reconcile func(ctx context.Context) proxy.Status
+}
+
+func (d *fakeDomains) DNSReady(_ context.Context, host string) (bool, string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if ok, set := d.dns[host]; set && !ok {
+		return false, "Crie um registro A para " + host
+	}
+	return true, ""
+}
+
+func (d *fakeDomains) Reconcile(ctx context.Context) proxy.Status {
+	if d.reconcile != nil {
+		st := d.reconcile(ctx)
+		d.mu.Lock()
+		d.status = st
+		d.mu.Unlock()
+		return st
+	}
+	return d.Status()
 }
 
 func (d *fakeDomains) Sites(context.Context) ([]proxy.Site, error) { return slices.Clone(d.sites), nil }

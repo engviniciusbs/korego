@@ -21,8 +21,8 @@ type ServiceManager interface {
 	UnitForProcess(process string) (string, bool)
 }
 
-// systemctlTimeout limita cada chamada ao systemctl.
-const systemctlTimeout = 15 * time.Second
+// systemctlTimeout limita cada chamada ao systemctl (variável para os testes).
+var systemctlTimeout = 15 * time.Second
 
 // supportedUnits são as únicas units que o motor para e inicia.
 var supportedUnits = map[string]struct{}{"nginx": {}, "apache2": {}}

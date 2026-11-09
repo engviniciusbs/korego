@@ -128,3 +128,29 @@ func (s *Service) CheckDNS(ctx context.Context, host string) DNSCheck {
 	}
 	return c
 }
+
+// DNSReady diz se host resolve para esta máquina (CheckDNS) ou para as
+// faixas da Cloudflare (domínio com proxy da Cloudflare: o desafio HTTP do
+// certificado chega por ela). Usado antes de assumir as portas; senão
+// devolve a mensagem de CheckDNS.
+func (s *Service) DNSReady(ctx context.Context, host string) (bool, string) {
+	c := s.CheckDNS(ctx, host)
+	if c.OK {
+		return true, ""
+	}
+	var nets []*net.IPNet
+	for _, cidr := range s.cfRanges() {
+		if _, n, err := net.ParseCIDR(cidr); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	for _, r := range c.Resolved {
+		ip := net.ParseIP(r)
+		for _, n := range nets {
+			if ip != nil && n.Contains(ip) {
+				return true, ""
+			}
+		}
+	}
+	return false, c.Message
+}

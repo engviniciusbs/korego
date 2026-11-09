@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +37,9 @@ const (
 	SettingMigratedFrom  = "proxy.migrated_from"
 	SettingMigratedAt    = "proxy.migrated_at" // unix
 	SettingLastMigration = "proxy.last_migration"
+	// SettingInProgress marca uma troca em andamento (InProgress em JSON);
+	// presente na subida, a troca foi interrompida (RecoverInterrupted).
+	SettingInProgress = "proxy.migration_in_progress"
 )
 
 // Tempos da troca.
@@ -49,6 +54,7 @@ const (
 	trialCacheTTL  = 10 * time.Second
 	stepTimeout    = 2 * time.Minute // limite de cada passo de volta
 	ensureTimeout  = 30 * time.Second
+	existsTTL      = 60 * time.Second // cache de Exists em Info
 )
 
 // Resultados.
@@ -97,7 +103,20 @@ const (
 	CodeUnsupportedOwner = "UNSUPPORTED_PORT_OWNER"
 	CodeRunning          = "MIGRATION_RUNNING"
 	CodeNotMigrated      = "PROXY_NOT_MIGRATED"
+	CodeDNSNotReady      = "DNS_NOT_READY"
+	CodeUpdating         = "UPDATE_IN_PROGRESS"
 )
+
+// InterruptedMessage é o resultado gravado quando o KoreGO reinicia no meio
+// de uma troca.
+const InterruptedMessage = "interrompida (KoreGO reiniciou durante a troca)"
+
+// InProgress é a marca gravada em SettingInProgress.
+type InProgress struct {
+	Op        string    `json:"op"`
+	Unit      string    `json:"unit"`
+	StartedAt time.Time `json:"startedAt"`
+}
 
 // Refusal é uma recusa antes de mexer em qualquer coisa.
 type Refusal struct {
@@ -152,6 +171,11 @@ type Domains interface {
 	// status dado.
 	Pause()
 	Resume(st proxy.Status)
+	// Reconcile faz uma volta de reconciliação (fora da pausa).
+	Reconcile(ctx context.Context) proxy.Status
+	// DNSReady diz se host resolve para esta máquina ou para as faixas da
+	// Cloudflare; senão, a mensagem.
+	DNSReady(ctx context.Context, host string) (bool, string)
 }
 
 // CheckFunc é a assinatura de Check.
@@ -168,8 +192,12 @@ type Engine struct {
 	Sleep   func(ctx context.Context, d time.Duration) error // nil = espera real
 	Check   CheckFunc                                        // nil = Check
 
-	mu      sync.Mutex
-	running bool
+	mu       sync.Mutex
+	running  bool
+	updating bool // uma atualização do KoreGO segura a vaga (BlockForUpdate)
+
+	existsMu    sync.Mutex
+	existsCache map[string]existsEntry
 
 	cacheMu sync.Mutex
 	cacheAt time.Time
@@ -211,14 +239,56 @@ func (e *Engine) Running() bool {
 	return e.running
 }
 
-func (e *Engine) claim() bool {
+type existsEntry struct {
+	at time.Time
+	ok bool
+}
+
+// claim toma a vaga de troca; recusa durante outra troca ou atualização.
+func (e *Engine) claim() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.running {
-		return false
+	if err := e.busyLocked(); err != nil {
+		return err
 	}
 	e.running = true
-	return true
+	return nil
+}
+
+func (e *Engine) busyLocked() error {
+	if e.running {
+		return errRunning
+	}
+	if e.updating {
+		return errUpdating
+	}
+	return nil
+}
+
+func (e *Engine) busy() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.busyLocked()
+}
+
+// BlockForUpdate impede trocas enquanto o KoreGO se atualiza; recusa
+// (MIGRATION_RUNNING) com troca em andamento. release libera a vaga (só
+// quando a atualização falha: com sucesso o processo reinicia).
+func (e *Engine) BlockForUpdate() (release func(), err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.busyLocked(); err != nil {
+		return nil, err
+	}
+	e.updating = true
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			e.mu.Lock()
+			e.updating = false
+			e.mu.Unlock()
+		})
+	}, nil
 }
 
 func (e *Engine) release() {
@@ -227,7 +297,10 @@ func (e *Engine) release() {
 	e.mu.Unlock()
 }
 
-var errRunning = &Refusal{Code: CodeRunning, Message: "Já há uma troca de servidor em andamento."}
+var (
+	errRunning  = &Refusal{Code: CodeRunning, Message: "Já há uma troca de servidor em andamento."}
+	errUpdating = &Refusal{Code: CodeUpdating, Message: "O KoreGO está sendo atualizado; tente a troca depois que ele reiniciar."}
+)
 
 // TrialCheck roda Check em TrialAddr com cache de 10 s. Recusa com
 // PROXY_NOT_TRIAL fora do ensaio e MIGRATION_RUNNING durante uma troca.
@@ -270,7 +343,7 @@ func (e *Engine) Info(ctx context.Context) (Info, error) {
 	if ok {
 		in.MigratedFrom = from
 		if _, valid := supportedUnits[from]; valid && e.Systemd != nil {
-			in.RollbackAvailable = e.Systemd.Exists(ctx, from)
+			in.RollbackAvailable = e.existsCached(ctx, from)
 		}
 	}
 	if v, ok, err := e.DB.GetSetting(ctx, SettingMigratedAt); err != nil {
@@ -292,6 +365,22 @@ func (e *Engine) Info(ctx context.Context) (Info, error) {
 	return in, nil
 }
 
+// existsCached é Systemd.Exists com cache de 60 s (GET /api/proxy é
+// consultado com frequência).
+func (e *Engine) existsCached(ctx context.Context, unit string) bool {
+	e.existsMu.Lock()
+	defer e.existsMu.Unlock()
+	if c, ok := e.existsCache[unit]; ok && e.now().Sub(c.at) < existsTTL {
+		return c.ok
+	}
+	ok := e.Systemd.Exists(ctx, unit)
+	if e.existsCache == nil {
+		e.existsCache = map[string]existsEntry{}
+	}
+	e.existsCache[unit] = existsEntry{at: e.now(), ok: ok}
+	return ok
+}
+
 // job acompanha uma troca: publica os passos e grava o resultado.
 type job struct {
 	e  *Engine
@@ -310,6 +399,9 @@ func (j *job) step(step, status, msg string) {
 // finish grava e publica o resultado final.
 func (j *job) finish(ctx context.Context, res Result) {
 	log.Printf("proxy: troca (%s) terminou: %s: %s", j.op, res.Outcome, res.Message)
+	if err := j.e.DB.DeleteSetting(ctx, SettingInProgress); err != nil {
+		log.Printf("proxy: apagar a marca de troca em andamento: %v", err)
+	}
 	lm := LastMigration{Op: j.op, Outcome: res.Outcome, Message: res.Message, At: j.e.now().UTC()}
 	if b, err := json.Marshal(lm); err == nil {
 		if err := j.e.DB.SetSetting(ctx, SettingLastMigration, string(b)); err != nil {
@@ -348,57 +440,254 @@ func refusalResult(err error) Result {
 	return Result{Outcome: OutcomeFailed, Message: err.Error()}
 }
 
-// begin toma a vaga de troca, pausa os domínios e lê o estado atual do proxy
-// (Ensure com a reconciliação parada). Devolve a função que desfaz isso.
-func (e *Engine) begin(ctx context.Context) (proxy.Status, func(proxy.Status), error) {
-	if !e.claim() {
-		return proxy.Status{}, nil, errRunning
-	}
-	e.Domains.Pause()
-	st := e.Proxy.Ensure(ctx)
-	end := func(final proxy.Status) {
-		e.Domains.Resume(final)
-		e.release()
-	}
-	return st, end, nil
+// session é uma troca com a vaga tomada e os domínios pausados.
+type session struct {
+	e       *Engine
+	st      proxy.Status // estado do proxy lido com a reconciliação parada
+	resumed bool
 }
 
-// run executa fn em segundo plano com a pausa já tomada e, ao fim, relê o
-// estado do proxy, retoma os domínios, grava o resultado e chama onDone.
-func (e *Engine) run(ctx context.Context, op string, end func(proxy.Status), fn func(context.Context, *job) Result, onDone func(Result)) {
+// resume solta os domínios publicando st (uma vez).
+func (ss *session) resume(st proxy.Status) {
+	if !ss.resumed {
+		ss.resumed = true
+		ss.e.Domains.Resume(st)
+	}
+}
+
+// end solta os domínios e a vaga.
+func (ss *session) end(st proxy.Status) {
+	ss.resume(st)
+	ss.e.release()
+}
+
+// begin toma a vaga de troca, pausa os domínios e lê o estado atual do proxy
+// (Ensure com a reconciliação parada). Um pânico depois da pausa a desfaz
+// antes de seguir.
+func (e *Engine) begin(ctx context.Context) (*session, error) {
+	if err := e.claim(); err != nil {
+		return nil, err
+	}
+	ss := &session{e: e}
+	paused := false
+	defer func() {
+		if r := recover(); r != nil {
+			if paused {
+				ss.resume(proxy.Status{})
+			}
+			e.release()
+			panic(r)
+		}
+	}()
+	e.Domains.Pause()
+	paused = true
+	ss.st = e.Proxy.Ensure(ctx)
+	return ss, nil
+}
+
+// guard desfaz a sessão se a parte síncrona entrar em pânico antes de
+// entregar a troca ao segundo plano (*started vira true depois de run).
+func (ss *session) guard(started *bool) {
+	if r := recover(); r != nil {
+		if !*started {
+			ss.end(ss.st)
+		}
+		panic(r)
+	}
+}
+
+// mark grava a marca de troca em andamento.
+func (e *Engine) mark(ctx context.Context, op, unit string) error {
+	b, err := json.Marshal(InProgress{Op: op, Unit: unit, StartedAt: e.now().UTC()})
+	if err != nil {
+		return err
+	}
+	if err := e.DB.SetSetting(ctx, SettingInProgress, string(b)); err != nil {
+		return fmt.Errorf("gravar a marca de troca em andamento: %w", err)
+	}
+	return nil
+}
+
+// run executa fn em segundo plano. Ao fim relê o estado do proxy, grava o
+// resultado (e apaga a marca), retoma os domínios, libera a vaga e chama
+// onDone. Um pânico em fn vira resultado failed: os domínios são retomados,
+// uma reconciliação roda na hora (portas livres → Caddy em 80/443) e o
+// estado final vai na mensagem.
+func (e *Engine) run(ctx context.Context, ss *session, op, unit string, fn func(context.Context, *job) Result, onDone func(Result)) {
 	jctx := context.WithoutCancel(ctx)
 	go func() {
 		j := &job{e: e, op: op}
-		res := fn(jctx, j)
+		res, panicked := safeRun(jctx, j, fn)
 		ectx, cancel := context.WithTimeout(jctx, ensureTimeout)
 		final := e.Proxy.Ensure(ectx)
 		cancel()
+		if panicked {
+			ss.resume(final)
+			rctx, cancel := context.WithTimeout(jctx, ensureTimeout)
+			st := e.Domains.Reconcile(rctx)
+			cancel()
+			res.Message += e.settle(jctx, unit, st)
+		}
 		j.finish(jctx, res)
-		end(final)
+		ss.end(final)
 		if onDone != nil {
 			onDone(res)
 		}
 	}()
 }
 
-// StartTakeover confere as pré-condições (estado trial; dono das portas é
-// nginx ou apache2 do systemd, com a unit existente e ativa) e, passando,
-// assume as portas em segundo plano; onDone recebe o resultado. Recusa com
-// *Refusal sem mexer em nada.
-func (e *Engine) StartTakeover(ctx context.Context, onDone func(Result)) error {
-	st, end, err := e.begin(ctx)
-	if err != nil {
+func safeRun(ctx context.Context, j *job, fn func(context.Context, *job) Result) (res Result, panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("proxy: pânico na troca (%s): %v\n%s", j.op, r, debug.Stack())
+			res = Result{Outcome: OutcomeFailed, Message: fmt.Sprintf("erro interno na troca: %v.", r)}
+			panicked = true
+		}
+	}()
+	return fn(ctx, j), false
+}
+
+// settle descreve o estado depois de uma troca interrompida e, com o Caddy
+// servindo 80/443 e a unit parada, registra a migração para oferecer Voltar.
+func (e *Engine) settle(ctx context.Context, unit string, st proxy.Status) string {
+	if _, ok := supportedUnits[unit]; !ok {
+		return fmt.Sprintf(" Estado do proxy: %s.", st.State)
+	}
+	active, err := e.Systemd.Active(ctx, unit)
+	switch {
+	case err != nil:
+		return fmt.Sprintf(" Estado do proxy: %s; não foi possível conferir o %s (%v).", st.State, unit, err)
+	case active:
+		return fmt.Sprintf(" O %s está ativo; estado do proxy: %s.", unit, st.State)
+	case st.State == proxy.StateActive && st.Mode == proxy.ListenNormal:
+		if rerr := e.record(ctx, unit); rerr != nil {
+			return fmt.Sprintf(" O Caddy está servindo 80/443 e o %s está parado; não foi possível registrar a migração (%v).", unit, rerr)
+		}
+		return fmt.Sprintf(" O Caddy está servindo 80/443 e o %s está parado; use Voltar se precisar.", unit)
+	default:
+		return fmt.Sprintf(" ATENÇÃO: o %s está parado e o proxy está em %s. Rode \"systemctl start %s\" no servidor se os sites estiverem fora do ar.", unit, st.State, unit)
+	}
+}
+
+// RecoverInterrupted roda na subida: com a marca de troca em andamento
+// presente (o KoreGO caiu ou reiniciou no meio), reconcilia o proxy (portas
+// livres → Caddy em 80/443), grava o resultado failed com
+// InterruptedMessage, apaga a marca e, com o Caddy servindo e a unit parada,
+// registra a migração para oferecer Voltar.
+func (e *Engine) RecoverInterrupted(ctx context.Context) error {
+	v, ok, err := e.DB.GetSetting(ctx, SettingInProgress)
+	if err != nil || !ok {
 		return err
 	}
-	unit, err := e.takeoverUnit(ctx, st)
-	if err != nil {
-		end(st)
+	var m InProgress
+	if json.Unmarshal([]byte(v), &m) != nil || (m.Op != OpTakeover && m.Op != OpRollback) {
+		m.Op = OpTakeover
+	}
+	if err := e.claim(); err != nil {
 		return err
 	}
-	e.run(ctx, OpTakeover, end, func(ctx context.Context, j *job) Result {
-		return e.takeover(ctx, j, unit)
-	}, onDone)
+	defer e.release()
+	st := e.Domains.Reconcile(ctx)
+	j := &job{e: e, op: m.Op}
+	j.finish(ctx, Result{Outcome: OutcomeFailed, Message: InterruptedMessage + "." + e.settle(ctx, m.Unit, st)})
 	return nil
+}
+
+// PrecheckTakeover são as recusas baratas de assumir (sem pausar nada), para
+// a API responder 409 antes de consumir o código de confirmação.
+func (e *Engine) PrecheckTakeover(context.Context) error {
+	if err := e.busy(); err != nil {
+		return err
+	}
+	st := e.Domains.Status()
+	if st.State != proxy.StateTrial {
+		return &Refusal{Code: CodeNotTrial, Message: notTrialMsg(st)}
+	}
+	if _, ok := e.Systemd.UnitForProcess(st.Process); !ok {
+		return unsupportedOwner(st)
+	}
+	return nil
+}
+
+// PrecheckRollback são as recusas baratas de voltar.
+func (e *Engine) PrecheckRollback(ctx context.Context) error {
+	if err := e.busy(); err != nil {
+		return err
+	}
+	_, err := e.rollbackUnit(ctx)
+	return err
+}
+
+func unsupportedOwner(st proxy.Status) *Refusal {
+	return &Refusal{Code: CodeUnsupportedOwner, Message: fmt.Sprintf(
+		"As portas 80/443 estão com %s. Só nginx e apache2 gerenciados pelo systemd são suportados: pare esse processo manualmente.",
+		st.Process)}
+}
+
+// StartTakeover confere as pré-condições (estado trial; dono das portas é
+// nginx ou apache2 do systemd, com a unit existente e ativa; DNS dos
+// domínios auto apontando para cá) e, passando, assume as portas em segundo
+// plano; onDone recebe o resultado. Recusa com *Refusal sem mexer em nada.
+func (e *Engine) StartTakeover(ctx context.Context, onDone func(Result)) error {
+	ss, err := e.begin(ctx)
+	if err != nil {
+		return err
+	}
+	started := false
+	defer ss.guard(&started)
+	unit, err := e.takeoverUnit(ctx, ss.st)
+	if err != nil {
+		ss.end(ss.st)
+		return err
+	}
+	sites, err := e.Domains.Sites(ctx)
+	if err != nil {
+		ss.end(ss.st)
+		return fmt.Errorf("montar os sites: %w", err)
+	}
+	if bad := e.dnsProblems(ctx, sites); len(bad) > 0 {
+		ss.end(ss.st)
+		return &Refusal{Code: CodeDNSNotReady, Message: "O DNS destes domínios com certificado automático não aponta para este servidor: " +
+			strings.Join(bad, ", ") + ". Sem isso o certificado não sai e a troca volta sozinha; corrija o DNS antes de assumir as portas."}
+	}
+	if err := e.mark(ctx, OpTakeover, unit); err != nil {
+		ss.end(ss.st)
+		return err
+	}
+	e.run(ctx, ss, OpTakeover, unit, func(ctx context.Context, j *job) Result {
+		return e.takeover(ctx, j, unit, sites)
+	}, onDone)
+	started = true
+	return nil
+}
+
+// dnsProblems lista os hosts auto cujo DNS não aponta para cá.
+func (e *Engine) dnsProblems(ctx context.Context, sites []proxy.Site) []string {
+	var (
+		mu  sync.Mutex
+		bad []string
+		wg  sync.WaitGroup
+	)
+	sem := make(chan struct{}, checkConcurrency)
+	for _, s := range sites {
+		if !isAuto(s) {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if ok, _ := e.Domains.DNSReady(ctx, s.Host); !ok {
+				mu.Lock()
+				bad = append(bad, s.Host)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	slices.Sort(bad)
+	return bad
 }
 
 func (e *Engine) takeoverUnit(ctx context.Context, st proxy.Status) (string, error) {
@@ -407,9 +696,7 @@ func (e *Engine) takeoverUnit(ctx context.Context, st proxy.Status) (string, err
 	}
 	unit, ok := e.Systemd.UnitForProcess(st.Process)
 	if !ok {
-		return "", &Refusal{Code: CodeUnsupportedOwner, Message: fmt.Sprintf(
-			"As portas 80/443 estão com %s. Só nginx e apache2 gerenciados pelo systemd são suportados: pare esse processo manualmente.",
-			st.Process)}
+		return "", unsupportedOwner(st)
 	}
 	if !e.Systemd.Exists(ctx, unit) {
 		return "", &Refusal{Code: CodeUnsupportedOwner, Message: fmt.Sprintf(
@@ -425,11 +712,7 @@ func (e *Engine) takeoverUnit(ctx context.Context, st proxy.Status) (string, err
 }
 
 // takeover são os passos 2–5 do §4.2, com o Caddy em ensaio e o unit ativo.
-func (e *Engine) takeover(ctx context.Context, j *job, unit string) Result {
-	sites, err := e.Domains.Sites(ctx)
-	if err != nil {
-		return Result{Outcome: OutcomeFailed, Message: "montar os sites: " + err.Error() + "; nada foi alterado"}
-	}
+func (e *Engine) takeover(ctx context.Context, j *job, unit string, sites []proxy.Site) Result {
 	cf := e.Domains.CFRanges()
 
 	j.step(StepTrialCheck, StatusRunning, "ensaio de todos os domínios em "+TrialAddr)
@@ -658,18 +941,25 @@ func (e *Engine) waitActive(ctx context.Context, unit string) error {
 // com proxy.migrated_from gravado (nginx ou apache2) e o arquivo da unit
 // existente; senão *Refusal PROXY_NOT_MIGRATED.
 func (e *Engine) StartRollback(ctx context.Context, onDone func(Result)) error {
-	st, end, err := e.begin(ctx)
+	ss, err := e.begin(ctx)
 	if err != nil {
 		return err
 	}
+	started := false
+	defer ss.guard(&started)
 	unit, err := e.rollbackUnit(ctx)
 	if err != nil {
-		end(st)
+		ss.end(ss.st)
 		return err
 	}
-	e.run(ctx, OpRollback, end, func(ctx context.Context, j *job) Result {
+	if err := e.mark(ctx, OpRollback, unit); err != nil {
+		ss.end(ss.st)
+		return err
+	}
+	e.run(ctx, ss, OpRollback, unit, func(ctx context.Context, j *job) Result {
 		return e.rollback(ctx, j, unit)
 	}, onDone)
+	started = true
 	return nil
 }
 

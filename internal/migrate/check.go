@@ -3,6 +3,7 @@ package migrate
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -58,8 +59,10 @@ type SiteCheck struct {
 	// site auto sem handshake passa como Pending).
 	OK bool `json:"ok"`
 	// Pending: certificado automático pendente até assumir as portas.
-	Pending bool        `json:"pending"`
-	TLSOK   bool        `json:"tlsOk"`
+	Pending bool `json:"pending"`
+	TLSOK   bool `json:"tlsOk"`
+	// LeafOK: a folha cobre o host e está no prazo.
+	LeafOK  bool        `json:"leafOk"`
 	Paths   []PathCheck `json:"paths"`
 	Leaf    CertSummary `json:"leaf"`
 	Message string      `json:"message,omitempty"`
@@ -72,11 +75,14 @@ func isAuto(s proxy.Site) bool {
 
 // Check verifica cada site em addr: um handshake TLS com SNI = host (sem
 // validar a cadeia; a folha vai no resultado) e, por rota, um GET no caminho
-// da rota com Host = host, sem seguir redirecionamentos. Passa com o
-// handshake ok e todo status abaixo de 500. Com trial, um site auto (o
-// certificado só sai depois de assumir as portas) é Pending: falha de
-// handshake não o reprova. Sites cloudflareOnly passam porque o ensaio aceita
-// loopback. A saída segue a ordem de sites.
+// da rota com Host = host, sem seguir redirecionamentos.
+//
+// Passa com o handshake ok, a folha cobrindo o host e no prazo, e todo status
+// abaixo de 500 e diferente de 403. 403 só passa em site cloudflareOnly (no
+// modo normal o loopback não está nas faixas da Cloudflare). Com trial, um
+// site auto (o certificado só sai depois de assumir as portas) é Pending:
+// falha de handshake não o reprova e a folha (emissor interno) não é
+// conferida. A saída segue a ordem de sites.
 func Check(ctx context.Context, sites []proxy.Site, addr string, trial bool) []SiteCheck {
 	out := make([]SiteCheck, len(sites))
 	sem := make(chan struct{}, checkConcurrency)
@@ -125,14 +131,21 @@ func checkSite(ctx context.Context, s proxy.Site, addr string, trial bool) SiteC
 		return sc
 	}
 	sc.TLSOK = true
+	leafErr := "o servidor não enviou certificado"
 	if st := conn.ConnectionState(); len(st.PeerCertificates) > 0 {
 		leaf := st.PeerCertificates[0]
 		sc.Leaf = CertSummary{Names: leaf.DNSNames, NotAfter: leaf.NotAfter, Issuer: leaf.Issuer.CommonName}
 		if sc.Leaf.Names == nil {
 			sc.Leaf.Names = []string{}
 		}
+		leafErr = leafProblem(leaf, s.Host, time.Now())
 	}
 	_ = conn.Close()
+	sc.LeafOK = leafErr == ""
+	if !sc.LeafOK && !sc.Pending {
+		sc.Message = "certificado: " + leafErr
+		return sc
+	}
 
 	tr := &http.Transport{
 		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -152,7 +165,7 @@ func checkSite(ctx context.Context, s proxy.Site, addr string, trial bool) SiteC
 
 	sc.OK = true
 	for _, r := range s.Routes {
-		pc := checkPath(ctx, client, s.Host, r)
+		pc := checkPath(ctx, client, s.Host, r, s.CloudflareOnly)
 		sc.Paths = append(sc.Paths, pc)
 		if !pc.OK && sc.OK {
 			sc.OK = false
@@ -169,7 +182,21 @@ func checkSite(ctx context.Context, s proxy.Site, addr string, trial bool) SiteC
 	return sc
 }
 
-func checkPath(ctx context.Context, client *http.Client, host string, r proxy.SiteRoute) PathCheck {
+// leafProblem diz por que a folha não serve para host ("" = serve).
+func leafProblem(leaf *x509.Certificate, host string, now time.Time) string {
+	if err := leaf.VerifyHostname(host); err != nil {
+		return "a folha não cobre " + host
+	}
+	if now.After(leaf.NotAfter) {
+		return "certificado vencido desde " + leaf.NotAfter.UTC().Format(time.RFC3339)
+	}
+	if now.Before(leaf.NotBefore) {
+		return "a folha só vale a partir de " + leaf.NotBefore.UTC().Format(time.RFC3339)
+	}
+	return ""
+}
+
+func checkPath(ctx context.Context, client *http.Client, host string, r proxy.SiteRoute, cfOnly bool) PathCheck {
 	pc := PathCheck{Path: r.Path, Static: r.Static != nil}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+r.Path, nil)
 	if err != nil {
@@ -185,7 +212,7 @@ func checkPath(ctx context.Context, client *http.Client, host string, r proxy.Si
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, checkBodyLimit))
 	pc.Status = resp.StatusCode
-	pc.OK = resp.StatusCode < 500
+	pc.OK = resp.StatusCode < 500 && (resp.StatusCode != http.StatusForbidden || cfOnly)
 	pc.Headers = map[string]string{}
 	for _, h := range checkHeaders {
 		if v := resp.Header.Get(h); v != "" {

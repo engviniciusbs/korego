@@ -2,6 +2,7 @@ package domains
 
 import (
 	"context"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -83,4 +84,25 @@ func TestCFRanges_Exported(t *testing.T) {
 	assert.Nil(t, s.CFRanges())
 	s.Ranges = fixedRanges{"203.0.113.0/24"}
 	assert.Equal(t, []string{"203.0.113.0/24"}, s.CFRanges())
+}
+
+func TestDNSReady_HereOrCloudflare(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestService(t)
+	s.Ranges = fixedRanges{"198.51.100.0/24"}
+	ok, msg := s.DNSReady(ctx, "exemplo.com") // resolve para 203.0.113.10 (este VPS)
+	assert.True(t, ok, msg)
+
+	s.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("198.51.100.7")}} // proxy da Cloudflare
+	ok, msg = s.DNSReady(ctx, "exemplo.com")
+	assert.True(t, ok, msg)
+
+	s.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("192.0.2.9")}} // outro servidor
+	ok, msg = s.DNSReady(ctx, "exemplo.com")
+	assert.False(t, ok)
+	assert.Contains(t, msg, "exemplo.com")
+
+	s.Resolver = fakeResolver{err: assert.AnError}
+	ok, _ = s.DNSReady(ctx, "exemplo.com")
+	assert.False(t, ok)
 }

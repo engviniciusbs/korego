@@ -228,6 +228,11 @@ func runServe(args []string) error {
 	domainsDone := make(chan struct{})
 	go func() {
 		defer close(domainsDone)
+		// Troca do proxy interrompida por queda ou reinício: registra como
+		// falha e oferece Voltar se o Caddy ficou nas portas.
+		if err := migEngine.RecoverInterrupted(ctx); err != nil {
+			log.Printf("proxy: recuperar troca interrompida: %v", err)
+		}
 		domSvc.Run(ctx)
 	}()
 	defer func() { stop(); <-domainsDone }()

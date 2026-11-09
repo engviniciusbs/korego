@@ -74,7 +74,7 @@ func NewRouter(d Deps) http.Handler {
 	usageH := usageHandlers{latest: d.Usage, db: d.DB, now: d.Now}
 	containersH := containerHandlers{svc: d.Auth, node: d.Node}
 	pm2H := pm2Handlers{node: d.Node}
-	updateH := &updateHandlers{svc: d.Auth, up: d.Updater}
+	updateH := &updateHandlers{svc: d.Auth, up: d.Updater, mig: d.Migrate}
 
 	if d.Hub == nil {
 		d.Hub = events.NewHub()

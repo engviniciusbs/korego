@@ -60,6 +60,10 @@ type migEnv struct {
 	csrf   string
 	owner  string // dono das portas visto por Ensure enquanto o nginx roda
 	mu     sync.Mutex
+	// hold: se não nil, a verificação de ensaio espera até ser fechado.
+	hold    chan struct{}
+	entered chan struct{}
+	upd     *fakeUpdater
 }
 
 func newMigEnv(t *testing.T) *migEnv {
@@ -78,7 +82,11 @@ func newMigEnv(t *testing.T) *migEnv {
 	m.svc = &domains.Service{DB: db, Proxy: m.px, Hub: events.NewHub(), PanelPort: 8000, ListenAddr: ":8000"}
 	m.mig = &migrate.Engine{
 		Domains: m.svc, Proxy: m.px, Systemd: m.units, DB: db, Hub: m.svc.Hub,
-		Check: func(_ context.Context, sites []proxy.Site, _ string, _ bool) []migrate.SiteCheck {
+		Check: func(_ context.Context, sites []proxy.Site, _ string, trial bool) []migrate.SiteCheck {
+			if trial && m.hold != nil {
+				close(m.entered)
+				<-m.hold
+			}
 			out := []migrate.SiteCheck{}
 			for _, s := range sites {
 				out = append(out, migrate.SiteCheck{Host: s.Host, OK: true})
@@ -86,7 +94,8 @@ func newMigEnv(t *testing.T) *migEnv {
 			return out
 		},
 	}
-	m.e = newEnvDeps(t, api.Deps{Domains: m.svc, Migrate: m.mig, Hub: m.svc.Hub})
+	m.upd = &fakeUpdater{current: "0.4.0", latest: "v0.5.0"}
+	m.e = newEnvDeps(t, api.Deps{Domains: m.svc, Migrate: m.mig, Hub: m.svc.Hub, Updater: m.upd})
 	m.secret, m.cookie, m.csrf = m.e.setup(t)
 	m.svc.Reconcile(context.Background())
 	return m
@@ -137,16 +146,21 @@ func TestAPI_TakeoverRequiresCode(t *testing.T) {
 	b = m.post(t, "/api/proxy/takeover", map[string]string{"code": "000000"})
 	assert.EqualValues(t, http.StatusForbidden, b["_status"])
 	assert.Equal(t, "INVALID_CODE", errCode(b))
+	// Voltar sem migração registrada recusa (409) antes de olhar o código.
 	b = m.post(t, "/api/proxy/rollback", map[string]string{"code": "000000"})
-	assert.Equal(t, "INVALID_CODE", errCode(b))
+	assert.Equal(t, "PROXY_NOT_MIGRATED", errCode(b))
 	assert.False(t, m.mig.Running())
 	assert.True(t, m.units.isActive("nginx"))
 
-	// Código errado é auditado.
+	// Código errado e código ausente são auditados.
 	audits := m.auditActions(t, "proxy.takeover")
-	require.Len(t, audits, 1)
-	assert.Equal(t, false, audits[0]["ok"])
-	assert.Equal(t, "invalid_code", audits[0]["stage"])
+	require.Len(t, audits, 3)
+	stages := map[string]int{}
+	for _, a := range audits {
+		assert.Equal(t, false, a["ok"])
+		stages[a["stage"].(string)]++
+	}
+	assert.Equal(t, map[string]int{"invalid_code": 1, "code_required": 2}, stages)
 
 	// Sem CSRF: recusado antes.
 	w := m.e.do(t, http.MethodPost, "/api/proxy/takeover", map[string]string{"code": m.freshCode(t)}, withCookie(m.cookie))
@@ -243,4 +257,85 @@ func TestAPI_TrialCheck(t *testing.T) {
 	require.Len(t, sites, 1)
 	assert.Equal(t, "exemplo.com", sites[0].(map[string]any)["host"])
 	assert.Equal(t, true, sites[0].(map[string]any)["ok"])
+}
+
+func TestAPI_RefusalsBeforeCode(t *testing.T) {
+	m := newMigEnv(t)
+	m.mu.Lock()
+	m.owner = "haproxy (pid 9)"
+	m.mu.Unlock()
+	m.svc.Reconcile(context.Background())
+	// Código errado, mas a recusa de estado vem antes: 409, sem gastar tentativa.
+	b := m.post(t, "/api/proxy/takeover", map[string]string{"code": "000000"})
+	assert.EqualValues(t, http.StatusConflict, b["_status"])
+	assert.Equal(t, "UNSUPPORTED_PORT_OWNER", errCode(b))
+	b = m.post(t, "/api/proxy/rollback", map[string]string{"code": "000000"})
+	assert.Equal(t, "PROXY_NOT_MIGRATED", errCode(b))
+
+	// Troca em andamento: 409 MIGRATION_RUNNING antes do código.
+	m.mu.Lock()
+	m.owner = "nginx (pid 7)"
+	m.mu.Unlock()
+	m.svc.Reconcile(context.Background())
+	m.hold, m.entered = make(chan struct{}), make(chan struct{})
+	b = m.post(t, "/api/proxy/takeover", map[string]string{"code": m.freshCode(t)})
+	require.EqualValues(t, http.StatusAccepted, b["_status"], b)
+	<-m.entered
+	b = m.post(t, "/api/proxy/takeover", map[string]string{"code": "000000"})
+	assert.Equal(t, "MIGRATION_RUNNING", errCode(b))
+	b = m.post(t, "/api/proxy/rollback", nil)
+	assert.Equal(t, "MIGRATION_RUNNING", errCode(b))
+
+	// A atualização do KoreGO é recusada durante a troca.
+	w := m.e.do(t, http.MethodPost, "/api/update", nil, mut(m.cookie, m.csrf)...)
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Equal(t, "MIGRATION_RUNNING", errCode(decode(t, w)))
+	assert.Equal(t, 0, m.upd.applies)
+	close(m.hold)
+	m.waitIdle(t)
+}
+
+func TestAPI_UpdateBlocksTakeover(t *testing.T) {
+	m := newMigEnv(t)
+	m.upd.entered, m.upd.release = make(chan struct{}), make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.e.do(t, http.MethodPost, "/api/update", nil, mut(m.cookie, m.csrf)...)
+	}()
+	<-m.upd.entered
+	b := m.post(t, "/api/proxy/takeover", map[string]string{"code": m.freshCode(t)})
+	assert.EqualValues(t, http.StatusConflict, b["_status"])
+	assert.Equal(t, "UPDATE_IN_PROGRESS", errCode(b))
+	close(m.upd.release)
+	<-done
+}
+
+func TestAPI_UpdateFailureReleasesMigration(t *testing.T) {
+	m := newMigEnv(t)
+	m.upd.applyErr = assert.AnError
+	w := m.e.do(t, http.MethodPost, "/api/update", nil, mut(m.cookie, m.csrf)...)
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	require.NoError(t, m.mig.PrecheckTakeover(context.Background()))
+}
+
+func TestAPI_CodeRateLimitedAndRequiredAudited(t *testing.T) {
+	m := newMigEnv(t)
+	b := m.post(t, "/api/proxy/takeover", map[string]string{})
+	assert.Equal(t, "CODE_REQUIRED", errCode(b))
+	stages := []string{}
+	for _, a := range m.auditActions(t, "proxy.takeover") {
+		stages = append(stages, a["stage"].(string))
+	}
+	assert.Contains(t, stages, "code_required")
+
+	// O limite do login (5 tentativas): a 6ª é bloqueada, mesmo com código certo.
+	for i := 0; i < 4; i++ {
+		b = m.post(t, "/api/proxy/takeover", map[string]string{"code": "000000"})
+		require.Equal(t, "INVALID_CODE", errCode(b), i)
+	}
+	b = m.post(t, "/api/proxy/takeover", map[string]string{"code": m.freshCode(t)})
+	assert.EqualValues(t, http.StatusTooManyRequests, b["_status"])
+	assert.Equal(t, "RATE_LIMITED", errCode(b))
+	assert.False(t, m.mig.Running())
 }
