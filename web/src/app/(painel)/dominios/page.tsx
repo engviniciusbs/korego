@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { useState } from "react";
 import { CertStatus } from "@/components/domains/cert-status";
+import { CertificatesPanel, formatCertDate } from "@/components/domains/certificates-panel";
 import { DomainDialog, WWW_OPTIONS } from "@/components/domains/domain-dialog";
 import { ProxyBanner } from "@/components/domains/proxy-banner";
 import { PageHeader, PanelState } from "@/components/shell/page-header";
 import { Alert, Badge, Button, Dialog, Panel, Spinner } from "@/components/ui";
 import { focusRing } from "@/components/ui/focus";
 import { cn } from "@/lib/cn";
-import { useDeleteDomain, useDomains, type Domain } from "@/lib/domains";
+import { domainRoutes, useDeleteDomain, useDomains, type Domain } from "@/lib/domains";
 
 const th = "px-3 py-2 text-left font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-fg-subtle";
 const td = "px-3 py-2.5 align-middle";
@@ -17,34 +18,80 @@ const link = cn("text-accent-text hover:text-fg hover:underline", focusRing);
 
 const wwwLabel = (v: string) => WWW_OPTIONS.find((o) => o.value === v)?.label ?? v;
 
+/** Destino da rota "/" e, com rotas por caminho, quantas há. */
 function Target({ d }: { d: Domain }) {
   if (d.isPanel) {
     return <span className="font-mono text-[13px] text-fg-muted">painel KoreGO</span>;
   }
-  if (d.targetType === "app" && d.appId) {
-    return (
+  const routes = domainRoutes(d);
+  const root = routes.find((r) => r.path === "/") ?? routes[routes.length - 1];
+  const extra = routes.length - 1;
+  let main;
+  if (root.targetType === "app" && root.appId) {
+    main = (
       <span className="text-[13px]">
         <span className="sr-only">Aplicação </span>
-        <Link href={`/aplicacoes/detalhe/?id=${d.appId}`} translate="no" className={cn("font-mono", link)}>
-          {d.appSlug || `#${d.appId}`}
+        <Link href={`/aplicacoes/detalhe/?id=${root.appId}`} translate="no" className={cn("font-mono", link)}>
+          {(root.appId === d.appId && d.appSlug) || `#${root.appId}`}
         </Link>
+      </span>
+    );
+  } else {
+    main = (
+      <span className="font-mono text-[13px] text-fg [overflow-wrap:anywhere]" translate="no">
+        {root.targetType === "static" ? (
+          <>
+            <span className="sr-only">Pasta </span>
+            {root.root}
+          </>
+        ) : (
+          root.address
+        )}
       </span>
     );
   }
   return (
-    <span className="font-mono text-[13px] text-fg [overflow-wrap:anywhere]" translate="no">
-      {d.address}
-    </span>
+    <div className="flex flex-wrap items-center gap-1.5">
+      {main}
+      {extra > 0 && (
+        <Badge size="sm" title={routes.map((r) => r.path).join("  ")}>
+          +{extra} rota{extra === 1 ? "" : "s"}
+          <span className="sr-only">
+            {" "}
+            por caminho: {routes.filter((r) => r.path !== "/").map((r) => r.path).join(", ")}
+          </span>
+        </Badge>
+      )}
+    </div>
   );
 }
 
 function Options({ d }: { d: Domain }) {
+  const custom = d.tls?.mode === "custom";
+  const expiry = custom && d.tls.expiresSoon ? formatCertDate(d.tls.notAfter) : "";
   return (
     <div className="flex flex-wrap gap-1.5">
-      <Badge size="sm" variant={d.forceHttps ? "accent" : "neutral"}>
-        {d.forceHttps ? "HTTPS forçado" : "HTTP aceito"}
-      </Badge>
-      {d.wwwRedirect && d.wwwRedirect !== "none" && <Badge size="sm">{wwwLabel(d.wwwRedirect)}</Badge>}
+      {!d.isPanel && (
+        <Badge size="sm" variant={d.forceHttps ? "accent" : "neutral"}>
+          {d.forceHttps ? "HTTPS forçado" : "HTTP aceito"}
+        </Badge>
+      )}
+      {!d.isPanel && d.wwwRedirect && d.wwwRedirect !== "none" && <Badge size="sm">{wwwLabel(d.wwwRedirect)}</Badge>}
+      {custom && (
+        <Badge size="sm" variant="info" title={d.tls.certName || undefined}>
+          Certificado próprio
+        </Badge>
+      )}
+      {d.cloudflareOnly && (
+        <Badge size="sm" variant="info">
+          Só Cloudflare
+        </Badge>
+      )}
+      {custom && d.tls.expiresSoon && (
+        <Badge size="sm" variant="warning" dot>
+          {expiry ? `Vence em ${expiry}` : "Vence em breve"}
+        </Badge>
+      )}
     </div>
   );
 }
@@ -85,9 +132,14 @@ function Row({ d, onEdit, onRemove }: { d: Domain; onEdit: () => void; onRemove:
       </td>
       <td className={cn(td, "text-right")}>
         {d.isPanel ? (
-          <Link href="/configuracoes/painel/" className={cn("whitespace-nowrap text-xs", link)}>
-            Gerenciar em Configurações <span aria-hidden="true">→</span>
-          </Link>
+          <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1.5">
+            <Button size="sm" onClick={onEdit}>
+              Editar<span className="sr-only"> {d.hostname}</span>
+            </Button>
+            <Link href="/configuracoes/painel/" className={cn("whitespace-nowrap text-xs", link)}>
+              Hostname em Configurações
+            </Link>
+          </div>
         ) : (
           <div className="flex items-center justify-end gap-1.5">
             <Button size="sm" onClick={onEdit}>
@@ -198,6 +250,8 @@ export default function DominiosPage() {
             </div>
           )}
         </Panel>
+
+        <CertificatesPanel />
       </div>
 
       {editing && (

@@ -14,6 +14,9 @@ export function proxyBannerTitle(s: ProxyStatus): string {
       return "Docker indisponível";
     case "starting":
       return "Proxy iniciando…";
+    case "trial":
+      // Neutro até o banner de ensaio (Task 9).
+      return `Proxy em ensaio: as portas 80/443 estão em uso por ${s.process || "outro processo"}`;
     default:
       return "Proxy com erro";
   }
