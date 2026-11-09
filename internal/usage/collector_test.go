@@ -448,7 +448,11 @@ func TestCollector_FlushOnStop(t *testing.T) {
 
 func TestContainerID(t *testing.T) {
 	id := cid('c')
+	// Driver systemd (v2): /system.slice/docker-<id>.scope, às vezes com subgrupo.
 	assert.Equal(t, id, usage.ContainerID("/system.slice/docker-"+id+".scope"))
+	assert.Equal(t, id, usage.ContainerID("/system.slice/docker-"+id+".scope/init.scope"))
+	// Driver cgroupfs: /docker/<id>, tanto na linha "0::" do v2 quanto no v1.
 	assert.Equal(t, id, usage.ContainerID("/docker/"+id))
+	assert.Equal(t, "", usage.ContainerID("/docker/0123abcd"))
 	assert.Equal(t, "", usage.ContainerID("/system.slice/nginx.service"))
 }

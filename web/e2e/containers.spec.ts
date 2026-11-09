@@ -55,6 +55,22 @@ test("containers: observar, ver logs, parar, remover e auditar", async ({ page }
   await page.getByRole("tab", { name: "7d" }).click();
   await expect(page.getByRole("tab", { name: "7d" })).toHaveAttribute("aria-selected", "true");
 
+  // Consumo: o projeto "e2e" vira um dono com o loop do busybox. A atribuição
+  // usa o cgroup dos processos, que só existe no Linux.
+  if (process.platform === "linux") {
+    await test.step("consumo: dono e2e com o processo do container", async () => {
+      await page.goto("/consumo/");
+      const owner = page.getByRole("button", { name: PROJECT, exact: true });
+      const ownerRow = page.getByRole("row").filter({ has: owner });
+      await expect(ownerRow).toBeVisible({ timeout: 20_000 });
+      await expect(ownerRow.getByText("Projeto compose", { exact: true })).toBeVisible();
+      await owner.click();
+      await expect(owner).toHaveAttribute("aria-expanded", "true");
+      const procs = page.getByRole("table", { name: `Processos de ${PROJECT}` });
+      await expect(procs).toContainText("linha-");
+    });
+  }
+
   // Lista: grupo "e2e" com o container marcado como externo
   await page.goto("/containers/");
   const group = page.getByRole("region", { name: /^e2e/ });
