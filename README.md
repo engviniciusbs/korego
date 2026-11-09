@@ -4,12 +4,13 @@ KoreGO é um gerenciador de VPS auto-hospedado: um único binário Go que serve 
 
 ## Estado
 
-**Etapa 2 (Publicar)** concluída, sobre a **Etapa 1 (Observar)** e a **Etapa 0 (Fundação)**: binário único com painel embutido, primeiro acesso com criação do administrador (senha + 2FA obrigatório), sessões, auditoria, visão geral do servidor e autoatualização com verificação de checksum e rollback. A Etapa 1 acrescentou métricas ao vivo, containers Docker e PM2; a Etapa 2 acrescenta publicação de aplicações, domínios com HTTPS automático e deploy pelo GitHub (veja "Publicar").
+**Etapa 3 (Proxy avançado e migração do nginx)** concluída, sobre a **Etapa 2 (Publicar)**, a **Etapa 1 (Observar)** e a **Etapa 0 (Fundação)**: binário único com painel embutido, primeiro acesso com criação do administrador (senha + 2FA obrigatório), sessões, auditoria, visão geral do servidor e autoatualização com verificação de checksum e rollback. A Etapa 1 acrescentou métricas ao vivo, containers Docker e PM2; a Etapa 2, publicação de aplicações, domínios com HTTPS automático e deploy pelo GitHub (veja "Publicar"); a Etapa 3 dá aos domínios rotas por caminho, pastas estáticas, certificados próprios, modo "Só Cloudflare", cabeçalhos e compressão, e troca o nginx pelo Caddy do KoreGO com ensaio, volta automática e botão de voltar (veja "Domínios avançados" e "Migrar do nginx").
 
 Roadmap:
 
 - **Etapa 1 (Observar)**: métricas, containers e PM2 (pronta).
 - **Etapa 2 (Publicar)**: aplicações, deploy, domínios e HTTPS (pronta).
+- **Etapa 3 (Proxy avançado)**: rotas, pastas estáticas, certificados próprios, Só Cloudflare e migração do nginx (pronta).
 
 ## Instalação
 
@@ -88,7 +89,7 @@ A Etapa 2 publica aplicações a partir do painel, sem sair dele.
   - **Railpack**: constrói sem Dockerfile, com o [Railpack](https://railpack.com) (precisa do binário `railpack`; o instalador oferece instalá-lo).
   - **Compose**: sobe o `docker-compose.yml` do repositório.
 - **Deploy automático**: ao conectar o **GitHub App** do KoreGO, um `push` na branch configurada dispara o deploy. Também dá para publicar manualmente pelo botão de deploy.
-- **Domínios**: cada domínio aponta para uma aplicação ou para um endereço manual (`127.0.0.1:3000`). O KoreGO gerencia um Caddy em `80/443` e emite os certificados por HTTP-01, então o DNS já precisa apontar para o servidor. Para migrar um nginx existente, veja [docs/migracao-nginx.md](docs/migracao-nginx.md).
+- **Domínios**: cada domínio aponta para uma aplicação ou para um endereço manual (`127.0.0.1:3000`), e pode ter rotas por caminho e pastas estáticas (veja "Domínios avançados"). O KoreGO gerencia um Caddy em `80/443` e emite os certificados por HTTP-01, então o DNS já precisa apontar para o servidor (ou use um certificado próprio). Se um nginx já ocupa as portas, veja "Migrar do nginx".
 - **Rollback**: apps Dockerfile e Railpack voltam para a imagem do deploy anterior com um clique.
 - **Limitações do Compose**: o deploy derruba e recria os serviços (há **downtime**) e **não há rollback** automático.
 
@@ -107,6 +108,63 @@ Opções em `/etc/korego/config.toml`; cada uma também vale como variável de a
 | `pm2_home` | `KOREGO_PM2_HOME` | vazio | `PM2_HOME` do usuário que roda o PM2. |
 | `github_api_url` | `KOREGO_GITHUB_API_URL` | API do GitHub | Servidor da API do GitHub App (testes, GitHub Enterprise). |
 | `github_web_url` | `KOREGO_GITHUB_WEB_URL` | github.com | Servidor web do GitHub App (testes, GitHub Enterprise). |
+
+## Domínios avançados
+
+A Etapa 3 amplia o editor de domínio (**Domínios → Adicionar domínio** ou **Editar**) com três abas: **Rotas**, **Certificado** e **Segurança**. Um domínio com só a rota `/` continua igual ao da Etapa 2, e os domínios que já existiam seguem funcionando sem nenhum passo manual.
+
+- **Rotas por caminho**: até 20 por domínio. O caminho é `/` ou um prefixo que começa e termina com `/` (`/api/`). Vence o prefixo mais longo, e `/` (obrigatória) atende o resto. Um pedido para `/api` sem a barra final recebe `308` para `/api/`. Cada rota aponta para:
+  - **Aplicação** do KoreGO;
+  - **Endereço** `host:porta`, com **Limite do corpo** (acima dele a resposta é `413`; 0 = sem limite) e **Sem buffer** (para streaming e eventos);
+  - **Pasta** estática (veja abaixo).
+- **Pastas estáticas**: a pasta precisa estar dentro de `/var/www`, que o Caddy enxerga só para leitura. Symlinks valem, então um deploy pode trocar `/var/www/loja/current` de `releases/1` para `releases/2` sem recarregar nada: a requisição seguinte já sai da pasta nova.
+  - **SPA**: um caminho desconhecido recebe o `/index.html`. O `index.html`, inclusive no fallback, sai com `Cache-Control: no-cache`.
+  - **Cache imutável** (opcional, como `/assets/`): o que estiver sob esse prefixo sai com `Cache-Control: public, max-age=31536000, immutable`; arquivo ausente é `404`.
+  - Fora de `/`, a rota funciona como alias: em `/app/`, o pedido `/app/x` sai de `<pasta>/x`.
+  - `.git` e arquivos `.env*` nunca são servidos.
+- **Certificados próprios** (aba **Certificado** → **Próprio**): cole o PEM (cadeia + chave) ou informe o caminho do arquivo no servidor. O KoreGO recusa cadeia inválida, chave que não bate com o certificado, certificado vencido ou que não cobre o hostname (e o `www`, quando há redirecionamento). O PEM fica cifrado no banco, a chave nunca volta pela API nem aparece no painel, e um certificado (um curinga `*.exemplo.com`, por exemplo) pode ser usado por vários domínios. A seção **Certificados** lista onde cada um é usado e quando vence; o painel avisa 30 dias antes. É o caminho para certificados de origem da Cloudflare ou para domínios cujo DNS ainda não aponta para o servidor.
+- **Só Cloudflare** (aba **Segurança**): conexões que não vêm das faixas de IP da Cloudflare recebem `403`, em HTTP e HTTPS, e o IP do cliente passa a ser lido do `CF-Connecting-IP`. As faixas vêm embutidas no binário e são atualizadas uma vez por dia (uma lista truncada ou com erro é ignorada e a anterior continua valendo). Duas ressalvas:
+  - O filtro confere o IP, não quem é o cliente: as faixas da Cloudflare são compartilhadas por todas as contas, e qualquer pessoa pode apontar uma zona dela para o seu IP e passar pelo filtro. Para garantir que só a **sua** zona chega à origem, ative também o **Authenticated Origin Pulls** (mTLS) na Cloudflare; o KoreGO não configura isso.
+  - A confiança nas faixas (`trusted_proxies`) vale por servidor do Caddy, não por domínio: com qualquer domínio em Só Cloudflare, os servidores HTTP e HTTPS inteiros passam a aceitar o `CF-Connecting-IP` vindo das faixas da Cloudflare, inclusive para os outros domínios que estiverem atrás dela.
+- **Cabeçalhos de resposta**: até 30 por domínio, enviados em todas as rotas. **Modelo segurança** acrescenta `Strict-Transport-Security`, `X-Content-Type-Options`, `Referrer-Policy` e `Permissions-Policy`. Sempre, em todo domínio, o cabeçalho `Server` é removido e o upstream recebe `X-Real-IP`.
+- **Compressão**: zstd e gzip, conforme o navegador aceitar. Ligada por padrão nos domínios novos e desligada nos que vieram da Etapa 2.
+
+## Migrar do nginx
+
+Quando outro servidor (nginx ou apache2) segura as portas 80/443, o KoreGO não briga por elas: o Caddy roda em **modo ensaio**, em `127.0.0.1:18080` e `127.0.0.1:18443`, e o painel mostra "Ensaio: o Caddy roda em portas de teste enquanto nginx (pid …) ocupa 80/443". Você cadastra e confere tudo com o nginx ainda no ar e só então troca. O KoreGO nunca para o nginx por conta própria, só quando você pede, e não lê os arquivos do nginx: os sites são cadastrados no painel.
+
+Os exemplos usam nomes fictícios: `loja.exemplo.net` (uma SPA em `/var/www/loja/current` com a API em `127.0.0.1:4000`), `exemplo.com` (uma aplicação em `127.0.0.1:3000`) e o servidor `203.0.113.10`.
+
+1. **Backup.** Guarde a configuração e os certificados atuais, e leve uma cópia para fora do servidor:
+
+   ```sh
+   sudo tar czf /root/backup-nginx-$(date +%F).tar.gz /etc/nginx /etc/letsencrypt /etc/ssl
+   sudo grep -R -n -e server_name -e proxy_pass -e root /etc/nginx/sites-enabled
+   ```
+
+   O `grep` mostra o que cadastrar: para cada `server_name`, os `location` com `proxy_pass` (rotas de endereço) e com `root` (pastas).
+2. **Cadastrar.** Em **Domínios**, adicione cada site com as mesmas rotas: `loja.exemplo.net` com `/api/` → endereço `127.0.0.1:4000` e `/` → pasta `/var/www/loja/current` com SPA e cache imutável em `/assets/`; `exemplo.com` → endereço `127.0.0.1:3000`. Para sites atrás da Cloudflare em SSL Full (strict), guarde um certificado de origem da Cloudflare (ou o curinga atual) em **Certificados** e escolha **Próprio** na aba Certificado. Acrescente na aba Segurança os cabeçalhos que o nginx enviava (CSP, HSTS).
+3. **Comparar no ensaio.** O banner do proxy mostra o ensaio por domínio: handshake TLS, status de cada rota e, nas pastas, se o `index.html` saiu. Domínios com certificado automático aparecem como "certificado pendente até assumir as portas", porque o certificado só é emitido depois da troca. Compare também a resposta pública (nginx) com a do ensaio para a página inicial, um caminho da API, um arquivo de `/assets/` e um caminho desconhecido da SPA:
+
+   ```sh
+   for p in / /api/saude /assets/app.js /rota/qualquer; do
+     curl -s -o /tmp/pub -D - "https://loja.exemplo.net$p" | grep -v -i -e '^date:' -e '^server:' -e '^cf-' > /tmp/pub.h
+     curl -sk -o /tmp/ens -D - --resolve loja.exemplo.net:18443:127.0.0.1 "https://loja.exemplo.net:18443$p" | grep -v -i -e '^date:' -e '^server:' > /tmp/ens.h
+     echo "== $p"; diff /tmp/pub.h /tmp/ens.h; sha256sum /tmp/pub /tmp/ens
+   done
+   ```
+
+   Status, cabeçalhos (sem `Date`, `Server` e os que a Cloudflare acrescenta) e o hash do corpo devem bater. Teste também o login e a API da aplicação.
+4. **Assumir as portas.** Num horário de pouco tráfego, clique em **Assumir as portas** no banner e confirme com o código do 2FA (ou um código de recuperação). Só `nginx.service` e `apache2.service` do systemd são aceitos. Domínios com certificado automático precisam ter o DNS apontando para o servidor (ou para a Cloudflare) antes. O KoreGO então:
+   - para o nginx (`systemctl stop nginx`) e sobe o Caddy em 80/443, tentando por até 5 s enquanto o nginx solta as portas;
+   - confere cada domínio em `127.0.0.1:443` (certificados automáticos têm até 60 s para sair);
+   - se algo falhar, volta sozinho: Caddy de novo no ensaio, `systemctl start nginx` e a mensagem "voltou para o nginx: <motivo>";
+   - com tudo certo, desativa o nginx no boot (`systemctl disable nginx`) e mostra "Migrado do nginx em <data>".
+
+   Depois, repita a comparação do passo 3 contra a resposta pública.
+5. **Voltar.** Enquanto o arquivo da unit existir, o botão **Voltar para o nginx** (também com o código do 2FA) põe o Caddy de volta no ensaio e roda `systemctl enable --now nginx`. A troca não altera os arquivos em `/etc/nginx` nem os certificados do certbot, então o nginx volta como estava. Apagar o nginx e o certbot depois fica a seu critério.
+
+O guia completo, com o painel em HTTPS e o desligamento da porta 8000, está em [docs/migracao-nginx.md](docs/migracao-nginx.md).
 
 ## Desenvolvimento local
 
@@ -145,7 +203,13 @@ cd web && pnpm vitest run && pnpm lint
 # Consumo por dono (procs reais + Docker; só em Linux). Fora de container roda direto;
 # dentro de um, o container precisa de --pid host --cgroupns host e do socket do
 # Docker (-v /var/run/docker.sock:/var/run/docker.sock), além do CLI docker no PATH
-go test -tags integration ./internal/node/docker/... ./internal/node/proxy/... ./internal/deploy/... ./internal/usage/...
+go test -tags integration ./internal/node/docker/... ./internal/deploy/... ./internal/usage/...
+
+# Proxy e troca nginx -> Caddy (Etapa 3; só em Linux, como root e com 80/443 livres).
+# Sobe o korego-caddy e um nginx:alpine (korego-it-nginx) em rede host e usa
+# /var/www/korego-it; -p 1 porque os dois pacotes usam o mesmo korego-caddy.
+# Sem root os testes são pulados; KOREGO_IT_STRICT=1 faz falhar em vez de pular.
+go test -tags integration -p 1 -exec 'sudo -E' ./internal/node/proxy/... ./internal/migrate/...
 
 # Instalador (container ubuntu:24.04 com docker, apt-get e curl simulados)
 sh scripts/test-install.sh && shellcheck scripts/*.sh
@@ -155,7 +219,7 @@ make web && make build
 cd web && pnpm exec playwright install chromium && pnpm test:e2e
 ```
 
-O teste ponta a ponta sobe o binário em `:18000` com dados temporários e percorre: setup, 2FA, visão geral, logout, login com código de recuperação e auditoria. Um segundo spec cria um container `busybox` de teste e percorre consumo (só em Linux: o projeto `e2e` aparece como dono, com o processo do container), lista, logs, parar, remover e auditoria; ele é pulado se o Docker não estiver disponível. O terceiro (`publicar`) cria um projeto e uma aplicação pela imagem `nginx:1-alpine`, faz o deploy, aponta `site-e2e.korego.localhost` pelo Caddy, refaz o deploy sem nenhuma requisição falhar, volta a versão e confere a auditoria; ele precisa de Linux com Docker e as portas 80/443 livres, e fora do CI é pulado sem isso.
+O teste ponta a ponta sobe o binário em `:18000` com dados temporários e percorre: setup, 2FA, visão geral, logout, login com código de recuperação e auditoria. Um segundo spec cria um container `busybox` de teste e percorre consumo (só em Linux: o projeto `e2e` aparece como dono, com o processo do container), lista, logs, parar, remover e auditoria; ele é pulado se o Docker não estiver disponível. O terceiro (`publicar`) cria um projeto e uma aplicação pela imagem `nginx:1-alpine`, faz o deploy, aponta `site-e2e.korego.localhost` pelo Caddy, refaz o deploy sem nenhuma requisição falhar, volta a versão e confere a auditoria; ele precisa de Linux com Docker e as portas 80/443 livres, e fora do CI é pulado sem isso. O quarto (`dominios`) cria pelo editor um domínio com as rotas `/api/` e `/` para endereços e o cabeçalho `X-Teste: 1`, confere a lista, reabre o editor com as duas rotas e o remove; ele roda em qualquer sistema.
 
 ## Segurança
 

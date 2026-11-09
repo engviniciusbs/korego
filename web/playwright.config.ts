@@ -19,6 +19,8 @@ export default defineConfig({
   projects: [
     { name: "fundacao", testMatch: /fundacao\.spec\.ts/ },
     { name: "containers", testMatch: /containers\.spec\.ts/, dependencies: ["fundacao"] },
+    // Editor de domínio (rotas por caminho e cabeçalho): só o painel, roda em qualquer sistema.
+    { name: "dominios", testMatch: /dominios\.spec\.ts/, dependencies: ["fundacao"] },
     // Fluxo de publicar com Caddy e deploy reais: só Linux com Docker (obrigatório no CI).
     { name: "publicar", testMatch: /publicar\.spec\.ts/, dependencies: ["fundacao"] },
   ],
