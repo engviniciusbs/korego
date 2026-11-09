@@ -160,7 +160,7 @@ func TestAPI_AddFromPath(t *testing.T) {
 		map[string]any{"name": "x", "path": filepath.Join(filepath.Dir(file), "nao-existe.pem")}, mut(c, csrf)...)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Equal(t, "INVALID_CERT", errCode(decode(t, w)))
-	assert.Contains(t, decode(t, w)["error"].(map[string]any)["message"], "Não foi possível ler o arquivo")
+	assert.Equal(t, "Não foi possível ler o arquivo informado.", decode(t, w)["error"].(map[string]any)["message"])
 
 	w = e.do(t, http.MethodPost, "/api/certificates", map[string]any{"name": "x", "path": "relativo.pem"}, mut(c, csrf)...)
 	require.Equal(t, http.StatusBadRequest, w.Code)
@@ -207,4 +207,34 @@ func TestAPI_CertificatesAudited(t *testing.T) {
 	require.NotNil(t, del, got)
 	assert.Equal(t, "meu", del["name"])
 	assert.NotEmpty(t, del["fingerprint"])
+}
+
+func TestAPI_CertificatePathAudited(t *testing.T) {
+	e, _, c, csrf := certsEnv(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "bundle.pem")
+	require.NoError(t, os.WriteFile(file, []byte(genCertPEM(t, "exemplo.com", time.Now().Add(90*24*time.Hour))), 0o600))
+	missing := filepath.Join(dir, "nao-existe.pem")
+	longName := "  " + strings.Repeat("n", 300) + "  "
+	e.do(t, http.MethodPost, "/api/certificates", map[string]any{"name": "disco", "path": file}, mut(c, csrf)...)
+	e.do(t, http.MethodPost, "/api/certificates", map[string]any{"name": longName, "path": missing}, mut(c, csrf)...)
+
+	w := e.do(t, http.MethodGet, "/api/audit", nil, withCookie(c))
+	var okPath, failPath any
+	var failTarget string
+	for _, it := range decode(t, w)["items"].([]any) {
+		m := it.(map[string]any)
+		if m["action"] != "certificate.create" {
+			continue
+		}
+		md := m["metadata"].(map[string]any)
+		if md["ok"] == true {
+			okPath = md["path"]
+		} else {
+			failPath, failTarget = md["path"], m["target"].(string)
+		}
+	}
+	assert.Equal(t, file, okPath)
+	assert.Equal(t, missing, failPath)
+	assert.Equal(t, strings.Repeat("n", 100), failTarget)
 }

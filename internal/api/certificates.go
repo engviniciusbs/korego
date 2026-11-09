@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/engviniciusbs/korego/internal/auth"
@@ -88,6 +89,14 @@ func (h certHandlers) create(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	target := strings.TrimSpace(in.Name)
+	if len(target) > 100 {
+		target = target[:100]
+	}
+	fail := map[string]any{"ok": false}
+	if in.Path != "" {
+		fail["path"] = in.Path
+	}
 	ctx, cancel := detached(r, mutationTimeout)
 	defer cancel()
 	var (
@@ -97,25 +106,33 @@ func (h certHandlers) create(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case in.PEM != "" && in.Path != "":
 		WriteError(w, http.StatusBadRequest, "INVALID_CERT", "Envie o PEM ou o caminho do arquivo, não os dois.")
-		record(h.svc, r, "certificate.create", in.Name, map[string]any{"ok": false})
+		record(h.svc, r, "certificate.create", target, fail)
 		return
 	case in.Path != "":
 		c, err = h.certs.AddFromPath(ctx, in.Name, in.Path)
 	case in.PEM != "":
 		c, err = h.certs.Add(ctx, in.Name, []byte(in.PEM))
 	default:
-		record(h.svc, r, "certificate.create", in.Name, map[string]any{"ok": false})
+		record(h.svc, r, "certificate.create", target, fail)
 		WriteError(w, http.StatusBadRequest, "INVALID_CERT", "Informe o PEM ou o caminho do arquivo.")
 		return
 	}
 	if err != nil {
-		record(h.svc, r, "certificate.create", in.Name, map[string]any{"ok": false})
+		record(h.svc, r, "certificate.create", target, fail)
 		certError(w, err)
 		return
 	}
 	record(h.svc, r, "certificate.create", c.Name,
-		map[string]any{"ok": true, "name": c.Name, "fingerprint": c.Fingerprint})
+		okMeta(c, in.Path))
 	WriteJSON(w, http.StatusCreated, map[string]any{"certificate": toCertDTO(h.certs.ViewOf(c, nil))})
+}
+
+func okMeta(c store.Certificate, path string) map[string]any {
+	m := map[string]any{"ok": true, "name": c.Name, "fingerprint": c.Fingerprint}
+	if path != "" {
+		m["path"] = path
+	}
+	return m
 }
 
 // remove serves DELETE /api/certificates/{id}.
@@ -129,7 +146,7 @@ func (h certHandlers) remove(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	meta := map[string]any{"ok": false}
 	target := strconv.FormatInt(id, 10)
-	if cur, err := h.certs.DB.CertificateByID(ctx, id); err == nil {
+	if cur, err := h.certs.Get(ctx, id); err == nil {
 		target = cur.Name
 		meta["name"], meta["fingerprint"] = cur.Name, cur.Fingerprint
 	}

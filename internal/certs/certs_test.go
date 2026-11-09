@@ -246,21 +246,42 @@ func TestService_AddFromPath(t *testing.T) {
 
 	_, err = s.AddFromPath(ctx, "x", "relativo/arquivo.pem")
 	require.ErrorIs(t, err, certs.ErrInvalidCert)
-	assert.Contains(t, err.Error(), "Não foi possível ler o arquivo")
+	assert.Equal(t, readFail, err.Error())
 
 	_, err = s.AddFromPath(ctx, "x", filepath.Join(dir, "nao-existe.pem"))
 	require.ErrorIs(t, err, certs.ErrInvalidCert)
-	assert.Contains(t, err.Error(), "Não foi possível ler o arquivo")
+	assert.Equal(t, readFail, err.Error())
 
 	bigFile := filepath.Join(dir, "grande.pem")
 	require.NoError(t, os.WriteFile(bigFile, []byte(strings.Repeat("A", 1<<20+10)), 0o600))
 	_, err = s.AddFromPath(ctx, "x", bigFile)
 	require.ErrorIs(t, err, certs.ErrInvalidCert)
-	assert.Contains(t, err.Error(), "Não foi possível ler o arquivo")
+	assert.Equal(t, readFail, err.Error())
 
 	secret := filepath.Join(dir, "lixo.pem")
 	require.NoError(t, os.WriteFile(secret, []byte("SEGREDO-NO-ARQUIVO"), 0o600))
 	_, err = s.AddFromPath(ctx, "x", secret)
 	require.ErrorIs(t, err, certs.ErrInvalidCert)
 	assert.NotContains(t, err.Error(), "SEGREDO-NO-ARQUIVO")
+}
+
+const readFail = "Não foi possível ler o arquivo informado."
+
+func TestService_AddFromPath_Directory(t *testing.T) {
+	s := newSvc(t)
+	_, err := s.AddFromPath(context.Background(), "x", t.TempDir())
+	require.ErrorIs(t, err, certs.ErrInvalidCert)
+	assert.Equal(t, readFail, err.Error())
+}
+
+func TestService_Get(t *testing.T) {
+	s := newSvc(t)
+	cert, key := gen(t, genOpts{})
+	c, err := s.Add(context.Background(), "meu", join(cert, key))
+	require.NoError(t, err)
+	got, err := s.Get(context.Background(), c.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "meu", got.Name)
+	_, err = s.Get(context.Background(), 999)
+	require.ErrorIs(t, err, store.ErrNotFound)
 }

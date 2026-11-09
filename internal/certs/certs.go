@@ -42,6 +42,12 @@ var (
 
 func invalid(msg string) error { return &certError{base: ErrInvalidCert, msg: msg} }
 
+// readFailMsg é a única mensagem para qualquer falha de leitura; o erro do SO
+// nunca chega ao usuário.
+const readFailMsg = "Não foi possível ler o arquivo informado."
+
+var errReadFile = errors.New(readFailMsg)
+
 // maxFileBytes é o limite de leitura do formulário "path".
 const maxFileBytes = 1 << 20
 
@@ -260,28 +266,37 @@ func (s *Service) Add(ctx context.Context, name string, pemText []byte) (store.C
 func (s *Service) AddFromPath(ctx context.Context, name, path string) (store.Certificate, error) {
 	data, err := readLimited(path)
 	if err != nil {
-		return store.Certificate{}, invalid("Não foi possível ler o arquivo: " + err.Error())
+		return store.Certificate{}, invalid(readFailMsg)
 	}
 	return s.Add(ctx, name, data)
 }
 
 func readLimited(path string) ([]byte, error) {
 	if !filepath.IsAbs(path) {
-		return nil, errors.New("o caminho deve ser absoluto")
+		return nil, errReadFile
+	}
+	// Stat antes de abrir: abrir um FIFO para leitura travaria.
+	if st, err := os.Stat(path); err != nil || !st.Mode().IsRegular() {
+		return nil, errReadFile
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, errReadFile
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
-	if err != nil {
-		return nil, err
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
+		return nil, errReadFile
 	}
-	if len(data) > maxFileBytes {
-		return nil, errors.New("arquivo maior que 1 MB")
+	data, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
+	if err != nil || len(data) > maxFileBytes {
+		return nil, errReadFile
 	}
 	return data, nil
+}
+
+// Get devolve um certificado (com o PEM cifrado) ou store.ErrNotFound.
+func (s *Service) Get(ctx context.Context, id int64) (store.Certificate, error) {
+	return s.DB.CertificateByID(ctx, id)
 }
 
 // List devolve os certificados com os domínios que os usam.
