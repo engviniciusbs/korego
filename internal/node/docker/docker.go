@@ -41,6 +41,8 @@ type Container struct {
 	Service   string    `json:"service"` // label com.docker.compose.service
 	Managed   bool      `json:"managed"` // label korego.managed == "true"
 	Ports     []Port    `json:"ports"`
+	// Labels são os labels do container (só uso interno, não vai à API).
+	Labels map[string]string `json:"-"`
 }
 
 // Mount é um volume ou bind montado no container.
@@ -221,6 +223,12 @@ type PortMapping struct {
 // VolumeMount monta um volume nomeado em Target; o Docker o cria no primeiro uso.
 type VolumeMount struct{ Volume, Target string }
 
+// BindMount monta um caminho do host em Target.
+type BindMount struct {
+	Source, Target string
+	ReadOnly       bool
+}
+
 // RunSpec descreve um container a criar e iniciar.
 type RunSpec struct {
 	Name, Image   string
@@ -228,6 +236,7 @@ type RunSpec struct {
 	Env           []string // "NOME=valor"; nunca registrado em log nem em erro
 	Ports         []PortMapping
 	Volumes       []VolumeMount
+	Binds         []BindMount
 	Cmd           []string
 	NetworkMode   string // "" = padrão; "host" para o Caddy
 	RestartPolicy string // "unless-stopped" por padrão

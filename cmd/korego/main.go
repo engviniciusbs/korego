@@ -19,6 +19,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/api"
 	"github.com/engviniciusbs/korego/internal/audit"
 	"github.com/engviniciusbs/korego/internal/auth"
+	"github.com/engviniciusbs/korego/internal/cloudflare"
 	"github.com/engviniciusbs/korego/internal/config"
 	"github.com/engviniciusbs/korego/internal/deploy"
 	"github.com/engviniciusbs/korego/internal/domains"
@@ -223,6 +224,15 @@ func runServe(args []string) error {
 			log.Printf("proxy: reaplicar rotas na subida: %v", err)
 		}
 	}()
+
+	// Faixas da Cloudflare: atualiza na subida e a cada 24 h.
+	cfRanges := cloudflare.New(db, nil)
+	cfDone := make(chan struct{})
+	go func() {
+		defer close(cfDone)
+		cfRanges.Run(ctx)
+	}()
+	defer func() { stop(); <-cfDone }()
 
 	cleanupDone := make(chan struct{})
 	go func() {

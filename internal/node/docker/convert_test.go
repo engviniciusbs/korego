@@ -261,3 +261,23 @@ func TestRepoMatch(t *testing.T) {
 	assert.Equal(t, "korego/blog:v2", firstRepoTag([]string{"outra:1", "korego/blog:v2", "korego/blog:v1"}, "korego/blog"))
 	assert.Equal(t, "", firstRepoTag([]string{"korego/blog-x:1", "<none>:<none>"}, "korego/blog"))
 }
+
+func TestToCreateConfig_Binds(t *testing.T) {
+	_, host, err := toCreateConfig(RunSpec{
+		Image: "caddy",
+		Binds: []BindMount{{Source: "/var/www", Target: "/var/www", ReadOnly: true}},
+	})
+	require.NoError(t, err)
+	require.Len(t, host.Mounts, 1)
+	assert.Equal(t, mount.TypeBind, host.Mounts[0].Type)
+	assert.Equal(t, "/var/www", host.Mounts[0].Source)
+	assert.True(t, host.Mounts[0].ReadOnly)
+
+	_, _, err = toCreateConfig(RunSpec{Image: "caddy", Binds: []BindMount{{Target: "/x"}}})
+	assert.Error(t, err)
+}
+
+func TestToContainer_KeepsLabels(t *testing.T) {
+	c := toContainer(container.Summary{Names: []string{"/x"}, Labels: map[string]string{"korego.caddy-spec": "2"}})
+	assert.Equal(t, "2", c.Labels["korego.caddy-spec"])
+}

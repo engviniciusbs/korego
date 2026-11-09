@@ -296,6 +296,7 @@ func applyLabels(c *Container, labels map[string]string) {
 	c.Project = labels[labelProject]
 	c.Service = labels[labelService]
 	c.Managed = labels[labelManaged] == "true"
+	c.Labels = labels
 }
 
 func healthString(s container.HealthStatus) string {

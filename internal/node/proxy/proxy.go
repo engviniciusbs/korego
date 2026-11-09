@@ -86,6 +86,7 @@ const (
 	StateActive            State = "active"
 	StateStarting          State = "starting"
 	StateBlocked           State = "blocked"
+	StateTrial             State = "trial" // portas 80/443 de outro processo: Caddy roda em modo ensaio
 	StateDockerUnavailable State = "docker_unavailable"
 	StateError             State = "error"
 )
@@ -93,7 +94,8 @@ const (
 // Status é o resultado de Proxy.Ensure.
 type Status struct {
 	State   State  `json:"state"`
-	Process string `json:"process,omitempty"` // "nginx (pid 1402285)" quando blocked
+	Mode    Listen `json:"mode,omitempty"`    // normal | trial, quando o proxy roda
+	Process string `json:"process,omitempty"` // "nginx (pid 1402285)" quando blocked ou trial
 	Message string `json:"message,omitempty"`
 }
 
