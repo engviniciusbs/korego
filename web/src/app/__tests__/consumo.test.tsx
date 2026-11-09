@@ -315,4 +315,25 @@ describe("Consumo", () => {
     expect(await within(row).findByText("55,5%")).toBeInTheDocument();
     expect(within(detail).getByText("node server.js --token=••••")).toBeInTheDocument();
   });
+  test("selo mostra Instantâneo sem WebSocket e Ao vivo com o tópico usage", async () => {
+    mockApi();
+    renderPage();
+    await screen.findByRole("button", { name: "loja" });
+    expect(screen.getByText("Instantâneo")).toBeInTheDocument();
+    expect(screen.queryByText(/Ao vivo/)).toBeNull();
+
+    const ws = FakeWS.instances[FakeWS.instances.length - 1];
+    act(() => ws.open());
+    act(() =>
+      ws.msg({
+        type: "event",
+        topic: "usage",
+        data: { time: "2026-11-08T12:00:05Z", dockerOk: true, owners: [] },
+      }),
+    );
+    expect(await screen.findByText(/Ao vivo/)).toBeInTheDocument();
+
+    act(() => ws.close());
+    expect(await screen.findByText("Instantâneo")).toBeInTheDocument();
+  });
 });

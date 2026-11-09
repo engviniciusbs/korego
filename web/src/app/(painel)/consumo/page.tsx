@@ -8,7 +8,7 @@ import { OwnerTable } from "@/components/usage/owner-table";
 import { cn } from "@/lib/cn";
 import { formatBytes, formatPercent } from "@/lib/format";
 import { useMetricsCurrent } from "@/lib/metrics";
-import { isUsageNotReady, kindLabel, useUsage, type OwnerKind } from "@/lib/usage";
+import { isUsageNotReady, kindLabel, useUsage, useUsageLive, type OwnerKind } from "@/lib/usage";
 
 /** Ordem fixa dos filtros de tipo. */
 const KIND_ORDER: OwnerKind[] = ["project", "container", "pm2", "service", "session", "kernel", "other", "rest"];
@@ -67,6 +67,7 @@ function KindFilter({
 
 export default function ConsumoPage() {
   const { data, isPending, isError, error, refetch, isFetching } = useUsage();
+  const live = useUsageLive();
   const metrics = useMetricsCurrent();
   const memTotal = metrics.data?.memTotalBytes;
   const [kind, setKind] = useState<string | null>(null);
@@ -100,12 +101,15 @@ export default function ConsumoPage() {
       <PageHeader
         eyebrow="Servidor"
         title="Consumo"
-        description="Quem está usando CPU e RAM, agrupado por dono. A tabela se atualiza a cada 5 s."
+        description="Quem está usando CPU e RAM, agrupado por dono. Com a conexão ao vivo, a tabela se atualiza a cada 5 s."
         actions={
           data && (
-            <Badge size="sm" variant="success" dot>
-              {time ? `Ao vivo · ${time}` : "Ao vivo"}
-            </Badge>
+            <div className="flex items-center gap-3">
+              {time && <span className="font-mono text-[11px] tabular-nums text-fg-subtle">Leitura das {time}</span>}
+              <Badge size="sm" variant={live ? "success" : "neutral"} dot>
+                {live ? "Ao vivo · 5 s" : "Instantâneo"}
+              </Badge>
+            </div>
           )
         }
       />

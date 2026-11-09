@@ -1,9 +1,10 @@
 "use client";
 
+import { useState } from "react";
 import { keepPreviousData, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
 import { api, ApiError } from "./api";
 import type { MetricsRange } from "./metrics";
-import { useLiveStream } from "./ws";
+import { useLiveSocketStatus, useLiveStream } from "./ws";
 
 export type OwnerKind = "project" | "container" | "pm2" | "service" | "session" | "kernel" | "other" | "rest";
 
@@ -119,6 +120,28 @@ export function mergeUsageLive(prev: UsageSnapshot | undefined, live: UsageLive)
   };
 }
 
+const ms = (iso: string) => {
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? -Infinity : t;
+};
+
+/**
+ * Resolve uma resposta REST que chega depois de uma mensagem mais nova do tópico:
+ * fica o retrato mais novo (por `time`), com os processos da resposta REST
+ * para os donos que existem nos dois.
+ */
+export function keepNewerUsage(cached: UsageSnapshot | undefined, fetched: UsageSnapshot): UsageSnapshot {
+  if (!cached || ms(fetched.time) >= ms(cached.time)) return fetched;
+  const rest = new Map(fetched.owners.map((o) => [o.key, o]));
+  return {
+    ...cached,
+    owners: cached.owners.map((o) => {
+      const r = rest.get(o.key);
+      return r ? { ...o, truncated: r.truncated, processes: r.processes } : o;
+    }),
+  };
+}
+
 const USAGE_KEY = ["usage", "current"] as const;
 const fetchUsage = () => api<UsageSnapshot>("/api/usage");
 
@@ -133,10 +156,27 @@ export function useUsage() {
   });
   return useQuery({
     queryKey: USAGE_KEY,
-    queryFn: fetchUsage,
+    queryFn: async () => keepNewerUsage(qc.getQueryData<UsageSnapshot>(USAGE_KEY), await fetchUsage()),
     retry: (n, e) => !isUsageNotReady(e) && n < 2,
     refetchInterval: notReadyInterval,
   });
+}
+
+/**
+ * "Ao vivo" só com o WebSocket aberto e depois de ao menos uma mensagem do
+ * tópico `usage` nesta conexão; caso contrário a tela mostra um instantâneo.
+ */
+export function useUsageLive(): boolean {
+  const status = useLiveSocketStatus();
+  const [got, setGot] = useState(false);
+  useLiveStream("usage", () => setGot(true));
+  // Ao cair, exige uma nova mensagem antes de voltar a dizer "Ao vivo".
+  const [prevStatus, setPrevStatus] = useState(status);
+  if (status !== prevStatus) {
+    setPrevStatus(status);
+    if (status !== "open") setGot(false);
+  }
+  return status === "open" && got;
 }
 
 /** Processos de um dono: busca /api/usage a cada 5 s enquanto `enabled`. */

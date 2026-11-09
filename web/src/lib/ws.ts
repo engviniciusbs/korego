@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { UNAUTHORIZED_EVENT } from "./api";
 
 export type LiveStatus = "connecting" | "open" | "closed";
@@ -174,4 +174,13 @@ export function useLive<T>(topic: string): T | undefined {
     return getLiveSocket().subscribe(topic, (d) => setData(d as T));
   }, [topic]);
   return data;
+}
+
+const subscribeStatus = (cb: () => void) => getLiveSocket().onStatus(cb);
+const getStatus = () => getLiveSocket().status;
+const getServerStatus = (): LiveStatus => "closed";
+
+/** Estado atual da conexão em tempo real. */
+export function useLiveSocketStatus(): LiveStatus {
+  return useSyncExternalStore(subscribeStatus, getStatus, getServerStatus);
 }
