@@ -18,7 +18,9 @@ type Fake struct {
 	ApplyFn  func(ctx context.Context, sites []proxy.Site, mode proxy.Listen, cf []string) error
 	InSyncFn func(ctx context.Context, sites []proxy.Site, mode proxy.Listen, cf []string) (bool, error)
 	CertFn   func(ctx context.Context, host string) proxy.CertInfo
-	SwitchFn func(ctx context.Context, sites []proxy.Site, mode proxy.Listen, cf []string) error
+	// CertPinnedFn atende CertPinned; nil = CertFn (ou pending).
+	CertPinnedFn func(ctx context.Context, host, fingerprint string) proxy.CertInfo
+	SwitchFn     func(ctx context.Context, sites []proxy.Site, mode proxy.Listen, cf []string) error
 
 	mu       sync.Mutex
 	applied  []proxy.Site
@@ -93,6 +95,14 @@ func (f *Fake) Cert(ctx context.Context, host string) proxy.CertInfo {
 		return proxy.CertInfo{State: proxy.CertPending}
 	}
 	return f.CertFn(ctx, host)
+}
+
+// CertPinned chama CertPinnedFn (ou Cert, sem ele).
+func (f *Fake) CertPinned(ctx context.Context, host, fingerprint string) proxy.CertInfo {
+	if f.CertPinnedFn == nil {
+		return f.Cert(ctx, host)
+	}
+	return f.CertPinnedFn(ctx, host, fingerprint)
 }
 
 // LastApplied devolve uma cópia dos sites da última Apply bem-sucedida.

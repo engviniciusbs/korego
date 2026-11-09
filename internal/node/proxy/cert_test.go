@@ -47,3 +47,23 @@ func TestCert_StatesWithTestServer(t *testing.T) {
 	assert.Equal(t, CertError, info.State)
 	assert.NotEmpty(t, info.Message)
 }
+
+// Certificado próprio (ex.: origem da Cloudflare) não é confiável pelas
+// raízes do sistema: o estado vem da comparação com o fingerprint guardado.
+func TestCertPinned_ComparesFingerprint(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	defer srv.Close()
+	ctx := context.Background()
+	c := NewCaddy(&dockertest.Fake{}, downAdmin(t))
+	c.CertAddr, c.CertRoots, c.CertTimeout = srv.Listener.Addr().String(), x509.NewCertPool(), 2*time.Second
+
+	// O mesmo certificado guardado → active, mesmo sem raiz confiável.
+	info := c.CertPinned(ctx, "example.com", Fingerprint(srv.Certificate().Raw))
+	assert.Equal(t, CertActive, info.State, info.Message)
+	assert.True(t, srv.Certificate().NotAfter.Equal(info.NotAfter))
+
+	// Outro certificado servido → pending, com motivo.
+	info = c.CertPinned(ctx, "example.com", "AA:BB")
+	assert.Equal(t, CertPending, info.State)
+	assert.Contains(t, info.Message, "não é o certificado escolhido")
+}

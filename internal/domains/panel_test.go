@@ -284,3 +284,41 @@ func TestPanel_UpdateOptionsKeepsRoutesAndSetDomainKeepsOptions(t *testing.T) {
 	_, _, err = s.Update(ctx, panel.ID, DomainInput{CloudflareOnly: ptr(true)})
 	assert.ErrorIs(t, err, ErrPanelPortOff)
 }
+
+// Certificado próprio (origem da Cloudflare): as raízes do sistema não o
+// aceitam, mas o certificado servido é o guardado → ativo, e a porta 8000
+// pode ser desligada.
+func TestPanel_CustomCertUsesPinnedCheck(t *testing.T) {
+	ctx := context.Background()
+	s, calls := newPanelService(t)
+	fake := s.Proxy.(*proxytest.Fake)
+	cs := withCerts(t, s)
+	require.NoError(t, s.SetPanelDomain(ctx, "painel.exemplo.com"))
+	panel, _, err := s.DB.PanelDomain(ctx)
+	require.NoError(t, err)
+	c := addCert(t, cs, "painel.exemplo.com")
+	panel.TLSMode, panel.CertID = proxy.TLSCustom, &c.ID
+	require.NoError(t, s.DB.UpdateDomain(ctx, &panel))
+
+	fake.CertFn = func(context.Context, string) proxy.CertInfo {
+		return proxy.CertInfo{State: proxy.CertPending, Message: "certificado ainda não confiável"}
+	}
+	var gotFP string
+	fake.CertPinnedFn = func(_ context.Context, _ string, fp string) proxy.CertInfo {
+		gotFP = fp
+		return proxy.CertInfo{State: proxy.CertActive}
+	}
+
+	p, err := s.Panel(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, proxy.CertActive, p.Cert.State)
+	assert.Equal(t, c.Fingerprint, gotFP)
+
+	require.NoError(t, s.SetPublicPort(ctx, false, true))
+	assert.Equal(t, []string{"127.0.0.1:8000"}, *calls)
+
+	list, err := s.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, proxy.CertActive, list[0].Cert.State)
+}
