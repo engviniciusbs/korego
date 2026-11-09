@@ -12,7 +12,7 @@ func TestOpen_AppliesMigrations(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
-	for _, tbl := range []string{"users", "recovery_codes", "sessions", "audit_log", "schema_migrations", "metrics_minute", "settings", "projects", "apps", "app_env", "deploys", "domains", "github_app"} {
+	for _, tbl := range []string{"users", "recovery_codes", "sessions", "audit_log", "schema_migrations", "metrics_minute", "settings", "projects", "apps", "app_env", "deploys", "domains", "github_app", "usage_minute"} {
 		var n int
 		require.NoError(t, db.SQL().QueryRow(
 			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&n))
@@ -20,7 +20,7 @@ func TestOpen_AppliesMigrations(t *testing.T) {
 	}
 	var v int
 	require.NoError(t, db.SQL().QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v))
-	require.Equal(t, 3, v)
+	require.Equal(t, 4, v)
 }
 
 func TestOpen_Idempotent(t *testing.T) {
@@ -34,7 +34,7 @@ func TestOpen_Idempotent(t *testing.T) {
 
 	var n int
 	require.NoError(t, db2.SQL().QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n))
-	require.Equal(t, 3, n)
+	require.Equal(t, 4, n)
 }
 
 func TestOpen_ForeignKeysOn(t *testing.T) {

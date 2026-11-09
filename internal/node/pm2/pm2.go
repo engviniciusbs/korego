@@ -7,6 +7,7 @@ import "context"
 type Process struct {
 	Name          string  `json:"name"`
 	PMID          int     `json:"pmId"`
+	PID           int     `json:"pid"`    // PID do app; 0 quando parado
 	Status        string  `json:"status"` // online, stopped, errored, ...
 	CPUPercent    float64 `json:"cpuPercent"`
 	MemoryBytes   uint64  `json:"memoryBytes"`

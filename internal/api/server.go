@@ -36,6 +36,8 @@ type Deps struct {
 	DB *store.DB
 	// Now é o relógio do histórico de métricas e dos states do GitHub (nil = time.Now).
 	Now func() time.Time
+	// Usage fornece o último retrato de consumo por dono (nil = sempre "não pronto").
+	Usage LatestUsage
 	// Domains atende /api/proxy, /api/domains e /api/settings/panel (nil as desativa).
 	Domains *domains.Service
 	// Deploys executa e consulta os deploys das aplicações.
@@ -62,6 +64,7 @@ func NewRouter(d Deps) http.Handler {
 	systemH := systemHandlers{node: d.Node}
 
 	metricsH := metricsHandlers{latest: d.Metrics, db: d.DB, now: d.Now}
+	usageH := usageHandlers{latest: d.Usage, db: d.DB, now: d.Now}
 	containersH := containerHandlers{svc: d.Auth, node: d.Node}
 	pm2H := pm2Handlers{node: d.Node}
 	updateH := &updateHandlers{svc: d.Auth, up: d.Updater}
@@ -112,6 +115,11 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/system", systemH.info)
 			r.Get("/metrics/current", metricsH.current)
 			r.Get("/metrics/history", metricsH.history)
+			r.Get("/usage", usageH.current)
+			if d.DB != nil {
+				r.Get("/usage/at", usageH.at)
+				r.Get("/usage/history", usageH.history)
+			}
 			r.Get("/pm2", pm2H.snapshot)
 			r.Get("/containers", containersH.list)
 			r.Get("/containers/{id}", containersH.details)

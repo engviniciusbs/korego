@@ -7,6 +7,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/node/metrics"
 	"github.com/engviniciusbs/korego/internal/node/pm2"
+	"github.com/engviniciusbs/korego/internal/node/procs"
 	"github.com/engviniciusbs/korego/internal/node/proxy"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/host"
@@ -19,6 +20,7 @@ type Local struct {
 	docker  *docker.Local
 	pm2     *pm2.Local
 	proxy   *proxy.Caddy
+	procs   *procs.Local
 }
 
 // NewLocal cria o Node local. pm2Path vazio procura o pm2 no PATH; pm2Home
@@ -30,6 +32,7 @@ func NewLocal(pm2Path, pm2Home string) *Local {
 		docker:  d,
 		pm2:     pm2.NewLocal(pm2Path, pm2Home),
 		proxy:   proxy.NewCaddy(d, &proxy.AdminClient{BaseURL: "http://127.0.0.1:2019"}),
+		procs:   procs.NewLocal(),
 	}
 }
 
@@ -46,6 +49,9 @@ func (l *Local) PM2() pm2.Reader { return l.pm2 }
 
 // Proxy devolve o proxy Caddy local.
 func (l *Local) Proxy() proxy.Proxy { return l.proxy }
+
+// Procs devolve o leitor de processos local.
+func (l *Local) Procs() procs.Source { return l.procs }
 
 // Info lê as informações do host local.
 func (l *Local) Info(ctx context.Context) (HostInfo, error) {

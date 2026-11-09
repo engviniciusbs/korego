@@ -86,6 +86,7 @@ function mockApi(over: Routes = {}) {
         ],
       }),
     "/api/pm2": () => json({ available: false, daemonRunning: false, processes: [] }),
+    "/api/usage": () => json({ error: { code: "USAGE_NOT_READY", message: "coletando" } }, 503),
     ...over,
   };
   vi.stubGlobal(
@@ -116,6 +117,33 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+const owner = (key: string, label: string, cpuPercent: number, memBytes: number, kind = "service") => ({
+  key,
+  kind,
+  label,
+  cpuPercent,
+  memBytes,
+  procCount: 1,
+});
+
+/** Mesmo formato do tooltip do gráfico. */
+const tooltipTime = (t: number) =>
+  new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(
+    new Date(t * 1000),
+  );
+
+/** Histórico de 1h com 3 pontos; devolve o t do último. */
+function withHistory(atBody: () => Response) {
+  const now = Math.floor(Date.now() / 1000);
+  const last = now - 60;
+  mockApi({
+    "/api/metrics/history": () =>
+      json({ range: "1h", stepSeconds: 60, points: [hp(now - 180), hp(now - 120), hp(last)] }),
+    "/api/usage/at": atBody,
+  });
+  return last;
+}
 
 describe("Visão geral", () => {
   it("visão geral mostra os valores ao vivo do canal metrics", async () => {
@@ -268,5 +296,130 @@ describe("Visão geral", () => {
     );
     await screen.findByRole("region", { name: "Containers" });
     expect(screen.queryByText(/Configure o domínio do painel/)).toBeNull();
+  });
+
+  it("clicar no gráfico de CPU abre Quem estava usando ordenado por CPU", async () => {
+    const last = withHistory(() =>
+      json({
+        t: last,
+        stepSeconds: 60,
+        metric: "cpu",
+        owners: [
+          owner("project:loja", "loja", 40, 512 * 1024 * 1024, "container"),
+          owner("pm2:api", "api", 25.5, GiB, "pm2"),
+          owner("service:nginx.service", "nginx.service", 9, 64 * 1024 * 1024),
+          owner("session", "Sessões", 4, 32 * 1024 * 1024, "session"),
+          owner("kernel", "Kernel", 2, 0, "kernel"),
+          owner("other", "Outros", 1, 16 * 1024 * 1024, "other"),
+        ],
+      }),
+    );
+    renderPage();
+    const panel = await screen.findByRole("region", { name: "Uso de CPU" });
+    await within(panel).findByRole("img");
+    const chart = within(panel).getByRole("group");
+    expect(chart).toHaveClass("cursor-pointer");
+
+    // Foco no gráfico seleciona o último ponto; o clique abre o diálogo nele.
+    act(() => chart.focus());
+    fireEvent.click(chart);
+
+    const dialog = await screen.findByRole("dialog", { name: "Quem estava usando" });
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(`/api/usage/at?t=${last}&range=1h&metric=cpu`, expect.anything()),
+    );
+    expect(within(dialog).getByText(tooltipTime(last))).toBeInTheDocument();
+    const items = await within(dialog).findAllByRole("listitem");
+    expect(items).toHaveLength(5);
+    expect(items.map((li) => within(li).getByRole("link").textContent)).toEqual([
+      "loja",
+      "api",
+      "nginx.service",
+      "Sessões",
+      "Kernel",
+    ]);
+    expect(within(items[0]).getByText("40,0%")).toBeInTheDocument();
+    expect(within(items[1]).getByText("1,0 GiB")).toBeInTheDocument();
+    expect(within(items[0]).getByRole("link")).toHaveAttribute("href", expect.stringMatching(/^\/consumo\/?$/));
+
+    // O foco começa no diálogo e volta ao gráfico ao fechar.
+    const close = within(dialog).getByRole("button", { name: "Fechar" });
+    expect(close).toHaveFocus();
+    fireEvent.click(close);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(chart).toHaveFocus();
+  });
+
+  it("sem dados mostra a mensagem", async () => {
+    const last = withHistory(() => json({ t: last, stepSeconds: 60, metric: "mem", owners: [] }));
+    renderPage();
+    const panel = await screen.findByRole("region", { name: "Memória usada" });
+    await within(panel).findByRole("img");
+    const chart = within(panel).getByRole("group");
+    act(() => chart.focus());
+    fireEvent.keyDown(chart, { key: "Enter" });
+
+    const dialog = await screen.findByRole("dialog", { name: "Quem estava usando" });
+    expect(await within(dialog).findByText("Sem dados para este momento.")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(`/api/usage/at?t=${last}&range=1h&metric=mem`, expect.anything());
+    expect(within(dialog).queryByRole("listitem")).toBeNull();
+  });
+
+  it("painel Maiores consumidores mostra 5 e link para Consumo", async () => {
+    let ready = false;
+    const snapshot = {
+      time: "2026-11-06T12:00:00Z",
+      dockerOk: true,
+      owners: [
+        owner("service:a", "alfa", 3, GiB),
+        owner("service:b", "beta", 30, GiB),
+        owner("service:c", "gama", 12, GiB),
+        owner("service:d", "delta", 1, GiB),
+        owner("service:e", "épsilon", 50, GiB),
+        owner("service:f", "zeta", 7, GiB),
+        owner("service:g", "eta", 0.5, GiB),
+      ].map((o) => ({ ...o, truncated: false, processes: [] })),
+    };
+    mockApi({
+      "/api/usage": () =>
+        ready ? json(snapshot) : json({ error: { code: "USAGE_NOT_READY", message: "coletando" } }, 503),
+    });
+    renderPage();
+    const box = await screen.findByRole("region", { name: "Maiores consumidores" });
+    // Antes do primeiro retrato: estado calmo de coleta, sem erro.
+    expect(await within(box).findByText(/Coletando/)).toBeInTheDocument();
+    expect(within(box).queryByRole("button", { name: "Tentar novamente" })).toBeNull();
+    expect(within(box).getByRole("link", { name: /Ver consumo/ })).toHaveAttribute(
+      "href",
+      expect.stringMatching(/^\/consumo\/?$/),
+    );
+
+    // Primeira mensagem do tópico: entra a lista, ao vivo.
+    ready = true;
+    const ws = FakeWS.instances[FakeWS.instances.length - 1];
+    act(() => ws.open());
+    act(() => ws.msg({ type: "event", topic: "usage", data: snapshot }));
+    const items = await within(box).findAllByRole("listitem");
+    expect(items).toHaveLength(5);
+    expect(items.map((li) => within(li).getByRole("link").textContent)).toEqual([
+      "épsilon",
+      "beta",
+      "gama",
+      "zeta",
+      "alfa",
+    ]);
+    expect(within(items[0]).getByText("50,0%")).toBeInTheDocument();
+    expect(within(items[0]).getByRole("link")).toHaveAttribute("href", expect.stringMatching(/^\/consumo\/?$/));
+
+    // O tópico atualiza a ordem.
+    act(() =>
+      ws.msg({
+        type: "event",
+        topic: "usage",
+        data: { ...snapshot, time: "2026-11-06T12:00:05Z", owners: [owner("service:g", "eta", 90, GiB), ...snapshot.owners] },
+      }),
+    );
+    await waitFor(() => expect(within(box).getAllByRole("listitem")[0]).toHaveTextContent("eta"));
+    expect(within(box).getByText("90,0%")).toBeInTheDocument();
   });
 });

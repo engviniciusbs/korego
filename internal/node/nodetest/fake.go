@@ -8,6 +8,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/node/metrics"
 	"github.com/engviniciusbs/korego/internal/node/pm2"
+	"github.com/engviniciusbs/korego/internal/node/procs"
 	"github.com/engviniciusbs/korego/internal/node/proxy"
 )
 
@@ -18,6 +19,7 @@ type Fake struct {
 	DockerClient  docker.Client
 	PM2Reader     pm2.Reader
 	ProxyImpl     proxy.Proxy
+	ProcsSource   procs.Source
 }
 
 var _ node.Node = (*Fake)(nil)
@@ -36,3 +38,6 @@ func (f *Fake) PM2() pm2.Reader { return f.PM2Reader }
 
 // Proxy devolve ProxyImpl.
 func (f *Fake) Proxy() proxy.Proxy { return f.ProxyImpl }
+
+// Procs devolve ProcsSource.
+func (f *Fake) Procs() procs.Source { return f.ProcsSource }

@@ -5,6 +5,7 @@ import { useId, useMemo, useState, type ReactNode } from "react";
 import { LineChart } from "@/components/charts/line-chart";
 import { Sparkline } from "@/components/charts/sparkline";
 import { ProxyBanner } from "@/components/domains/proxy-banner";
+import { RankedOwnerRow, topOwners, WhoWasUsing } from "@/components/usage/who-was-using";
 import { PageHeader, PanelState } from "@/components/shell/page-header";
 import { Alert, Badge, Button, Panel, Spinner, Tabs, tabId, tabPanelId, type BadgeVariant } from "@/components/ui";
 import { focusRing } from "@/components/ui/focus";
@@ -16,6 +17,7 @@ import { useMetricsCurrent, useMetricsHistory, type MetricsRange, type Sample } 
 import { usePM2 } from "@/lib/pm2";
 import { usePanelSettings } from "@/lib/settings";
 import { useSystemInfo } from "@/lib/system";
+import { isUsageNotReady, useUsage, type UsageMetric } from "@/lib/usage";
 import { useLive, useLiveStream } from "@/lib/ws";
 
 const loadFormat = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -365,6 +367,55 @@ function ContainersPanel() {
   );
 }
 
+// --- Maiores consumidores ------------------------------------------------------
+
+function TopConsumersPanel({ memTotal }: { memTotal: number | undefined }) {
+  const { data, isPending, isError, error, refetch, isFetching } = useUsage();
+  const notReady = !data && isError && isUsageNotReady(error);
+  const owners = data ? topOwners(data.owners, "cpu") : [];
+
+  return (
+    <Panel
+      title="Maiores consumidores"
+      description="Por uso de CPU, agora."
+      headingLevel={3}
+      actions={
+        <Link href="/consumo/" className={cn("text-xs text-accent-text hover:text-fg hover:underline", focusRing)}>
+          Ver consumo <span aria-hidden="true">→</span>
+        </Link>
+      }
+    >
+      {notReady ? (
+        <PanelState>
+          <span role="status" className="text-fg-subtle">
+            Coletando os primeiros dados…
+          </span>
+        </PanelState>
+      ) : isPending ? (
+        <PanelState>
+          <Spinner size="sm" decorative />
+          <span role="status">Carregando consumo…</span>
+        </PanelState>
+      ) : isError && !data ? (
+        <div className="space-y-3">
+          <p className="text-[13px] text-fg-muted">Não foi possível carregar o consumo. {error.message}</p>
+          <Button size="sm" loading={isFetching} onClick={() => void refetch()}>
+            Tentar novamente
+          </Button>
+        </div>
+      ) : owners.length === 0 ? (
+        <PanelState>Nenhum consumo registrado agora.</PanelState>
+      ) : (
+        <ol aria-label="Maiores consumidores por CPU" className="-my-2 divide-y divide-line">
+          {owners.map((o) => (
+            <RankedOwnerRow key={o.key} owner={o} metric="cpu" memTotal={memTotal} />
+          ))}
+        </ol>
+      )}
+    </Panel>
+  );
+}
+
 // --- Histórico ---------------------------------------------------------------
 
 const RANGES: { value: MetricsRange; label: string }[] = [
@@ -377,6 +428,7 @@ const RANGE_SECONDS: Record<MetricsRange, number> = { "1h": 3600, "24h": 86400, 
 
 function HistorySection({ memTotal }: { memTotal: number | undefined }) {
   const [range, setRange] = useState<MetricsRange>("1h");
+  const [at, setAt] = useState<{ t: number; range: MetricsRange; metric: UsageMetric } | null>(null);
   const { data, isPending, isError, error, refetch, isFetching, isPlaceholderData, dataUpdatedAt } =
     useMetricsHistory(range);
   const headingId = useId();
@@ -404,6 +456,9 @@ function HistorySection({ memTotal }: { memTotal: number | undefined }) {
   }, [data, dataUpdatedAt]);
 
   const step = data?.stepSeconds ?? 60;
+  // O bucket segue o período exibido no gráfico (durante a troca de aba, ainda o anterior).
+  const shown = data?.range ?? range;
+  const openAt = (metric: UsageMetric) => (t: number) => setAt({ t, range: shown, metric });
   const body = (chart: ReactNode) =>
     isPending ? (
       <PanelState>
@@ -455,6 +510,8 @@ function HistorySection({ memTotal }: { memTotal: number | undefined }) {
                     format={formatPercent}
                     yMax={100}
                     domain={domain}
+                    onPointClick={openAt("cpu")}
+                    pointActionLabel="ver quem estava usando"
                   />,
                 )}
               </Panel>
@@ -466,6 +523,8 @@ function HistorySection({ memTotal }: { memTotal: number | undefined }) {
                     format={formatBytes}
                     yMax={series.memTotal}
                     domain={domain}
+                    onPointClick={openAt("mem")}
+                    pointActionLabel="ver quem estava usando"
                   />,
                 )}
               </Panel>
@@ -476,6 +535,13 @@ function HistorySection({ memTotal }: { memTotal: number | undefined }) {
           </>
         )}
       </div>
+      <WhoWasUsing
+        t={at?.t ?? null}
+        range={at?.range ?? shown}
+        metric={at?.metric ?? "cpu"}
+        memTotal={series.memTotal}
+        onClose={() => setAt(null)}
+      />
     </section>
   );
 }
@@ -600,7 +666,8 @@ export default function VisaoGeralPage() {
             </Alert>
           )}
           <LiveSection sample={sample} hist={live?.hist ?? null} />
-          <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+          <div className="mt-4 grid gap-4 lg:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_18rem]">
+            <TopConsumersPanel memTotal={sample?.memTotalBytes} />
             <DiskPanel sample={sample} pending={current.isPending} />
             <ContainersPanel />
           </div>

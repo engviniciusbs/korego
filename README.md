@@ -55,6 +55,29 @@ Também valem as variáveis `KOREGO_PM2_PATH` e `KOREGO_PM2_HOME`. Sem `pm2_home
 
 Se o Docker estiver parado, as métricas e o login continuam funcionando e as telas de containers mostram "Docker indisponível".
 
+## Consumo por dono
+
+A página **Consumo** (`/consumo/`) mostra **quem** está usando a CPU e a RAM do servidor, e não só o total. A cada 5 s o KoreGO lê os processos em `/proc` e atribui cada um a um dono pelo cgroup, nesta ordem:
+
+| Dono | Como é reconhecido | Nome exibido |
+| --- | --- | --- |
+| Projeto Compose | processo de um container com o label `com.docker.compose.project` | o nome do projeto (ex.: `loja`) |
+| Container avulso | processo de um container sem projeto | `Avulso: <container>` |
+| App do PM2 | o PID, ou um ancestral, é um app do `pm2 jlist` | `PM2: <app>` |
+| Serviço | unidade systemd (`nginx.service`); o `pm2-*.service` vira "PM2 (daemon)" | o nome da unidade (ex.: `nginx`) |
+| Sessões de usuário | processos sob `user.slice` (SSH, terminais) | Sessões de usuário |
+| Kernel | threads do kernel | Kernel |
+| Outros | todo o resto | Outros |
+
+- **Tabela de donos**: CPU e RAM com barras e número de processos. Ordena por CPU ou RAM, filtra por tipo e atualiza ao vivo. Containers mostram o selo **gerenciado** ou **externo**.
+- **Detalhe do dono**: os processos (PID, nome, comando, usuário, CPU e RAM) e um histórico de CPU e RAM de 1h, 24h ou 7d. Valores sensíveis no comando (`--password ••••`, `TOKEN=••••`, `postgres://app:••••@db`) aparecem mascarados.
+- **Visão geral**: o painel "Maiores consumidores" traz os 5 donos com mais CPU. Clicar num ponto do gráfico de CPU ou RAM abre "Quem estava usando" com os maiores daquele momento.
+- **Histórico**: média por minuto dos 15 maiores em CPU e dos 15 maiores em RAM, mais uma linha "Demais" com a soma do resto, guardada por 7 dias.
+
+A CPU é a % da máquina inteira (100% = todos os núcleos). A **RAM** de um dono é a soma da memória residente (RSS) dos processos dele. É uma aproximação: páginas compartilhadas (bibliotecas, memória de processos pai e filhos depois do `fork`) entram mais de uma vez, então a soma dos donos pode passar da RAM em uso no servidor.
+
+Se o Docker estiver parado, os processos dos containers aparecem em "Outros" e a página avisa. Fora do Linux, sem cgroup, tudo cai em "Outros".
+
 ## Publicar
 
 A Etapa 2 publica aplicações a partir do painel, sem sair dele.
@@ -119,7 +142,10 @@ cd web && pnpm vitest run && pnpm lint
 
 # Integração com o Docker (precisa do Docker em execução)
 # Integração da Etapa 2 (Docker e Caddy; só em Linux)
-go test -tags integration ./internal/node/docker/... ./internal/node/proxy/... ./internal/deploy/...
+# Consumo por dono (procs reais + Docker; só em Linux). Fora de container roda direto;
+# dentro de um, o container precisa de --pid host --cgroupns host e do socket do
+# Docker (-v /var/run/docker.sock:/var/run/docker.sock), além do CLI docker no PATH
+go test -tags integration ./internal/node/docker/... ./internal/node/proxy/... ./internal/deploy/... ./internal/usage/...
 
 # Instalador (container ubuntu:24.04 com docker, apt-get e curl simulados)
 sh scripts/test-install.sh && shellcheck scripts/*.sh
@@ -129,7 +155,7 @@ make web && make build
 cd web && pnpm exec playwright install chromium && pnpm test:e2e
 ```
 
-O teste ponta a ponta sobe o binário em `:18000` com dados temporários e percorre: setup, 2FA, visão geral, logout, login com código de recuperação e auditoria. Um segundo spec cria um container `busybox` de teste e percorre lista, logs, parar, remover e auditoria; ele é pulado se o Docker não estiver disponível. O terceiro (`publicar`) cria um projeto e uma aplicação pela imagem `nginx:1-alpine`, faz o deploy, aponta `site-e2e.korego.localhost` pelo Caddy, refaz o deploy sem nenhuma requisição falhar, volta a versão e confere a auditoria; ele precisa de Linux com Docker e as portas 80/443 livres, e fora do CI é pulado sem isso.
+O teste ponta a ponta sobe o binário em `:18000` com dados temporários e percorre: setup, 2FA, visão geral, logout, login com código de recuperação e auditoria. Um segundo spec cria um container `busybox` de teste e percorre consumo (só em Linux: o projeto `e2e` aparece como dono, com o processo do container), lista, logs, parar, remover e auditoria; ele é pulado se o Docker não estiver disponível. O terceiro (`publicar`) cria um projeto e uma aplicação pela imagem `nginx:1-alpine`, faz o deploy, aponta `site-e2e.korego.localhost` pelo Caddy, refaz o deploy sem nenhuma requisição falhar, volta a versão e confere a auditoria; ele precisa de Linux com Docker e as portas 80/443 livres, e fora do CI é pulado sem isso.
 
 ## Segurança
 
