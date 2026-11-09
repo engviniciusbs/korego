@@ -21,15 +21,13 @@ var sensitiveWords = map[string]bool{
 // de propósito: só os nomes listados são mascarados.
 var sensitiveSuffixes = []string{"apikey", "secretkey", "accesskey", "privatekey", "token", "password", "passwd", "secret"}
 
-// scheme://usuario:senha@host → scheme://usuario:••••@host
-var reUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.\-]*://[^/\s:@]*):[^@/\s]*@`)
+// scheme://usuario:senha@host → scheme://usuario:••••@host. A senha vai até o
+// último @ antes de / ou espaço (ela pode ter @). Não atravessa para uma
+// segunda URL no mesmo texto, porque o "://" dela tem /.
+var reUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.\-]*://[^/\s:@]*):[^/\s]*@`)
 
 // reAssignName é o nome de um elemento nome=valor (com ou sem - / --).
 var reAssignName = regexp.MustCompile(`^-{0,2}[A-Za-z_][A-Za-z0-9_.:\-]*$`)
-
-// reNextAssign reconhece, no valor de um elemento sensível, um separador de
-// shell seguido de outra atribuição (ex.: "a;--token=b"): só aí o valor acaba.
-var reNextAssign = regexp.MustCompile(`^\s*[;&|]+\s*-{0,2}[A-Za-z_][A-Za-z0-9_.:\-]*=`)
 
 func scrubUserinfo(s string) string {
 	return reUserinfo.ReplaceAllString(s, "${1}:"+maskStr+"@")
@@ -157,34 +155,35 @@ func (m *masker) word(a string) string {
 	}
 	// Limitação conhecida: flags curtas (-pSEGREDO, -p segredo) não são
 	// reconhecidas, pois não há como saber o que "-p" significa em cada programa.
-	if strings.HasPrefix(a, "-") && sensitiveName(a) {
+	if (strings.HasPrefix(a, "-") && sensitiveName(a)) || isBearer(a) {
 		m.maskNext = true
 	}
 	return a
 }
 
 // assign trata um elemento do argv que é ele mesmo nome=valor com nome
-// sensível (ex.: "--password=duas palavras", "API_TOKEN=a&b"): o valor inteiro
-// é trocado, com espaços e separadores, porque no argv eles são parte do
-// valor. Só um separador seguido de outra atribuição encerra o valor; o resto
-// volta a ser analisado como texto de shell. Valor entre aspas fica com
-// maskText, que já mantém as aspas e o que vem depois delas.
+// sensível (ex.: "--password=duas palavras", "API_TOKEN=a&b"): o argv não
+// passa por shell, então espaços e separadores são parte do valor e tudo
+// depois do = é trocado. Um script de sh -c que comece com TOKEN=…;X=… fica
+// todo escondido (aceito). Valor entre aspas fica com maskText, que já mantém
+// as aspas e o que vem depois delas.
 func (m *masker) assign(a string) (string, bool) {
 	i := strings.Index(a, "=")
 	if i <= 0 || !reAssignName.MatchString(a[:i]) || !sensitiveName(a[:i]) {
 		return "", false
 	}
-	v := a[i+1:]
-	if v != "" && isQuote(v[0]) {
+	if v := a[i+1:]; v != "" && isQuote(v[0]) {
 		return "", false
 	}
 	m.maskNext = false
-	for j := 0; j < len(v); j++ {
-		if (isSep(v[j]) || isSpaceByte(v[j])) && reNextAssign.MatchString(v[j:]) {
-			return a[:i+1] + maskStr + m.maskText(v[j:]), true
-		}
-	}
 	return a[:i+1] + maskStr, true
+}
+
+// isBearer diz se a palavra é "Bearer" (ou termina em ":Bearer", como em
+// "Authorization:Bearer"), sem diferença de maiúsculas: o token vem depois.
+func isBearer(w string) bool {
+	w = strings.ToLower(w)
+	return w == "bearer" || strings.HasSuffix(w, ":bearer")
 }
 
 // MaskCmd esconde valores sensíveis do argv e limita o texto a 160 caracteres.

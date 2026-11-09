@@ -74,7 +74,7 @@ func TestMaskCmd_SoOValor(t *testing.T) {
 	}{
 		{[]string{"bash", "-c", `"mysql --password=hunter2 -h db" && echo ok`}, `bash -c "mysql --password=•••• -h db" && echo ok`},
 		{[]string{"x", `"--password=hunter2"`, "-h", "db"}, `x "--password=••••" -h db`},
-		{[]string{"x", `--password=a;--token=b`}, `x --password=••••;--token=••••`},
+		{[]string{"x", `--password=a;--token=b`}, `x --password=••••`},
 		{[]string{"x", `--password='a b' -h db`}, `x --password='••••' -h db`},
 		{[]string{"x", `--cmd="run --token=zz" ok`}, `x --cmd="run --token=••••" ok`},
 		{[]string{"sh", "-c", `a --password=p1 && b --token=p2 | c`}, `sh -c a --password=•••• && b --token=•••• | c`},
@@ -124,5 +124,64 @@ func TestMaskCmd_ValorInteiroDoElemento(t *testing.T) {
 		for _, s := range []string{"X1", "Y2", "Z3", "W4"} {
 			assert.NotContains(t, got, s)
 		}
+	}
+}
+
+// Elemento nome=valor sensível não passa por shell: nada depois do = aparece.
+func TestMaskCmd_ElementoSensivelSemCorte(t *testing.T) {
+	cases := []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"x", "--password=Xk;tail=SECRETTAIL"}, "x --password=••••"},
+		{[]string{"x", "--password=abc&def=ghi"}, "x --password=••••"},
+		{[]string{"x", "API_TOKEN=abc|--x=ghi", "run"}, "x API_TOKEN=•••• run"},
+	}
+	for _, c := range cases {
+		got := MaskCmd(c.argv)
+		assert.Equal(t, c.want, got)
+		for _, s := range []string{"SECRETTAIL", "tail", "def", "ghi", "Xk", "abc"} {
+			assert.NotContains(t, got, s)
+		}
+	}
+}
+
+// A senha da URL vai até o último @ antes de / ou espaço.
+func TestMaskCmd_ArrobaNaSenhaDaURL(t *testing.T) {
+	cases := []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"x", "postgres://u:p@Q9@db/x"}, "x postgres://u:••••@db/x"},
+		{[]string{"x", "--db=postgres://u:p@Q9@db/x"}, "x --db=postgres://u:••••@db/x"},
+		{[]string{"sh", "-c", "psql postgres://u:p@Q9@db/x && echo ok"}, "sh -c psql postgres://u:••••@db/x && echo ok"},
+		// duas URLs sem espaço entre elas: cada senha é trocada, os hosts ficam
+		{[]string{"sh", "-c", "curl http://a:K1@h1/x;curl http://c:K2@h2/y"}, "sh -c curl http://a:••••@h1/x;curl http://c:••••@h2/y"},
+		{[]string{"sh", "-c", "curl http://a:K1@h1;curl http://c:K2@h2/y"}, "sh -c curl http://a:••••@h1;curl http://c:••••@h2/y"},
+	}
+	for _, c := range cases {
+		got := MaskCmd(c.argv)
+		assert.Equal(t, c.want, got)
+		for _, s := range []string{"Q9", "K1", "K2"} {
+			assert.NotContains(t, got, s)
+		}
+	}
+}
+
+func TestMaskCmd_Bearer(t *testing.T) {
+	cases := []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"curl", "-H", "Authorization: Bearer T0K3N", "https://api"}, "curl -H Authorization: Bearer •••• https://api"},
+		{[]string{"curl", "-H", "authorization: bearer T0K3N"}, "curl -H authorization: bearer ••••"},
+		{[]string{"curl", "-H", "Authorization:Bearer T0K3N"}, "curl -H Authorization:Bearer ••••"},
+		{[]string{"sh", "-c", `curl -H "Authorization: Bearer T0K3N" https://api`}, `sh -c curl -H "Authorization: Bearer ••••" https://api`},
+		{[]string{"sh", "-c", `curl -H 'Authorization: BEARER T0K3N'`}, `sh -c curl -H 'Authorization: BEARER ••••'`},
+	}
+	for _, c := range cases {
+		got := MaskCmd(c.argv)
+		assert.Equal(t, c.want, got)
+		assert.NotContains(t, got, "T0K3N")
 	}
 }
