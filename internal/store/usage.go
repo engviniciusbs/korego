@@ -22,8 +22,10 @@ type UsageRow struct {
 	MemBytes   uint64
 }
 
-// InsertUsageMinute grava as linhas numa transação, substituindo as que já
-// existem com o mesmo (ts, owner_key). Entrada vazia não faz nada.
+// InsertUsageMinute grava as linhas numa transação. Cada minuto presente na
+// entrada é substituído por inteiro: as linhas antigas desse ts são apagadas
+// antes, para que um minuto regravado (ex.: depois de reiniciar) não se
+// misture com o anterior. Entrada vazia não faz nada.
 func (d *DB) InsertUsageMinute(ctx context.Context, rows []UsageRow) error {
 	if len(rows) == 0 {
 		return nil
@@ -33,6 +35,16 @@ func (d *DB) InsertUsageMinute(ctx context.Context, rows []UsageRow) error {
 		return fmt.Errorf("gravar consumo: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	seen := make(map[int64]bool, 1)
+	for _, r := range rows {
+		if seen[r.TS] {
+			continue
+		}
+		seen[r.TS] = true
+		if _, err := tx.ExecContext(ctx, `DELETE FROM usage_minute WHERE ts = ?`, r.TS); err != nil {
+			return fmt.Errorf("gravar consumo: %w", err)
+		}
+	}
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO usage_minute (ts, owner_key, kind, label, cpu_percent, mem_bytes)
 		 VALUES (?, ?, ?, ?, ?, ?)
@@ -71,25 +83,28 @@ func usageWindow(from, to time.Time, step time.Duration) (secs, fromTS, toTS int
 // UsageAt devolve a média de cada dono em [from, to) (from arredondado para
 // cima ao múltiplo de step, como em MetricHistory), ordenada pela média da
 // métrica ("cpu" ou "mem") em ordem decrescente, desempate por owner_key, com
-// no máximo limit donos. Kind e label vêm da linha mais recente do dono na
-// janela. TS fica zerado.
+// no máximo limit donos. A média é a soma do dono dividida pelos minutos da
+// janela que têm alguma linha (de qualquer dono): um dono que só apareceu em
+// parte deles conta zero nos outros, em vez de ficar inflado. Kind e label vêm
+// da linha mais recente do dono na janela. TS fica zerado.
 func (d *DB) UsageAt(ctx context.Context, from, to time.Time, step time.Duration, metric string, limit int) ([]UsageRow, error) {
 	var order string
 	switch metric {
 	case "cpu":
-		order = "AVG(u.cpu_percent)"
+		order = "SUM(u.cpu_percent)"
 	case "mem":
-		order = "AVG(u.mem_bytes)"
+		order = "SUM(u.mem_bytes)"
 	default:
 		return nil, ErrInvalidMetric
 	}
 	_, fromTS, toTS := usageWindow(from, to, step)
 	rows, err := d.sql.QueryContext(ctx,
-		`SELECT u.owner_key,
+		`WITH n AS (SELECT COUNT(DISTINCT ts) AS c FROM usage_minute WHERE ts >= ?1 AND ts < ?2)
+		 SELECT u.owner_key,
 		        (SELECT kind  FROM usage_minute l WHERE l.owner_key = u.owner_key AND l.ts >= ?1 AND l.ts < ?2 ORDER BY l.ts DESC LIMIT 1),
 		        (SELECT label FROM usage_minute l WHERE l.owner_key = u.owner_key AND l.ts >= ?1 AND l.ts < ?2 ORDER BY l.ts DESC LIMIT 1),
-		        AVG(u.cpu_percent), AVG(u.mem_bytes)
-		 FROM usage_minute u
+		        SUM(u.cpu_percent) / n.c, CAST(SUM(u.mem_bytes) AS REAL) / n.c
+		 FROM usage_minute u, n
 		 WHERE u.ts >= ?1 AND u.ts < ?2
 		 GROUP BY u.owner_key
 		 ORDER BY `+order+` DESC, u.owner_key
@@ -116,14 +131,20 @@ func (d *DB) UsageAt(ctx context.Context, from, to time.Time, step time.Duration
 }
 
 // UsageHistory devolve a média de um dono por balde de step (ts - ts % step)
-// em [from, to), em ordem crescente e só com os baldes que têm dados.
+// em [from, to), em ordem crescente e só com os baldes em que o dono tem
+// dados. Como em UsageAt, a média é a soma do dono no balde dividida pelos
+// minutos do balde que têm alguma linha, de qualquer dono.
 func (d *DB) UsageHistory(ctx context.Context, key string, from, to time.Time, step time.Duration) ([]UsageRow, error) {
 	secs, fromTS, toTS := usageWindow(from, to, step)
 	rows, err := d.sql.QueryContext(ctx,
-		`SELECT ts - ts % ?1 AS bucket, AVG(cpu_percent), AVG(mem_bytes)
-		 FROM usage_minute
-		 WHERE owner_key = ?2 AND ts >= ?3 AND ts < ?4
-		 GROUP BY bucket
+		`SELECT bucket, cpu / c, mem / c
+		 FROM (SELECT b.bucket, b.cpu, b.mem,
+		              (SELECT COUNT(DISTINCT m.ts) FROM usage_minute m
+		               WHERE m.ts >= b.bucket AND m.ts < b.bucket + ?1 AND m.ts < ?4) AS c
+		       FROM (SELECT ts - ts % ?1 AS bucket, SUM(cpu_percent) AS cpu, CAST(SUM(mem_bytes) AS REAL) AS mem
+		             FROM usage_minute
+		             WHERE owner_key = ?2 AND ts >= ?3 AND ts < ?4
+		             GROUP BY bucket) b)
 		 ORDER BY bucket`,
 		secs, key, fromTS, toTS)
 	if err != nil {

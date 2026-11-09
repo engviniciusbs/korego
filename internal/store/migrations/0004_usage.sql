@@ -6,5 +6,5 @@ CREATE TABLE usage_minute (
     cpu_percent REAL NOT NULL,
     mem_bytes INTEGER NOT NULL,
     PRIMARY KEY (ts, owner_key)
-);
+) WITHOUT ROWID;
 CREATE INDEX idx_usage_minute_owner ON usage_minute(owner_key, ts);
