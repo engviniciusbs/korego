@@ -142,7 +142,9 @@ cd web && pnpm vitest run && pnpm lint
 
 # Integração com o Docker (precisa do Docker em execução)
 # Integração da Etapa 2 (Docker e Caddy; só em Linux)
-# Consumo por dono (procs reais + Docker; só em Linux, fora de container)
+# Consumo por dono (procs reais + Docker; só em Linux). Fora de container roda direto;
+# dentro de um, o container precisa de --pid host --cgroupns host e do socket do
+# Docker (-v /var/run/docker.sock:/var/run/docker.sock), além do CLI docker no PATH
 go test -tags integration ./internal/node/docker/... ./internal/node/proxy/... ./internal/deploy/... ./internal/usage/...
 
 # Instalador (container ubuntu:24.04 com docker, apt-get e curl simulados)

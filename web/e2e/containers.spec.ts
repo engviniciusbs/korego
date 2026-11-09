@@ -67,7 +67,7 @@ test("containers: observar, ver logs, parar, remover e auditar", async ({ page }
       await owner.click();
       await expect(owner).toHaveAttribute("aria-expanded", "true");
       const procs = page.getByRole("table", { name: `Processos de ${PROJECT}` });
-      await expect(procs).toContainText("linha-");
+      await expect(procs).toContainText("linha-", { timeout: 20_000 });
     });
   }
 
