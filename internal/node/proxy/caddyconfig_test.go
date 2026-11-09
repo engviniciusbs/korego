@@ -98,9 +98,7 @@ func assertCatchAll(t *testing.T, r map[string]any, name string) {
 	assert.Equal(t, true, r["terminal"], name)
 	h := r["handle"].([]any)
 	require.Len(t, h, 2, name)
-	assert.Equal(t, map[string]any{"handler": "headers", "response": map[string]any{
-		"delete": []any{"Server"}, "deferred": true,
-	}}, h[0], name)
+	assert.Equal(t, strip, h[0], name)
 	assert.Equal(t, map[string]any{
 		"handler": "static_response", "status_code": float64(404),
 		"body": "Domínio não configurado no KoreGO.",
@@ -148,6 +146,9 @@ type parsedConfig struct {
 		HTTP struct {
 			Servers map[string]struct {
 				Routes []parsedRoute `json:"routes"`
+				Errors struct {
+					Routes []parsedRoute `json:"routes"`
+				} `json:"errors"`
 			} `json:"servers"`
 		} `json:"http"`
 		TLS struct {
@@ -171,21 +172,58 @@ func (c parsedConfig) routes(server string) []parsedRoute {
 	return c.Apps.HTTP.Servers[server].Routes
 }
 
+func (c parsedConfig) errorRoutes(server string) []parsedRoute {
+	return c.Apps.HTTP.Servers[server].Errors.Routes
+}
+
 // last devolve o último handler da rota de host (o que responde: subroute
 // ou redirecionamento).
 func last(r parsedRoute) handler { return r.Handle[len(r.Handle)-1] }
 
 // subroutes devolve as rotas de caminho do subroute de uma rota de host.
-func subroutes(t *testing.T, r parsedRoute) []any {
+func subroutes(t *testing.T, r parsedRoute) []parsedRoute {
 	t.Helper()
 	h := last(r)
 	require.Equal(t, "subroute", h["handler"])
-	return h["routes"].([]any)
+	b, err := json.Marshal(h["routes"])
+	require.NoError(t, err)
+	var out []parsedRoute
+	require.NoError(t, json.Unmarshal(b, &out))
+	return out
+}
+
+// pathOf devolve o matcher de caminho da rota ("" quando não há matcher).
+func pathOf(r parsedRoute) string {
+	if len(r.Match) == 0 {
+		return ""
+	}
+	return r.Match[0]["path"][0]
+}
+
+// findSub acha a rota de caminho com o matcher p.
+func findSub(t *testing.T, subs []parsedRoute, p string) parsedRoute {
+	t.Helper()
+	for _, r := range subs {
+		if pathOf(r) == p {
+			return r
+		}
+	}
+	t.Fatalf("rota %q não encontrada", p)
+	return parsedRoute{}
 }
 
 func location(h handler) any {
 	return h["headers"].(map[string]any)["Location"]
 }
+
+func dial(h handler) any {
+	return h["upstreams"].([]any)[0].(map[string]any)["dial"]
+}
+
+// strip é o handler que remove Server e Via (adiado).
+var strip = handler{"handler": "headers", "response": map[string]any{
+	"delete": []any{"Server", "Via"}, "deferred": true,
+}}
 
 func TestBuildConfig_PathRoutesLongestFirst(t *testing.T) {
 	s := Site{Host: "exemplo.com", Routes: []SiteRoute{
@@ -196,19 +234,61 @@ func TestBuildConfig_PathRoutesLongestFirst(t *testing.T) {
 	cfg := parse(t, build(t, []Site{s}))
 	for _, server := range []string{"korego_https", "korego_http"} {
 		subs := subroutes(t, cfg.routes(server)[0])
-		require.Len(t, subs, 3)
-		var paths []any
-		var dials []any
+		var paths, targets []any
 		for _, r := range subs {
-			m := r.(map[string]any)
-			assert.Equal(t, true, m["terminal"])
-			paths = append(paths, m["match"].([]any)[0].(map[string]any)["path"].([]any)[0])
-			h := m["handle"].([]any)
-			rp := h[len(h)-1].(map[string]any)
-			dials = append(dials, rp["upstreams"].([]any)[0].(map[string]any)["dial"])
+			assert.True(t, r.Terminal, server)
+			paths = append(paths, pathOf(r))
+			h := last(r)
+			if h["handler"] == "reverse_proxy" {
+				targets = append(targets, dial(h))
+			} else {
+				targets = append(targets, location(h))
+			}
 		}
-		assert.Equal(t, []any{"/api/v2/*", "/api/*", "/*"}, paths, server)
-		assert.Equal(t, []any{"127.0.0.1:3", "127.0.0.1:2", "127.0.0.1:1"}, dials, server)
+		assert.Equal(t, []any{"/api/v2", "/api/v2/*", "/api", "/api/*", ""}, paths, server)
+		assert.Equal(t, []any{
+			[]any{"/api/v2/{http.request.uri.prefixed_query}"}, "127.0.0.1:3",
+			[]any{"/api/{http.request.uri.prefixed_query}"}, "127.0.0.1:2",
+			"127.0.0.1:1",
+		}, targets, server)
+	}
+}
+
+// Como o "location /api/" do nginx: /api (sem a barra) vai para /api/,
+// mantendo a query string.
+func TestBuildConfig_ExactPrefixRedirect(t *testing.T) {
+	s := Site{Host: "exemplo.com", Routes: []SiteRoute{
+		{Path: "/", Upstream: "127.0.0.1:1"},
+		{Path: "/api/", Upstream: "127.0.0.1:2"},
+	}}
+	cfg := parse(t, build(t, []Site{s}))
+	for _, server := range []string{"korego_https", "korego_http"} {
+		r := findSub(t, subroutes(t, cfg.routes(server)[0]), "/api")
+		assert.True(t, r.Terminal)
+		require.Len(t, r.Handle, 1)
+		assert.Equal(t, handler{
+			"handler":     "static_response",
+			"status_code": float64(308),
+			"headers":     map[string]any{"Location": []any{"/api/{http.request.uri.prefixed_query}"}},
+		}, r.Handle[0], server)
+	}
+	// "/" sozinho não ganha redirecionamento
+	plain := parse(t, build(t, []Site{simple("exemplo.com", "127.0.0.1:1", false, "")}))
+	assert.Len(t, subroutes(t, plain.routes("korego_https")[0]), 1)
+}
+
+// A rota "/" vai sem matcher (como na v0.4.0), para que OPTIONS * e
+// afins continuem chegando ao upstream.
+func TestBuildConfig_RootRouteNoMatcher(t *testing.T) {
+	for _, s := range []Site{simple("exemplo.com", "127.0.0.1:1", false, ""), multiSite()} {
+		cfg := parse(t, build(t, []Site{s}))
+		subs := subroutes(t, cfg.routes("korego_https")[0])
+		root := subs[len(subs)-1]
+		assert.Empty(t, root.Match, s.Host)
+		assert.Equal(t, "reverse_proxy", last(root)["handler"], s.Host)
+		for _, r := range subs[:len(subs)-1] {
+			assert.NotEmpty(t, r.Match, s.Host)
+		}
 	}
 }
 
@@ -220,84 +300,132 @@ func TestBuildConfig_AddressOptions(t *testing.T) {
 	}}
 	cfg := parse(t, build(t, []Site{s}))
 	subs := subroutes(t, cfg.routes("korego_https")[0])
-	require.Len(t, subs, 3)
-	handles := func(i int) []any { return subs[i].(map[string]any)["handle"].([]any) }
-	path := func(i int) any { return subs[i].(map[string]any)["match"].([]any)[0].(map[string]any)["path"] }
-	require.Equal(t, []any{"/upload/*"}, path(0))
-	require.Equal(t, []any{"/sse/*"}, path(1))
-	require.Equal(t, []any{"/*"}, path(2))
 
 	// /upload/: request_body antes do reverse_proxy
-	up := handles(0)
+	up := findSub(t, subs, "/upload/*").Handle
 	require.Len(t, up, 2)
-	assert.Equal(t, map[string]any{"handler": "request_body", "max_size": float64(1048576)}, up[0])
-	assert.Equal(t, "reverse_proxy", up[1].(map[string]any)["handler"])
-	assert.NotContains(t, up[1].(map[string]any), "flush_interval")
+	assert.Equal(t, handler{"handler": "request_body", "max_size": float64(1048576)}, up[0])
+	assert.Equal(t, "reverse_proxy", up[1]["handler"])
+	assert.NotContains(t, up[1], "flush_interval")
 
 	// /sse/: flush_interval -1, sem request_body
-	sse := handles(1)
+	sse := findSub(t, subs, "/sse/*").Handle
 	require.Len(t, sse, 1)
-	assert.Equal(t, "reverse_proxy", sse[0].(map[string]any)["handler"])
-	assert.Equal(t, float64(-1), sse[0].(map[string]any)["flush_interval"])
+	assert.Equal(t, "reverse_proxy", sse[0]["handler"])
+	assert.Equal(t, float64(-1), sse[0]["flush_interval"])
 
 	// "/": sem opções, só reverse_proxy com X-Real-IP
-	root := handles(2)
+	root := findSub(t, subs, "").Handle
 	require.Len(t, root, 1)
-	rp := root[0].(map[string]any)
-	assert.NotContains(t, rp, "flush_interval")
+	assert.NotContains(t, root[0], "flush_interval")
 	assert.Equal(t, map[string]any{"request": map[string]any{"set": map[string]any{
 		"X-Real-IP": []any{"{http.request.remote.host}"},
-	}}}, rp["headers"])
+	}}}, root[0]["headers"])
 }
 
 func TestBuildConfig_HeadersAndCompression(t *testing.T) {
 	cfg := parse(t, build(t, []Site{multiSite()}))
-	for _, server := range []string{"korego_https"} {
-		r := cfg.routes(server)[0]
-		require.Len(t, r.Handle, 3, server)
-		assert.Equal(t, handler{
-			"handler": "headers",
-			"response": map[string]any{
-				"set": map[string]any{
-					"Strict-Transport-Security": []any{"max-age=31536000"},
-					"X-Content-Type-Options":    []any{"nosniff"},
-					"Referrer-Policy":           []any{"strict-origin-when-cross-origin"},
-					"Permissions-Policy":        []any{"camera=(), microphone=(), geolocation=()"},
-				},
-				"delete":   []any{"Server"},
-				"deferred": true,
+	r := cfg.routes("korego_https")[0]
+	require.Len(t, r.Handle, 3)
+	assert.Equal(t, handler{
+		"handler": "headers",
+		"response": map[string]any{
+			"set": map[string]any{
+				"Strict-Transport-Security": []any{"max-age=31536000"},
+				"X-Content-Type-Options":    []any{"nosniff"},
+				"Referrer-Policy":           []any{"strict-origin-when-cross-origin"},
+				"Permissions-Policy":        []any{"camera=(), microphone=(), geolocation=()"},
 			},
-		}, r.Handle[0], server)
-		assert.Equal(t, handler{
-			"handler":   "encode",
-			"encodings": map[string]any{"zstd": map[string]any{}, "gzip": map[string]any{}},
-			"prefer":    []any{"zstd", "gzip"},
-		}, r.Handle[1], server)
-		assert.Equal(t, "subroute", r.Handle[2]["handler"], server)
-	}
+			"delete":   []any{"Server", "Via"},
+			"deferred": true,
+		},
+	}, r.Handle[0])
+	assert.Equal(t, handler{
+		"handler":   "encode",
+		"encodings": map[string]any{"zstd": map[string]any{}, "gzip": map[string]any{}},
+		"prefer":    []any{"zstd", "gzip"},
+	}, r.Handle[1])
+	assert.Equal(t, "subroute", r.Handle[2]["handler"])
 
-	// Sem cabeçalhos nem compressão: só o delete do Server e o subroute.
+	// Sem cabeçalhos nem compressão: só o strip e o subroute.
 	plain := parse(t, build(t, []Site{simple("exemplo.com", "127.0.0.1:1", false, "")}))
-	r := plain.routes("korego_https")[0]
+	r = plain.routes("korego_https")[0]
 	require.Len(t, r.Handle, 2)
-	assert.Equal(t, handler{"handler": "headers", "response": map[string]any{
-		"delete": []any{"Server"}, "deferred": true,
-	}}, r.Handle[0])
+	assert.Equal(t, strip, r.Handle[0])
 	assert.Equal(t, "subroute", r.Handle[1]["handler"])
 	// :80 sem ForceHTTPS serve o mesmo conteúdo
 	assert.Equal(t, r.Handle, plain.routes("korego_http")[0].Handle)
 }
 
-// Toda rota remove o Server, inclusive os redirecionamentos e o 404 final.
+// Valores de cabeçalho são literais: chaves viram \{ e \}, que o replacer
+// do Caddy devolve como { e } (caddy/replacer.go, phEscape). Sem isso,
+// {env.HOME} sairia expandido em toda resposta.
+func TestBuildConfig_HeaderValuesEscaped(t *testing.T) {
+	s := simple("exemplo.com", "127.0.0.1:1", false, "")
+	s.Headers = []Header{
+		{Name: "X-Teste", Value: "{env.HOME}"},
+		{Name: "Content-Security-Policy", Value: "default-src 'self'; script-src 'nonce-{x}' {http.request.host}"},
+		{Name: "X-Barra", Value: `a\{b}\`},
+	}
+	cfg := parse(t, build(t, []Site{s}))
+	set := cfg.routes("korego_https")[0].Handle[0]["response"].(map[string]any)["set"].(map[string]any)
+	assert.Equal(t, []any{`\{env.HOME\}`}, set["X-Teste"])
+	assert.Equal(t, []any{`default-src 'self'; script-src 'nonce-\{x\}' \{http.request.host\}`}, set["Content-Security-Policy"])
+	assert.Equal(t, []any{`a\\{b\}\`}, set["X-Barra"])
+	// os mesmos valores escapados nas rotas de erro
+	errSet := cfg.errorRoutes("korego_https")[0].Handle[0]["response"].(map[string]any)["set"]
+	assert.Equal(t, set, errSet)
+}
+
+// Erros gerados pelo Caddy (502 sem upstream, 413 do request_body) passam
+// pelas rotas de erro: por host, com os cabeçalhos do domínio; no fim, uma
+// rota sem matcher que só remove Server/Via.
+func TestBuildConfig_ErrorRoutes(t *testing.T) {
+	withHeaders := simple("exemplo.com", "127.0.0.1:1", false, "www_to_apex")
+	withHeaders.Headers = []Header{{Name: "X-Content-Type-Options", Value: "nosniff"}}
+	forced := simple("app.exemplo.com", "127.0.0.1:2", true, "")
+	forced.Headers = []Header{{Name: "X-Frame-Options", Value: "DENY"}}
+	bare := simple("api.exemplo.com", "127.0.0.1:3", false, "")
+	cfg := parse(t, build(t, []Site{withHeaders, forced, bare}))
+
+	errResp := handler{"handler": "static_response", "status_code": "{http.error.status_code}"}
+	hdr := func(name, value string) handler {
+		return handler{"handler": "headers", "response": map[string]any{
+			"set":    map[string]any{name: []any{value}},
+			"delete": []any{"Server", "Via"}, "deferred": true,
+		}}
+	}
+	final := parsedRoute{Handle: []handler{strip, errResp}, Terminal: true}
+
+	// :443: um por host com cabeçalhos, em ordem de host, e o final
+	assert.Equal(t, []parsedRoute{
+		{Match: []map[string][]string{{"host": {"app.exemplo.com"}}}, Handle: []handler{hdr("X-Frame-Options", "DENY"), errResp}, Terminal: true},
+		{Match: []map[string][]string{{"host": {"exemplo.com"}}}, Handle: []handler{hdr("X-Content-Type-Options", "nosniff"), errResp}, Terminal: true},
+		final,
+	}, cfg.errorRoutes("korego_https"))
+	// :80: app.exemplo.com só redireciona, então fica de fora
+	assert.Equal(t, []parsedRoute{
+		{Match: []map[string][]string{{"host": {"exemplo.com"}}}, Handle: []handler{hdr("X-Content-Type-Options", "nosniff"), errResp}, Terminal: true},
+		final,
+	}, cfg.errorRoutes("korego_http"))
+
+	// sem sites, só a rota final
+	empty := parse(t, build(t, nil))
+	for _, server := range []string{"korego_https", "korego_http"} {
+		assert.Equal(t, []parsedRoute{final}, empty.errorRoutes(server))
+	}
+}
+
+// Toda rota remove Server e Via, inclusive os redirecionamentos e o 404
+// final.
 func TestBuildConfig_ServerRemovedOnEveryHostRoute(t *testing.T) {
 	cfg := parse(t, build(t, threeSites()))
 	for _, server := range []string{"korego_https", "korego_http"} {
-		routes := cfg.routes(server)
-		for _, r := range routes {
+		for _, r := range append(cfg.routes(server), cfg.errorRoutes(server)...) {
 			h := r.Handle[0]
 			assert.Equal(t, "headers", h["handler"], server)
 			resp := h["response"].(map[string]any)
-			assert.Equal(t, []any{"Server"}, resp["delete"], server)
+			assert.Equal(t, []any{"Server", "Via"}, resp["delete"], server)
 			assert.Equal(t, true, resp["deferred"], server)
 		}
 	}

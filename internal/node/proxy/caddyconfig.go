@@ -51,8 +51,11 @@ package proxy
 //
 //   - Cada rota de host tem, nesta ordem: um handler "headers", um "encode"
 //     (só com Compression) e um "subroute" com as rotas de caminho. Cada rota
-//     de caminho casa com match.path "<prefixo>*" ("/" vira "/*"), é terminal
-//     e sai do prefixo mais longo para o mais curto, com "/" por último.
+//     de caminho casa com match.path "<prefixo>*", é terminal e sai do
+//     prefixo mais longo para o mais curto. Antes de cada prefixo "/x/" vai
+//     uma rota exata "/x" com 308 para "/x/{http.request.uri.prefixed_query}"
+//     (o nginx responde 301 nesse caso para "location /x/"). A rota "/" vai
+//     por último e sem matcher, como na v0.4.0 (pega também OPTIONS *).
 //     https://caddyserver.com/docs/json/apps/http/servers/routes/handle/subroute/
 //     https://caddyserver.com/docs/json/apps/http/servers/routes/match/path/
 //
@@ -72,8 +75,16 @@ package proxy
 //     https://github.com/caddyserver/caddy/blob/v2.11.0/modules/caddyhttp/reverseproxy/reverseproxy.go
 //     Os cabeçalhos do domínio vão no mesmo handler, em response.set, e por
 //     isso também são adiados: substituem o valor que o upstream mandar.
-//     Ressalva da doc do handler: mudanças adiadas não valem se um erro sobe
-//     pela cadeia (por exemplo, o 502 que o próprio Caddy gera).
+//     O delete inclui Via, que o reverse_proxy põe no lugar do Server
+//     ("1.1 Caddy"). Os valores de response.set saem escapados (ver
+//     literal), para que chaves não virem placeholders.
+//
+//   - Mudanças adiadas não valem quando um erro sobe pela cadeia (doc do
+//     handler headers): o 502 de upstream fora e o 413 do request_body. Por
+//     isso cada servidor tem errors.routes: uma rota por host com cabeçalhos
+//     próprios (strip + set do domínio) e uma final sem matcher (só strip),
+//     todas respondendo static_response com status "{http.error.status_code}".
+//     https://caddyserver.com/docs/json/apps/http/servers/errors/
 //
 //   - Compressão: handler "encode" com encodings zstd e gzip e prefer
 //     ["zstd", "gzip"] (o mesmo que "encode zstd gzip" no Caddyfile).
@@ -106,6 +117,10 @@ const (
 	notConfiguredBody = "Domínio não configurado no KoreGO."
 	// realIPValue é o X-Real-IP enviado ao upstream.
 	realIPValue = "{http.request.remote.host}"
+	// errorStatus é o status recomendado do erro, nas rotas de erro.
+	errorStatus = "{http.error.status_code}"
+	// keepQuery acrescenta "?query" quando há query string.
+	keepQuery = "{http.request.uri.prefixed_query}"
 )
 
 // Limites por domínio.
@@ -144,6 +159,11 @@ type caddyServer struct {
 	Listen         []string        `json:"listen"`
 	AutomaticHTTPS *caddyAutoHTTPS `json:"automatic_https,omitempty"`
 	Routes         []caddyRoute    `json:"routes"`
+	Errors         *caddyErrors    `json:"errors,omitempty"`
+}
+
+type caddyErrors struct {
+	Routes []caddyRoute `json:"routes"`
 }
 
 type caddyAutoHTTPS struct {
@@ -168,7 +188,7 @@ type caddyHandler struct {
 	Handler       string              `json:"handler"`
 	Upstreams     []caddyUpstream     `json:"upstreams,omitempty"`
 	FlushInterval *int                `json:"flush_interval,omitempty"`
-	StatusCode    int                 `json:"status_code,omitempty"`
+	StatusCode    any                 `json:"status_code,omitempty"` // int ou placeholder
 	Headers       any                 `json:"headers,omitempty"`
 	Body          string              `json:"body,omitempty"`
 	Response      *caddyRespHeaderOps `json:"response,omitempty"`
@@ -238,6 +258,7 @@ func BuildConfig(sites []Site, mode Listen, cf []string) ([]byte, error) {
 
 	httpsRoutes := make([]caddyRoute, 0, len(entries)+1)
 	httpRoutes := make([]caddyRoute, 0, len(entries)+1)
+	var httpsErrors, httpErrors []caddyRoute
 	subjects := make([]string, 0, len(entries))
 	for _, e := range entries {
 		subjects = append(subjects, e.host)
@@ -251,15 +272,24 @@ func BuildConfig(sites []Site, mode Listen, cf []string) ([]byte, error) {
 			continue
 		}
 		httpsRoutes = append(httpsRoutes, hostRoute(e.host, siteHandlers(e.site)...))
+		errRoute := len(e.site.Headers) > 0
+		if errRoute {
+			httpsErrors = append(httpsErrors, hostRoute(e.host, responseHeaders(e.site), errorResponse()))
+		}
 		if e.forceHTTPS {
 			httpRoutes = append(httpRoutes, hostRoute(e.host, stripServer(), redirect(forceHTTPSURL)))
 		} else {
 			httpRoutes = append(httpRoutes, hostRoute(e.host, siteHandlers(e.site)...))
+			if errRoute {
+				httpErrors = append(httpErrors, hostRoute(e.host, responseHeaders(e.site), errorResponse()))
+			}
 		}
 	}
 
 	httpsRoutes = append(httpsRoutes, catchAll())
 	httpRoutes = append(httpRoutes, catchAll())
+	httpsErrors = append(httpsErrors, errorCatchAll())
+	httpErrors = append(httpErrors, errorCatchAll())
 
 	cfg := caddyConfig{
 		Admin: caddyAdmin{Listen: AdminListen},
@@ -269,10 +299,12 @@ func BuildConfig(sites []Site, mode Listen, cf []string) ([]byte, error) {
 					Listen:         []string{":443"},
 					AutomaticHTTPS: &caddyAutoHTTPS{DisableRedirects: true},
 					Routes:         httpsRoutes,
+					Errors:         &caddyErrors{Routes: httpsErrors},
 				},
 				httpServerName: {
 					Listen: []string{":80"},
 					Routes: httpRoutes,
+					Errors: &caddyErrors{Routes: httpErrors},
 				},
 			}},
 		},
@@ -445,16 +477,12 @@ func hostRoute(host string, h ...caddyHandler) caddyRoute {
 }
 
 // siteHandlers são os handlers da rota de host que serve o site: headers,
-// encode (com Compression) e o subroute com as rotas de caminho.
+// encode (com Compression) e o subroute com as rotas de caminho. Cada
+// prefixo "/x/" ganha antes dele uma rota exata "/x" com 308 para "/x/"
+// (como o "location /x/" do nginx); a rota "/" vai por último e sem matcher,
+// como na v0.4.0, para pegar também OPTIONS * e afins.
 func siteHandlers(s *Site) []caddyHandler {
-	hdr := stripServer()
-	if len(s.Headers) > 0 {
-		hdr.Response.Set = make(map[string][]string, len(s.Headers))
-		for _, h := range s.Headers {
-			hdr.Response.Set[h.Name] = []string{h.Value}
-		}
-	}
-	out := []caddyHandler{hdr}
+	out := []caddyHandler{responseHeaders(s)}
 	if s.Compression {
 		out = append(out, caddyHandler{
 			Handler:   "encode",
@@ -462,15 +490,51 @@ func siteHandlers(s *Site) []caddyHandler {
 			Prefer:    []string{"zstd", "gzip"},
 		})
 	}
-	routes := make([]caddyRoute, 0, len(s.Routes))
+	routes := make([]caddyRoute, 0, 2*len(s.Routes))
 	for _, r := range s.Routes {
-		routes = append(routes, caddyRoute{
-			Match:    []caddyMatch{{Path: []string{r.Path + "*"}}},
-			Handle:   pathHandlers(r),
-			Terminal: true,
-		})
+		if r.Path == "/" {
+			routes = append(routes, caddyRoute{Handle: pathHandlers(r), Terminal: true})
+			continue
+		}
+		routes = append(routes,
+			caddyRoute{
+				Match:    []caddyMatch{{Path: []string{strings.TrimSuffix(r.Path, "/")}}},
+				Handle:   []caddyHandler{redirect(r.Path + keepQuery)},
+				Terminal: true,
+			},
+			caddyRoute{
+				Match:    []caddyMatch{{Path: []string{r.Path + "*"}}},
+				Handle:   pathHandlers(r),
+				Terminal: true,
+			})
 	}
 	return append(out, caddyHandler{Handler: "subroute", Routes: routes})
+}
+
+// responseHeaders remove Server e Via e aplica os cabeçalhos do domínio, com
+// os valores escapados (ver literal).
+func responseHeaders(s *Site) caddyHandler {
+	hdr := stripServer()
+	if len(s.Headers) > 0 {
+		hdr.Response.Set = make(map[string][]string, len(s.Headers))
+		for _, h := range s.Headers {
+			hdr.Response.Set[h.Name] = []string{literal(h.Value)}
+		}
+	}
+	return hdr
+}
+
+// literal escapa as chaves de v para que o Caddy não as leia como
+// placeholder: o replacer trata \{ e \} como { e } literais (caddy
+// replacer.go, phEscape; o handler headers passa os valores por
+// repl.ReplaceKnown). Sem isso, um valor "{env.SEGREDO}" sairia expandido
+// em toda resposta. Uma barra antes de chave também sai certa: `a\{` vira
+// `a\\{`, que o replacer devolve como `a\{` (ele só consome a barra
+// imediatamente antes da chave).
+// https://github.com/caddyserver/caddy/blob/v2.11.0/replacer.go
+// https://caddyserver.com/docs/conventions#placeholders
+func literal(v string) string {
+	return strings.NewReplacer("{", `\{`, "}", `\}`).Replace(v)
 }
 
 // pathHandlers são os handlers de uma rota de caminho com upstream:
@@ -494,11 +558,24 @@ func pathHandlers(r SiteRoute) []caddyHandler {
 	return append(out, rp)
 }
 
-// stripServer remove o Server da resposta (adiado; ver o comentário do topo).
+// stripServer remove Server e Via da resposta (adiado; ver o comentário do
+// topo). O Via ("1.1 Caddy") é o que o reverse_proxy põe no lugar do Server.
 func stripServer() caddyHandler {
 	return caddyHandler{Handler: "headers", Response: &caddyRespHeaderOps{
-		Delete: []string{"Server"}, Deferred: true,
+		Delete: []string{"Server", "Via"}, Deferred: true,
 	}}
+}
+
+// errorResponse responde o status recomendado do erro, sem corpo (como o
+// Caddy faz sem rotas de erro).
+func errorResponse() caddyHandler {
+	return caddyHandler{Handler: "static_response", StatusCode: errorStatus}
+}
+
+// errorCatchAll é a rota de erro final, sem matcher: hosts sem cabeçalhos
+// próprios (ou não cadastrados) só perdem Server e Via.
+func errorCatchAll() caddyRoute {
+	return caddyRoute{Handle: []caddyHandler{stripServer(), errorResponse()}, Terminal: true}
 }
 
 // catchAll é a rota final, sem matcher: 404 para hosts não cadastrados,

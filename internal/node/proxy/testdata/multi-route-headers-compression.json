@@ -17,7 +17,8 @@
                   "response": {
                     "deferred": true,
                     "delete": [
-                      "Server"
+                      "Server",
+                      "Via"
                     ]
                   }
                 },
@@ -46,7 +47,8 @@
                   "handler": "headers",
                   "response": {
                     "delete": [
-                      "Server"
+                      "Server",
+                      "Via"
                     ],
                     "deferred": true
                   }
@@ -59,7 +61,30 @@
               ],
               "terminal": true
             }
-          ]
+          ],
+          "errors": {
+            "routes": [
+              {
+                "handle": [
+                  {
+                    "handler": "headers",
+                    "response": {
+                      "delete": [
+                        "Server",
+                        "Via"
+                      ],
+                      "deferred": true
+                    }
+                  },
+                  {
+                    "handler": "static_response",
+                    "status_code": "{http.error.status_code}"
+                  }
+                ],
+                "terminal": true
+              }
+            ]
+          }
         },
         "korego_https": {
           "automatic_https": {
@@ -76,7 +101,8 @@
                   "response": {
                     "deferred": true,
                     "delete": [
-                      "Server"
+                      "Server",
+                      "Via"
                     ],
                     "set": {
                       "Permissions-Policy": [
@@ -109,6 +135,27 @@
                   "handler": "subroute",
                   "routes": [
                     {
+                      "match": [
+                        {
+                          "path": [
+                            "/api/v2"
+                          ]
+                        }
+                      ],
+                      "handle": [
+                        {
+                          "handler": "static_response",
+                          "status_code": 308,
+                          "headers": {
+                            "Location": [
+                              "/api/v2/{http.request.uri.prefixed_query}"
+                            ]
+                          }
+                        }
+                      ],
+                      "terminal": true
+                    },
+                    {
                       "handle": [
                         {
                           "flush_interval": -1,
@@ -134,6 +181,27 @@
                           "path": [
                             "/api/v2/*"
                           ]
+                        }
+                      ],
+                      "terminal": true
+                    },
+                    {
+                      "match": [
+                        {
+                          "path": [
+                            "/api"
+                          ]
+                        }
+                      ],
+                      "handle": [
+                        {
+                          "handler": "static_response",
+                          "status_code": 308,
+                          "headers": {
+                            "Location": [
+                              "/api/{http.request.uri.prefixed_query}"
+                            ]
+                          }
                         }
                       ],
                       "terminal": true
@@ -191,13 +259,6 @@
                           ]
                         }
                       ],
-                      "match": [
-                        {
-                          "path": [
-                            "/*"
-                          ]
-                        }
-                      ],
                       "terminal": true
                     }
                   ]
@@ -218,7 +279,8 @@
                   "handler": "headers",
                   "response": {
                     "delete": [
-                      "Server"
+                      "Server",
+                      "Via"
                     ],
                     "deferred": true
                   }
@@ -231,7 +293,70 @@
               ],
               "terminal": true
             }
-          ]
+          ],
+          "errors": {
+            "routes": [
+              {
+                "match": [
+                  {
+                    "host": [
+                      "loja.exemplo.net"
+                    ]
+                  }
+                ],
+                "handle": [
+                  {
+                    "handler": "headers",
+                    "response": {
+                      "deferred": true,
+                      "delete": [
+                        "Server",
+                        "Via"
+                      ],
+                      "set": {
+                        "Permissions-Policy": [
+                          "camera=(), microphone=(), geolocation=()"
+                        ],
+                        "Referrer-Policy": [
+                          "strict-origin-when-cross-origin"
+                        ],
+                        "Strict-Transport-Security": [
+                          "max-age=31536000"
+                        ],
+                        "X-Content-Type-Options": [
+                          "nosniff"
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "handler": "static_response",
+                    "status_code": "{http.error.status_code}"
+                  }
+                ],
+                "terminal": true
+              },
+              {
+                "handle": [
+                  {
+                    "handler": "headers",
+                    "response": {
+                      "delete": [
+                        "Server",
+                        "Via"
+                      ],
+                      "deferred": true
+                    }
+                  },
+                  {
+                    "handler": "static_response",
+                    "status_code": "{http.error.status_code}"
+                  }
+                ],
+                "terminal": true
+              }
+            ]
+          }
         }
       }
     },
