@@ -12,6 +12,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/domains"
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/github"
+	"github.com/engviniciusbs/korego/internal/migrate"
 	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/secrets"
@@ -41,6 +42,9 @@ type Deps struct {
 	Usage LatestUsage
 	// Domains atende /api/proxy, /api/domains e /api/settings/panel (nil as desativa).
 	Domains *domains.Service
+	// Migrate atende /api/proxy/trial-check, /takeover e /rollback (nil as
+	// desativa; exige Domains).
+	Migrate *migrate.Engine
 	// Certs atende /api/certificates (nil a desativa).
 	Certs *certs.Service
 	// Deploys executa e consulta os deploys das aplicações.
@@ -134,11 +138,17 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/containers/{id}/logs/download", containersH.download)
 			r.Get("/ws", wsH.serve)
 			if d.Domains != nil {
-				proxyH := proxyHandlers{dom: d.Domains}
+				proxyH := proxyHandlers{dom: d.Domains, mig: d.Migrate}
 				domainsH := domainHandlers{svc: d.Auth, dom: d.Domains}
 				settingsH := settingsHandlers{svc: d.Auth, dom: d.Domains}
 				r.Get("/proxy", proxyH.status)
 				r.Post("/proxy/retry", proxyH.retry)
+				if d.Migrate != nil {
+					migH := migrationHandlers{svc: d.Auth, mig: d.Migrate}
+					r.Get("/proxy/trial-check", migH.trialCheck)
+					r.Post("/proxy/takeover", migH.takeover)
+					r.Post("/proxy/rollback", migH.rollback)
+				}
 				r.Get("/domains", domainsH.list)
 				r.Post("/domains", domainsH.create)
 				r.Put("/domains/{id}", domainsH.update)

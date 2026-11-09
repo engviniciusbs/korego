@@ -27,6 +27,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/github"
 	"github.com/engviniciusbs/korego/internal/jobs"
+	"github.com/engviniciusbs/korego/internal/migrate"
 	"github.com/engviniciusbs/korego/internal/monitor"
 	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/node/proxy"
@@ -179,6 +180,11 @@ func runServe(args []string) error {
 		Certs:          certSvc, Ranges: cfRanges,
 	}
 
+	// Troca nginx/apache2 → Caddy e volta (systemctl só no Linux).
+	migEngine := &migrate.Engine{
+		Domains: domSvc, Proxy: nd.Proxy(), Systemd: migrate.Systemd{}, DB: db, Hub: hub,
+	}
+
 	queue := jobs.NewQueue(cfg.MaxBuilds)
 	// Declarado depois do defer db.Close, roda antes dele: cancela os deploys
 	// em andamento e espera terminarem. Os que esperavam ficam queued e voltam
@@ -200,7 +206,7 @@ func runServe(args []string) error {
 	handler := api.NewRouter(api.Deps{
 		Auth: svc, Node: nd, Hub: hub, Web: web, Metrics: collector, Usage: usageCollector, DB: db,
 		Updater: &update.System{ExePath: exe, ConfigPath: *cfgPath},
-		Domains: domSvc, Certs: certSvc, Deploys: deploySvc, DataDir: cfg.DataDir, Runner: deploy.ExecRunner{}, Box: box,
+		Domains: domSvc, Migrate: migEngine, Certs: certSvc, Deploys: deploySvc, DataDir: cfg.DataDir, Runner: deploy.ExecRunner{}, Box: box,
 		GitHub:          ghSvc,
 		GitHubConnected: ghSvc.Ready,
 	})

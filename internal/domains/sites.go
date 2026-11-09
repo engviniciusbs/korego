@@ -75,7 +75,9 @@ func siteOf(d store.Domain, appUpstream func(appID int64) string) (proxy.Site, e
 	return site, nil
 }
 
-// cfRanges devolve as faixas da Cloudflare atuais (nil sem Ranges).
+// CFRanges devolve as faixas da Cloudflare atuais (nil sem Ranges).
+func (s *Service) CFRanges() []string { return s.cfRanges() }
+
 func (s *Service) cfRanges() []string {
 	if s.Ranges == nil {
 		return nil

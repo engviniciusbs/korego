@@ -360,6 +360,36 @@ func (c *Caddy) Apply(ctx context.Context, sites []Site, mode Listen, cf []strin
 	return c.admin.Load(ctx, cfg)
 }
 
+// Switch carrega a config no modo pedido sem os guardas de Apply e, com a
+// carga aceita, passa o último estado para o do modo: normal → active/normal,
+// trial → trial. Só o motor de migração (internal/migrate) usa, com a
+// reconciliação e os deploys parados. Carga recusada (porta ocupada, por
+// exemplo) mantém a config e o estado anteriores: o Caddy recusa a carga
+// inteira. ErrInactive se o último Ensure não terminou em active ou trial.
+func (c *Caddy) Switch(ctx context.Context, sites []Site, mode Listen, cf []string) error {
+	c.mu.Lock()
+	state := c.last.State
+	c.mu.Unlock()
+	if state != StateActive && state != StateTrial {
+		return ErrInactive
+	}
+	cfg, err := BuildConfig(sites, mode, cf)
+	if err != nil {
+		return err
+	}
+	if err := c.admin.Load(ctx, cfg); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if mode == ListenTrial {
+		c.last = Status{State: StateTrial, Mode: ListenTrial, Message: "Proxy em modo ensaio"}
+	} else {
+		c.last = Status{State: StateActive, Mode: ListenNormal}
+	}
+	return nil
+}
+
 // InSync compara a configuração atual do Caddy com BuildConfig(sites, mode, cf). Um
 // Caddy recém-reiniciado (config "null") nunca está em sincronia.
 func (c *Caddy) InSync(ctx context.Context, sites []Site, mode Listen, cf []string) (bool, error) {

@@ -11,19 +11,21 @@ import (
 
 // Fake implementa proxy.Proxy delegando às funções informadas. Sem função:
 // Ensure devolve active, Apply aceita, InSync devolve true e Cert devolve
-// pending. Os sites, o modo e as faixas cf da última Apply bem-sucedida ficam
+// pending; Switch aceita. Os sites, o modo e as faixas cf da última Apply bem-sucedida ficam
 // em LastApplied, LastMode e LastCF.
 type Fake struct {
 	EnsureFn func(ctx context.Context) proxy.Status
 	ApplyFn  func(ctx context.Context, sites []proxy.Site, mode proxy.Listen, cf []string) error
 	InSyncFn func(ctx context.Context, sites []proxy.Site, mode proxy.Listen, cf []string) (bool, error)
 	CertFn   func(ctx context.Context, host string) proxy.CertInfo
+	SwitchFn func(ctx context.Context, sites []proxy.Site, mode proxy.Listen, cf []string) error
 
-	mu      sync.Mutex
-	applied []proxy.Site
-	mode    proxy.Listen
-	cf      []string
-	applies int
+	mu       sync.Mutex
+	applied  []proxy.Site
+	mode     proxy.Listen
+	cf       []string
+	applies  int
+	switches int
 }
 
 var _ proxy.Proxy = (*Fake)(nil)
@@ -50,6 +52,30 @@ func (f *Fake) Apply(ctx context.Context, sites []proxy.Site, mode proxy.Listen,
 	f.cf = slices.Clone(cf)
 	f.applies++
 	return nil
+}
+
+// Switch chama SwitchFn e, sem erro, grava os sites, o modo e as faixas cf
+// como Apply (conta em Switches, não em Applies).
+func (f *Fake) Switch(ctx context.Context, sites []proxy.Site, mode proxy.Listen, cf []string) error {
+	if f.SwitchFn != nil {
+		if err := f.SwitchFn(ctx, sites, mode, cf); err != nil {
+			return err
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.applied = slices.Clone(sites)
+	f.mode = mode
+	f.cf = slices.Clone(cf)
+	f.switches++
+	return nil
+}
+
+// Switches conta as chamadas bem-sucedidas de Switch.
+func (f *Fake) Switches() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.switches
 }
 
 // InSync chama InSyncFn.

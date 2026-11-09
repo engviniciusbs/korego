@@ -124,6 +124,9 @@ type Proxy interface {
 	// InSync diz se a config atual do Caddy é igual a
 	// BuildConfig(sites, mode, cf).
 	InSync(ctx context.Context, sites []Site, mode Listen, cf []string) (bool, error)
+	// Switch carrega a config no modo pedido ignorando os guardas de Apply e
+	// alinha o último estado ao modo. Uso exclusivo do motor de migração.
+	Switch(ctx context.Context, sites []Site, mode Listen, cf []string) error
 	// Cert consulta o certificado servido em :443 para host.
 	Cert(ctx context.Context, host string) CertInfo
 }

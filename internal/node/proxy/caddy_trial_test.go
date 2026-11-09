@@ -337,3 +337,44 @@ func newCaddy(d *dockertest.Fake, a *AdminClient) *Caddy {
 	}
 	return NewCaddy(d, a)
 }
+
+func TestSwitch_BypassesGuardAndFlipsState(t *testing.T) {
+	fa, admin := newFakeAdmin(t)
+	c := newCaddy(&dockertest.Fake{ListFn: runningOwn(specLabels)}, admin)
+	c.PortOwner = nginxOn80
+	require.Equal(t, StateTrial, c.Ensure(context.Background()).State)
+	sites := []Site{simple("exemplo.com", "127.0.0.1:20001", false, "")}
+
+	// Em ensaio, Switch(normal) carrega a config normal e passa a active/normal.
+	require.NoError(t, c.Switch(context.Background(), sites, ListenNormal, nil))
+	assert.Equal(t, 1, fa.loads)
+	assert.True(t, listensOn443([]byte(fa.config)))
+	// O guarda agora vale para o novo estado: ensaio recusado, normal aceito.
+	assert.ErrorIs(t, c.Apply(context.Background(), sites, ListenTrial, nil), ErrTrialMode)
+	require.NoError(t, c.Apply(context.Background(), sites, ListenNormal, nil))
+
+	// Switch(trial) volta ao ensaio.
+	require.NoError(t, c.Switch(context.Background(), sites, ListenTrial, nil))
+	assert.False(t, listensOn443([]byte(fa.config)))
+	assert.ErrorIs(t, c.Apply(context.Background(), sites, ListenNormal, nil), ErrTrialMode)
+	require.NoError(t, c.Apply(context.Background(), sites, ListenTrial, nil))
+}
+
+func TestSwitch_LoadErrorKeepsState(t *testing.T) {
+	c := newCaddy(&dockertest.Fake{ListFn: runningOwn(specLabels)}, downAdmin(t))
+	c.mu.Lock()
+	c.last = Status{State: StateTrial, Mode: ListenTrial}
+	c.mu.Unlock()
+	sites := []Site{simple("exemplo.com", "127.0.0.1:20001", false, "")}
+	require.Error(t, c.Switch(context.Background(), sites, ListenNormal, nil))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	assert.Equal(t, StateTrial, c.last.State)
+}
+
+func TestSwitch_RefusedWhenNotRunning(t *testing.T) {
+	fa, admin := newFakeAdmin(t)
+	c := newCaddy(&dockertest.Fake{ListFn: runningOwn(specLabels)}, admin)
+	assert.ErrorIs(t, c.Switch(context.Background(), nil, ListenNormal, nil), ErrInactive)
+	assert.Zero(t, fa.loads)
+}

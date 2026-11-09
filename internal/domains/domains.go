@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/engviniciusbs/korego/internal/certs"
@@ -100,11 +101,15 @@ type Service struct {
 	// Ranges devolve as faixas da Cloudflare passadas ao proxy (nil = nenhuma).
 	Ranges interface{ Get() []string }
 
-	panelMu   sync.Mutex // serializa as alterações do painel
-	applyMu   sync.Mutex // serializa Sites+Apply
-	statusMu  sync.Mutex
-	status    proxy.Status
-	hasStatus bool
+	panelMu sync.Mutex // serializa as alterações do painel
+	applyMu sync.Mutex // serializa Sites+Apply; preso durante a migração (Pause)
+	// reconcileMu cobre uma volta inteira de Reconcile; Pause o toma para
+	// esperar a volta em andamento e marcar paused.
+	reconcileMu sync.Mutex
+	paused      atomic.Bool // migração em andamento: Reconcile não faz nada
+	statusMu    sync.Mutex
+	status      proxy.Status
+	hasStatus   bool
 	// blockedLogged evita repetir o log de ReapplyApp com o proxy bloqueado;
 	// volta a false quando o status sai de blocked.
 	blockedLogged bool
