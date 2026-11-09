@@ -167,13 +167,17 @@ func runServe(args []string) error {
 	}
 	defer listener.Close()
 
+	certSvc := &certs.Service{DB: db, Box: box}
+	// Faixas da Cloudflare: lista gravada (ou embutida) já na subida; Run
+	// atualiza a cada 24 h, mais abaixo.
+	cfRanges := cloudflare.New(db, nil)
+
 	domSvc := &domains.Service{
 		DB: db, Proxy: nd.Proxy(), Hub: hub, PublicIP: cfg.PublicIP,
 		PanelPort: panelPort, ListenAddr: cfg.ListenAddr,
 		OnListenChange: listener.Switch,
+		Certs:          certSvc, Ranges: cfRanges,
 	}
-
-	certSvc := &certs.Service{DB: db, Box: box}
 
 	queue := jobs.NewQueue(cfg.MaxBuilds)
 	// Declarado depois do defer db.Close, roda antes dele: cancela os deploys
@@ -229,7 +233,6 @@ func runServe(args []string) error {
 	}()
 
 	// Faixas da Cloudflare: atualiza na subida e a cada 24 h.
-	cfRanges := cloudflare.New(db, nil)
 	cfDone := make(chan struct{})
 	go func() {
 		defer close(cfDone)

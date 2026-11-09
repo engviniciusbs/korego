@@ -42,7 +42,7 @@ func TestRun_ReappliesWhenOutOfSync(t *testing.T) {
 	stop()
 
 	assert.Equal(t, before+1, fake.Applies())
-	want, err := s.Routes(ctx)
+	want, err := s.Sites(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, want, fake.LastApplied())
 }
@@ -192,4 +192,33 @@ func TestReapply_StaleTrialStatusEndsApplyingNormal(t *testing.T) {
 	}
 	assert.ErrorIs(t, s.Reapply(ctx), proxy.ErrTrialMode)
 	assert.Equal(t, 2, calls)
+}
+
+func TestReconcile_TrialAppliesTrialMode(t *testing.T) {
+	ctx := context.Background()
+	s, fake := newTestService(t)
+	s.Ranges = fixedRanges{"203.0.113.0/24"}
+	_, _, err := s.Create(ctx, addrInput("exemplo.com"))
+	require.NoError(t, err)
+	trialOnly(fake)
+	var syncMode proxy.Listen
+	var syncCF []string
+	fake.InSyncFn = func(_ context.Context, _ []proxy.Site, mode proxy.Listen, cf []string) (bool, error) {
+		syncMode, syncCF = mode, cf
+		return false, nil
+	}
+	before := fake.Applies()
+
+	st := s.Reconcile(ctx)
+	assert.Equal(t, proxy.StateTrial, st.State)
+	assert.Equal(t, proxy.ListenTrial, syncMode)
+	assert.Equal(t, []string{"203.0.113.0/24"}, syncCF)
+	assert.Equal(t, before+1, fake.Applies())
+	assert.Equal(t, proxy.ListenTrial, fake.LastMode())
+	assert.Equal(t, []string{"203.0.113.0/24"}, fake.LastCF())
+	require.Len(t, fake.LastApplied(), 1)
+
+	// Reapply também passa as faixas.
+	require.NoError(t, s.Reapply(ctx))
+	assert.Equal(t, []string{"203.0.113.0/24"}, fake.LastCF())
 }

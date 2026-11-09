@@ -54,7 +54,7 @@ func TestCreate_AppliesRoutes(t *testing.T) {
 	assert.Equal(t, "none", d.WWWRedirect) // vazio vira none
 	assert.Empty(t, d.Address)             // endereço não se aplica a app
 	assert.Equal(t, []proxy.Site{{Host: "app.exemplo.com",
-		ForceHTTPS: true, WWWRedirect: proxy.WWWNone, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:20001"}}}}, fake.LastApplied())
+		ForceHTTPS: true, WWWRedirect: proxy.WWWNone, TLS: autoTLS, Compression: true, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:20001"}}}}, fake.LastApplied())
 }
 
 func invalidField(t *testing.T, err error) string {

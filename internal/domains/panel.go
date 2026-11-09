@@ -89,9 +89,11 @@ func (s *Service) Panel(ctx context.Context) (PanelSettings, error) {
 }
 
 // SetPanelDomain define o domínio do painel (vazio remove) e recarrega o
-// proxy. Há no máximo uma linha is_panel: trocar o host atualiza a mesma.
-// Proxy inativo não é erro. Com a porta pública desligada, só é permitido
-// regravar o mesmo host (outro host ou vazio → ErrPanelPortOff).
+// proxy. Há no máximo uma linha is_panel: trocar o host atualiza a mesma e
+// mantém as opções (certificado, só Cloudflare, cabeçalhos, compressão); com
+// certificado próprio, ele precisa cobrir o novo host. Proxy inativo não é
+// erro. Com a porta pública desligada, só é permitido regravar o mesmo host
+// (outro host ou vazio → ErrPanelPortOff).
 func (s *Service) SetPanelDomain(ctx context.Context, host string) error {
 	s.panelMu.Lock()
 	defer s.panelMu.Unlock()
@@ -124,16 +126,20 @@ func (s *Service) SetPanelDomain(ctx context.Context, host string) error {
 	if err := s.CheckCollision(ctx, host, WWWNone, cur.ID); err != nil {
 		return err
 	}
-	d := store.Domain{
-		ID:          cur.ID,
-		Hostname:    host,
-		TargetType:  TargetAddress,
-		Address:     net.JoinHostPort("127.0.0.1", strconv.Itoa(s.PanelPort)),
-		WWWRedirect: WWWNone,
-		ForceHTTPS:  true,
-		IsPanel:     true,
-		CreatedAt:   cur.CreatedAt,
+	// Nova linha: certificado automático e compressão ligada (padrão dos
+	// domínios novos). Linha existente: mantém as opções.
+	d := store.Domain{TLSMode: proxy.TLSAuto, Compression: true, Headers: []store.Header{}}
+	if exists {
+		d = cur
+		if d.TLSMode == proxy.TLSCustom {
+			if _, _, _, err := s.validTLS(ctx, TLSInput{Mode: proxy.TLSCustom, CertID: d.CertID}, []string{host}); err != nil {
+				return err
+			}
+		}
 	}
+	d.Hostname, d.WWWRedirect, d.ForceHTTPS, d.IsPanel = host, WWWNone, true, true
+	d.Routes = s.panelRoutes()
+	d.TargetType, d.AppID, d.Address = TargetAddress, nil, net.JoinHostPort("127.0.0.1", strconv.Itoa(s.PanelPort))
 	if exists {
 		err = s.DB.UpdateDomain(ctx, &d)
 	} else {
@@ -143,6 +149,53 @@ func (s *Service) SetPanelDomain(ctx context.Context, host string) error {
 		return err
 	}
 	return s.reapplyPanel(ctx)
+}
+
+// updatePanel altera as opções do domínio do painel (PUT /api/domains/{id}):
+// certificado, só Cloudflare, cabeçalhos e compressão. A rota é fixa (rotas
+// no corpo → INVALID_ROUTE), o hostname só muda pelas configurações do painel
+// (outro hostname → ErrPanelDomain) e os demais campos do corpo são
+// ignorados. Com a porta pública desligada → ErrPanelPortOff: o domínio é o
+// único acesso ao painel.
+func (s *Service) updatePanel(ctx context.Context, id int64, in DomainInput) (store.Domain, error) {
+	s.panelMu.Lock()
+	defer s.panelMu.Unlock()
+
+	cur, err := s.DB.GetDomain(ctx, id)
+	if err != nil {
+		return store.Domain{}, err
+	}
+	if in.Routes != nil {
+		return store.Domain{}, invalidCode(CodeInvalidRoute, "routes", "As rotas do domínio do painel são fixas.")
+	}
+	if h := strings.TrimSpace(in.Hostname); h != "" && h != cur.Hostname {
+		return store.Domain{}, ErrPanelDomain
+	}
+	public, err := PublicPort(ctx, s.DB)
+	if err != nil {
+		return store.Domain{}, err
+	}
+	if !public {
+		return store.Domain{}, ErrPanelPortOff
+	}
+	d := cur
+	d.Routes = s.panelRoutes()
+	d.TargetType, d.AppID, d.Address = rootTarget(d.Routes)
+	pemText, err := s.applyOptions(ctx, &d, in)
+	if err != nil {
+		return store.Domain{}, err
+	}
+	if in.Compression != nil {
+		d.Compression = *in.Compression
+	}
+	if err := s.buildCheck(d, pemText); err != nil {
+		return store.Domain{}, err
+	}
+	if err := s.DB.UpdateDomain(ctx, &d); err != nil {
+		return store.Domain{}, err
+	}
+	s.reapplyAfterSave(ctx)
+	return d, nil
 }
 
 func (s *Service) reapplyPanel(ctx context.Context) error {

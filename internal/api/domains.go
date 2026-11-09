@@ -20,28 +20,61 @@ type domainHandlers struct {
 	dom *domains.Service
 }
 
-// domainDTO é o domínio na API, em camelCase.
+// domainDTO é o domínio na API, em camelCase. TargetType, AppID, AppSlug e
+// Address espelham a rota "/" (formato antigo, ainda usado pela interface).
 type domainDTO struct {
-	ID          int64          `json:"id"`
-	Hostname    string         `json:"hostname"`
-	TargetType  string         `json:"targetType"`
-	AppID       *int64         `json:"appId"`
-	AppSlug     string         `json:"appSlug"`
-	Address     string         `json:"address"`
-	WWWRedirect string         `json:"wwwRedirect"`
-	ForceHTTPS  bool           `json:"forceHttps"`
-	IsPanel     bool           `json:"isPanel"`
-	Cert        proxy.CertInfo `json:"cert"`
-	CreatedAt   time.Time      `json:"createdAt"`
-	UpdatedAt   time.Time      `json:"updatedAt"`
+	ID             int64           `json:"id"`
+	Hostname       string          `json:"hostname"`
+	TargetType     string          `json:"targetType"`
+	AppID          *int64          `json:"appId"`
+	AppSlug        string          `json:"appSlug"`
+	Address        string          `json:"address"`
+	WWWRedirect    string          `json:"wwwRedirect"`
+	ForceHTTPS     bool            `json:"forceHttps"`
+	IsPanel        bool            `json:"isPanel"`
+	Routes         []routeDTO      `json:"routes"`
+	TLS            domains.TLSView `json:"tls"`
+	CloudflareOnly bool            `json:"cloudflareOnly"`
+	Headers        []store.Header  `json:"headers"`
+	Compression    bool            `json:"compression"`
+	Cert           proxy.CertInfo  `json:"cert"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
 }
 
-func toDomainDTO(d store.Domain, cert proxy.CertInfo, slug string) domainDTO {
-	return domainDTO{
-		ID: d.ID, Hostname: d.Hostname, TargetType: d.TargetType, AppID: d.AppID, AppSlug: slug,
+// routeDTO é uma rota do domínio na API.
+type routeDTO struct {
+	Path            string `json:"path"`
+	TargetType      string `json:"targetType"`
+	AppID           *int64 `json:"appId,omitempty"`
+	Address         string `json:"address,omitempty"`
+	MaxBodyBytes    int64  `json:"maxBodyBytes"`
+	NoBuffering     bool   `json:"noBuffering"`
+	Root            string `json:"root,omitempty"`
+	SPA             bool   `json:"spa"`
+	ImmutablePrefix string `json:"immutablePrefix,omitempty"`
+}
+
+func toDomainDTO(v domains.DomainView) domainDTO {
+	d := v.Domain
+	out := domainDTO{
+		ID: d.ID, Hostname: d.Hostname, TargetType: d.TargetType, AppID: d.AppID, AppSlug: v.AppSlug,
 		Address: d.Address, WWWRedirect: d.WWWRedirect, ForceHTTPS: d.ForceHTTPS, IsPanel: d.IsPanel,
-		Cert: cert, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
+		Routes: make([]routeDTO, len(d.Routes)), TLS: v.TLS, CloudflareOnly: d.CloudflareOnly,
+		Headers: d.Headers, Compression: d.Compression,
+		Cert: v.Cert, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
 	}
+	for i, r := range d.Routes {
+		out.Routes[i] = routeDTO{
+			Path: r.Path, TargetType: r.TargetType, AppID: r.AppID, Address: r.Address,
+			MaxBodyBytes: r.MaxBodyBytes, NoBuffering: r.NoBuffering, Root: r.Root, SPA: r.SPA,
+			ImmutablePrefix: r.ImmutablePrefix,
+		}
+	}
+	if out.Headers == nil {
+		out.Headers = []store.Header{}
+	}
+	return out
 }
 
 // dnsDTO é o resultado da verificação de DNS na API.
@@ -68,7 +101,11 @@ func domainError(w http.ResponseWriter, err error) {
 	var inv *domains.ErrInvalid
 	switch {
 	case errors.As(err, &inv):
-		writeFieldError(w, http.StatusBadRequest, "INVALID_DOMAIN", inv.Message, inv.Field)
+		code := inv.Code
+		if code == "" {
+			code = domains.CodeInvalidDomain
+		}
+		writeFieldError(w, http.StatusBadRequest, code, inv.Message, inv.Field)
 	case errors.Is(err, store.ErrConflict):
 		WriteError(w, http.StatusConflict, "DOMAIN_EXISTS", "Este domínio já está cadastrado.")
 	case errors.Is(err, domains.ErrNotFound):
@@ -118,14 +155,12 @@ func record(svc *auth.Service, r *http.Request, action, target string, meta map[
 	})
 }
 
-func (h domainHandlers) view(ctx context.Context, d store.Domain) domainDTO {
-	slug := ""
-	if d.AppID != nil {
-		if a, err := h.dom.DB.GetApp(ctx, *d.AppID); err == nil {
-			slug = a.Slug
-		}
+func (h domainHandlers) view(ctx context.Context, d store.Domain) (domainDTO, error) {
+	v, err := h.dom.View(ctx, d)
+	if err != nil {
+		return domainDTO{}, err
 	}
-	return toDomainDTO(d, h.dom.Proxy.Cert(ctx, d.Hostname), slug)
+	return toDomainDTO(v), nil
 }
 
 // list serves GET /api/domains.
@@ -137,7 +172,7 @@ func (h domainHandlers) list(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]domainDTO, len(list))
 	for i, v := range list {
-		out[i] = toDomainDTO(v.Domain, v.Cert, v.AppSlug)
+		out[i] = toDomainDTO(v)
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"domains": out})
 }
@@ -152,12 +187,25 @@ func (h domainHandlers) save(w http.ResponseWriter, r *http.Request, action stri
 	defer cancel()
 	d, check, err := call(ctx, in)
 	if err != nil {
-		record(h.svc, r, action, in.Hostname, map[string]any{"ok": false})
+		// Recusa: rotas e modo de TLS pedidos. Nunca o PEM.
+		routes, tls := len(in.Routes), in.TLS.Mode
+		if routes == 0 {
+			routes = 1
+		}
+		if tls == "" {
+			tls = proxy.TLSAuto
+		}
+		record(h.svc, r, action, in.Hostname, map[string]any{"ok": false, "routes": routes, "tls": tls})
 		domainError(w, err)
 		return
 	}
-	record(h.svc, r, action, d.Hostname, map[string]any{"ok": true})
-	WriteJSON(w, status, map[string]any{"domain": h.view(ctx, d), "dns": toDNSDTO(check)})
+	record(h.svc, r, action, d.Hostname, map[string]any{"ok": true, "routes": len(d.Routes), "tls": d.TLSMode})
+	view, err := h.view(ctx, d)
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	WriteJSON(w, status, map[string]any{"domain": view, "dns": toDNSDTO(check)})
 }
 
 // create serves POST /api/domains.

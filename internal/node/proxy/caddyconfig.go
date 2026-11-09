@@ -661,17 +661,35 @@ func checkStatic(st *StaticTarget) error {
 	if !strings.HasPrefix(root, "/") {
 		return fmt.Errorf("pasta estática precisa de caminho absoluto: %q", root)
 	}
-	clean := path.Clean(root)
-	if clean != staticRoot && !strings.HasPrefix(clean, staticRoot+"/") {
+	if !ValidStaticRoot(root) {
 		return fmt.Errorf("pasta estática fora de %s: %q", staticRoot, root)
 	}
-	if p := st.ImmutablePrefix; p != "" {
-		if p == "/" || !validPath(p) {
-			return fmt.Errorf("prefixo imutável inválido: %q", p)
-		}
+	if p := st.ImmutablePrefix; p != "" && !ValidImmutablePrefix(p) {
+		return fmt.Errorf("prefixo imutável inválido: %q", p)
 	}
 	return nil
 }
+
+// ValidPath informa se p é um caminho de rota aceito: "/" ou "/seg/.../"
+// com segmentos [a-z0-9._~-].
+func ValidPath(p string) bool { return validPath(p) }
+
+// ValidStaticRoot informa se root é uma pasta estática aceita: absoluta e,
+// depois de limpa, /var/www ou dentro dele. Chaves são escapadas na config.
+func ValidStaticRoot(root string) bool {
+	if !strings.HasPrefix(root, "/") {
+		return false
+	}
+	clean := path.Clean(root)
+	return clean == staticRoot || strings.HasPrefix(clean, staticRoot+"/")
+}
+
+// ValidImmutablePrefix informa se p é um prefixo imutável aceito: um caminho
+// "/x/" (não "/").
+func ValidImmutablePrefix(p string) bool { return p != "/" && validPath(p) }
+
+// ValidHeaderName informa se n é um nome de cabeçalho aceito (token HTTP).
+func ValidHeaderName(n string) bool { return headerNameRe.MatchString(n) }
 
 // siteCert divide o CertPEM de um site custom em cadeia e chave (por bloco
 // PEM, na ordem em que aparecem) e confere que a chave é do certificado.

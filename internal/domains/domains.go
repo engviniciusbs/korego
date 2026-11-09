@@ -1,5 +1,5 @@
 // Package domains é o serviço de domínios do KoreGO: valida e grava os
-// domínios, verifica o DNS, monta as rotas do proxy e mantém o Caddy em
+// domínios, verifica o DNS, monta os sites do proxy e mantém o Caddy em
 // sincronia com o banco (Run).
 package domains
 
@@ -13,15 +13,29 @@ import (
 	"sync"
 	"time"
 
+	"github.com/engviniciusbs/korego/internal/certs"
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/node/proxy"
 	"github.com/engviniciusbs/korego/internal/store"
 )
 
-// Tipos de destino de um domínio.
+// Tipos de destino de uma rota.
 const (
 	TargetApp     = "app"
 	TargetAddress = "address"
+	TargetStatic  = "static"
+)
+
+// Códigos de erro de validação (ErrInvalid.Code).
+const (
+	CodeInvalidDomain = "INVALID_DOMAIN"
+	CodeInvalidRoute  = "INVALID_ROUTE"
+	CodeInvalidPath   = "INVALID_PATH"
+	CodeInvalidRoot   = "INVALID_ROOT"
+	CodeInvalidHeader = "INVALID_HEADER"
+	CodeInvalidCert   = "INVALID_CERT"
+	CodeCertMismatch  = "CERT_MISMATCH"
+	CodeCertExpired   = "CERT_EXPIRED"
 )
 
 // Valores de redirecionamento www gravados no banco.
@@ -45,13 +59,20 @@ var (
 
 // ErrInvalid é um dado de entrada inválido. Use errors.As com *ErrInvalid.
 type ErrInvalid struct {
-	Field   string // hostname | targetType | appId | address | wwwRedirect
+	Code    string // Code* (INVALID_DOMAIN, INVALID_ROUTE, ...)
+	Field   string // hostname | targetType | routes[0].path | headers[1].name | tls.certId | ...
 	Message string
 }
 
 func (e *ErrInvalid) Error() string { return e.Message }
 
-func invalid(field, msg string) error { return &ErrInvalid{Field: field, Message: msg} }
+func invalid(field, msg string) error {
+	return &ErrInvalid{Code: CodeInvalidDomain, Field: field, Message: msg}
+}
+
+func invalidCode(code, field, msg string) error {
+	return &ErrInvalid{Code: code, Field: field, Message: msg}
+}
 
 // Service é o serviço de domínios.
 type Service struct {
@@ -73,9 +94,14 @@ type Service struct {
 	ListenAddr string
 	// OnListenChange troca o endereço de escuta do painel (nil = nada).
 	OnListenChange func(addr string) error
+	// Certs decifra os certificados próprios (nil = domínios com certificado
+	// próprio são recusados e ficam fora do proxy).
+	Certs *certs.Service
+	// Ranges devolve as faixas da Cloudflare passadas ao proxy (nil = nenhuma).
+	Ranges interface{ Get() []string }
 
 	panelMu   sync.Mutex // serializa as alterações do painel
-	applyMu   sync.Mutex // serializa Routes+Apply
+	applyMu   sync.Mutex // serializa Sites+Apply
 	statusMu  sync.Mutex
 	status    proxy.Status
 	hasStatus bool
@@ -85,65 +111,149 @@ type Service struct {
 }
 
 // DomainInput são os campos editáveis de um domínio.
+//
+// Sem Routes, TargetType, AppID e Address viram uma única rota "/" (corpo
+// antigo). Com Routes, esses três campos são ignorados.
 type DomainInput struct {
-	Hostname    string `json:"hostname"`
-	TargetType  string `json:"targetType"`
-	AppID       *int64 `json:"appId"`
-	Address     string `json:"address"`
-	WWWRedirect string `json:"wwwRedirect"`
-	ForceHTTPS  bool   `json:"forceHttps"`
+	Hostname       string         `json:"hostname"`
+	TargetType     string         `json:"targetType"`
+	AppID          *int64         `json:"appId"`
+	Address        string         `json:"address"`
+	WWWRedirect    string         `json:"wwwRedirect"`
+	ForceHTTPS     bool           `json:"forceHttps"`
+	Routes         []RouteInput   `json:"routes"`
+	TLS            TLSInput       `json:"tls"`
+	CloudflareOnly bool           `json:"cloudflareOnly"`
+	Headers        []store.Header `json:"headers"`
+	// Compression: nil = ligada na criação e mantida na edição.
+	Compression *bool `json:"compression"`
 }
 
-// DomainView é o domínio com o estado do certificado e o slug da app.
+// RouteInput é uma rota por caminho de um domínio.
+type RouteInput struct {
+	Path            string `json:"path"`
+	TargetType      string `json:"targetType"` // app | address | static
+	AppID           *int64 `json:"appId"`
+	Address         string `json:"address"`
+	MaxBodyBytes    int64  `json:"maxBodyBytes"` // 0 = sem limite
+	NoBuffering     bool   `json:"noBuffering"`
+	Root            string `json:"root"`
+	SPA             bool   `json:"spa"`
+	ImmutablePrefix string `json:"immutablePrefix"`
+}
+
+// TLSInput escolhe o certificado do domínio.
+type TLSInput struct {
+	Mode   string `json:"mode"` // auto | custom ("" = auto)
+	CertID *int64 `json:"certId"`
+}
+
+// TLSView é o certificado escolhido para o domínio, para a API.
+type TLSView struct {
+	Mode        string     `json:"mode"`
+	CertID      *int64     `json:"certId"`
+	CertName    string     `json:"certName,omitempty"`
+	NotAfter    *time.Time `json:"notAfter,omitempty"`
+	ExpiresSoon bool       `json:"expiresSoon"`
+}
+
+// DomainView é o domínio com o estado do certificado, o slug da app da rota
+// "/" e o certificado escolhido.
 type DomainView struct {
 	store.Domain
 	Cert    proxy.CertInfo `json:"cert"`
 	AppSlug string         `json:"appSlug,omitempty"`
+	TLS     TLSView        `json:"tls"`
 }
 
-// validate confere a entrada e devolve o domínio normalizado (sem ID).
-// excludeID é o domínio sendo editado (0 na criação).
+// validate confere a entrada e devolve o domínio normalizado (sem ID e sem
+// Compression). excludeID é o domínio sendo editado (0 na criação).
 func (s *Service) validate(ctx context.Context, in DomainInput, excludeID int64) (store.Domain, error) {
 	d := store.Domain{
 		Hostname:    strings.TrimSpace(in.Hostname),
-		TargetType:  in.TargetType,
 		WWWRedirect: in.WWWRedirect,
 		ForceHTTPS:  in.ForceHTTPS,
 	}
 	if !ValidHostname(d.Hostname) {
 		return d, invalid("hostname", "Hostname inválido. Use letras minúsculas, números e hífens, como app.exemplo.com.")
 	}
-	switch d.TargetType {
-	case TargetApp:
-		if in.AppID == nil {
-			return d, invalid("appId", "Escolha a aplicação do domínio.")
-		}
-		if _, err := s.DB.GetApp(ctx, *in.AppID); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return d, invalid("appId", "Aplicação não encontrada.")
-			}
-			return d, err
-		}
-		id := *in.AppID
-		d.AppID = &id
-	case TargetAddress:
-		d.Address = strings.TrimSpace(in.Address)
-		if !ValidAddress(d.Address) {
-			return d, invalid("address", "Endereço inválido. Use host:porta, como 127.0.0.1:5000.")
-		}
-	default:
-		return d, invalid("targetType", "Destino inválido. Use app ou address.")
+	var err error
+	if in.Routes == nil {
+		d.Routes, err = s.legacyRoute(ctx, in)
+	} else {
+		d.Routes, err = s.validRoutes(ctx, in.Routes)
 	}
+	if err != nil {
+		return d, err
+	}
+	d.TargetType, d.AppID, d.Address = rootTarget(d.Routes)
 	if d.WWWRedirect == "" {
 		d.WWWRedirect = WWWNone
 	}
 	if msg := wwwMismatch(d.Hostname, d.WWWRedirect); msg != "" {
 		return d, invalid("wwwRedirect", msg)
 	}
+	pemText, err := s.applyOptions(ctx, &d, in)
+	if err != nil {
+		return d, err
+	}
 	if err := s.CheckCollision(ctx, d.Hostname, d.WWWRedirect, excludeID); err != nil {
 		return d, err
 	}
-	return d, nil
+	return d, s.buildCheck(d, pemText)
+}
+
+// rootTarget devolve o destino da rota "/" (os campos legados do domínio).
+func rootTarget(routes []store.DomainRoute) (string, *int64, string) {
+	for _, r := range routes {
+		if r.Path == "/" {
+			return r.TargetType, r.AppID, r.Address
+		}
+	}
+	return "", nil, ""
+}
+
+// legacyRoute monta a rota "/" do corpo antigo (targetType, appId, address).
+func (s *Service) legacyRoute(ctx context.Context, in DomainInput) ([]store.DomainRoute, error) {
+	r := store.DomainRoute{Path: "/", TargetType: in.TargetType}
+	switch in.TargetType {
+	case TargetApp:
+		if in.AppID == nil {
+			return nil, invalid("appId", "Escolha a aplicação do domínio.")
+		}
+		if _, err := s.DB.GetApp(ctx, *in.AppID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, invalid("appId", "Aplicação não encontrada.")
+			}
+			return nil, err
+		}
+		id := *in.AppID
+		r.AppID = &id
+	case TargetAddress:
+		r.Address = strings.TrimSpace(in.Address)
+		if !ValidAddress(r.Address) {
+			return nil, invalid("address", "Endereço inválido. Use host:porta, como 127.0.0.1:5000.")
+		}
+	default:
+		return nil, invalid("targetType", "Destino inválido. Use app ou address.")
+	}
+	return []store.DomainRoute{r}, nil
+}
+
+// applyOptions valida e grava em d o certificado, o só Cloudflare e os
+// cabeçalhos da entrada. Usa o hostname e o redirecionamento www já em d.
+// Devolve o PEM do certificado próprio ("" = auto), para a conferência final.
+func (s *Service) applyOptions(ctx context.Context, d *store.Domain, in DomainInput) (string, error) {
+	headers, err := validHeaders(in.Headers)
+	if err != nil {
+		return "", err
+	}
+	mode, certID, pemText, err := s.validTLS(ctx, in.TLS, hostsOf(d.Hostname, d.WWWRedirect))
+	if err != nil {
+		return "", err
+	}
+	d.Headers, d.TLSMode, d.CertID, d.CloudflareOnly = headers, mode, certID, in.CloudflareOnly
+	return pemText, nil
 }
 
 // wwwMismatch devolve a mensagem de erro se o redirecionamento www não for
@@ -219,6 +329,7 @@ func (s *Service) Create(ctx context.Context, in DomainInput) (store.Domain, DNS
 	if err != nil {
 		return store.Domain{}, DNSCheck{}, err
 	}
+	d.Compression = in.Compression == nil || *in.Compression
 	if err := s.DB.InsertDomain(ctx, &d); err != nil {
 		return store.Domain{}, DNSCheck{}, err
 	}
@@ -226,20 +337,29 @@ func (s *Service) Create(ctx context.Context, in DomainInput) (store.Domain, DNS
 	return d, s.CheckDNS(ctx, d.Hostname), nil
 }
 
-// Update altera um domínio existente. Domínio do painel → ErrPanelDomain.
+// Update altera um domínio existente. No domínio do painel só valem as
+// opções (ver updatePanel).
 func (s *Service) Update(ctx context.Context, id int64, in DomainInput) (store.Domain, DNSCheck, error) {
 	cur, err := s.DB.GetDomain(ctx, id)
 	if err != nil {
 		return store.Domain{}, DNSCheck{}, err
 	}
 	if cur.IsPanel {
-		return store.Domain{}, DNSCheck{}, ErrPanelDomain
+		d, err := s.updatePanel(ctx, id, in)
+		if err != nil {
+			return store.Domain{}, DNSCheck{}, err
+		}
+		return d, s.CheckDNS(ctx, d.Hostname), nil
 	}
 	d, err := s.validate(ctx, in, id)
 	if err != nil {
 		return store.Domain{}, DNSCheck{}, err
 	}
-	d.ID, d.CreatedAt = id, cur.CreatedAt
+	d.ID, d.CreatedAt, d.IsPanel = id, cur.CreatedAt, cur.IsPanel
+	d.Compression = cur.Compression
+	if in.Compression != nil {
+		d.Compression = *in.Compression
+	}
 	if err := s.DB.UpdateDomain(ctx, &d); err != nil {
 		return store.Domain{}, DNSCheck{}, err
 	}
@@ -273,14 +393,19 @@ func (s *Service) List(ctx context.Context) ([]DomainView, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listar domínios: %w", err)
 	}
+	certList, err := s.DB.ListCertificates(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listar domínios: %w", err)
+	}
+	certsByID := make(map[int64]store.Certificate, len(certList))
+	for _, c := range certList {
+		certsByID[c.ID] = c
+	}
 	out := make([]DomainView, len(list))
 	sem := make(chan struct{}, certConcurrency)
 	var wg sync.WaitGroup
 	for i, d := range list {
-		out[i].Domain = d
-		if d.AppID != nil {
-			out[i].AppSlug = apps[*d.AppID].Slug
-		}
+		out[i] = s.viewOf(d, apps, certsByID)
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
@@ -291,4 +416,54 @@ func (s *Service) List(ctx context.Context) ([]DomainView, error) {
 	}
 	wg.Wait()
 	return out, nil
+}
+
+// View devolve um domínio com o certificado servido, o slug da app e o
+// certificado escolhido.
+func (s *Service) View(ctx context.Context, d store.Domain) (DomainView, error) {
+	apps, err := s.appsByID(ctx)
+	if err != nil {
+		return DomainView{}, err
+	}
+	certsByID := map[int64]store.Certificate{}
+	if d.CertID != nil {
+		c, err := s.DB.CertificateByID(ctx, *d.CertID)
+		switch {
+		case err == nil:
+			certsByID[c.ID] = c
+		case !errors.Is(err, store.ErrNotFound):
+			return DomainView{}, err
+		}
+	}
+	v := s.viewOf(d, apps, certsByID)
+	v.Cert = s.Proxy.Cert(ctx, d.Hostname)
+	return v, nil
+}
+
+// viewOf monta a DomainView, sem o estado do certificado servido.
+func (s *Service) viewOf(d store.Domain, apps map[int64]store.App, certsByID map[int64]store.Certificate) DomainView {
+	v := DomainView{Domain: d, TLS: TLSView{Mode: d.TLSMode}}
+	if v.TLS.Mode == "" {
+		v.TLS.Mode = proxy.TLSAuto
+	}
+	if d.AppID != nil {
+		v.AppSlug = apps[*d.AppID].Slug
+	}
+	if d.TLSMode == proxy.TLSCustom && d.CertID != nil {
+		id := *d.CertID
+		v.TLS.CertID = &id
+		if c, ok := certsByID[id]; ok {
+			na := c.NotAfter
+			v.TLS.CertName, v.TLS.NotAfter = c.Name, &na
+			v.TLS.ExpiresSoon = c.NotAfter.Sub(s.now()) <= certs.ExpiresSoonWindow
+		}
+	}
+	return v
+}
+
+func (s *Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
