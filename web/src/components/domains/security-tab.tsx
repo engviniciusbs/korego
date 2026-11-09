@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Button, Input } from "@/components/ui";
 import { MAX_HEADERS, SECURITY_HEADERS, type DomainHeader } from "@/lib/domains";
 import { validHeaderName } from "@/lib/validate";
@@ -15,17 +16,30 @@ let nextKey = 1;
 export const headerDraft = (h: DomainHeader): HeaderDraft => ({ key: nextKey++, name: h.name, value: h.value });
 
 /**
- * "Modelo segurança": acrescenta os 4 cabeçalhos; um que já exista (mesmo nome,
- * sem diferenciar maiúsculas) recebe o valor do modelo, sem duplicar.
+ * "Modelo segurança": acrescenta só os cabeçalhos do modelo que faltam. Um que
+ * já exista (mesmo nome, sem diferenciar maiúsculas) mantém o valor atual, e a
+ * nota diz isso. Se os que faltam passarem do limite, nada é acrescentado e a
+ * nota explica; nenhum cabeçalho é descartado.
  */
-export function applySecurityPreset(list: HeaderDraft[]): HeaderDraft[] {
-  const out = list.map((h) => ({ ...h }));
+export function applySecurityPreset(list: HeaderDraft[]): { headers: HeaderDraft[]; notes: string[] } {
+  const notes: string[] = [];
+  const missing: DomainHeader[] = [];
   for (const p of SECURITY_HEADERS) {
-    const found = out.find((h) => h.name.trim().toLowerCase() === p.name.toLowerCase());
-    if (found) found.value = p.value;
-    else if (out.length < MAX_HEADERS) out.push(headerDraft(p));
+    const found = list.find((h) => h.name.trim().toLowerCase() === p.name.toLowerCase());
+    if (!found) missing.push(p);
+    else if (found.value !== p.value) notes.push(`Mantido o valor atual de ${found.name.trim()}.`);
   }
-  return out;
+  if (list.length + missing.length > MAX_HEADERS) {
+    const free = MAX_HEADERS - list.length;
+    return {
+      headers: list,
+      notes: [
+        `O modelo acrescentaria ${missing.length} cabeçalhos, mas o limite de ${MAX_HEADERS} deixa ${free} vaga${free === 1 ? "" : "s"}. Remova ${missing.length - free} e aplique de novo.`,
+      ],
+    };
+  }
+  if (missing.length === 0 && notes.length === 0) notes.push("Os cabeçalhos do modelo já estão na lista.");
+  return { headers: [...list, ...missing.map(headerDraft)], notes };
 }
 
 /** Confere os cabeçalhos como o servidor. */
@@ -77,8 +91,16 @@ export function SecurityTab({
 }: SecurityTabProps) {
   const full = headers.length >= MAX_HEADERS;
   const cfErr = errors.cloudflareOnly;
+  const [notes, setNotes] = useState<string[]>([]);
+
+  const applyPreset = () => {
+    const r = applySecurityPreset(headers);
+    onHeaders(r.headers);
+    setNotes(r.notes);
+  };
 
   const update = (key: number, f: HeaderField, v: string) => {
+    setNotes([]);
     onHeaders(headers.map((h) => (h.key === key ? { ...h, [f]: v } : h)));
     onClearError(`${key}.${f}`);
     onClearError("headers");
@@ -86,12 +108,14 @@ export function SecurityTab({
 
   const add = () => {
     if (full) return;
+    setNotes([]);
     const h = headerDraft({ name: "", value: "" });
     onHeaders([...headers, h]);
     requestAnimationFrame(() => document.getElementById(headerFieldId(base, h.key, "name"))?.focus());
   };
 
   const remove = (key: number) => {
+    setNotes([]);
     onHeaders(headers.filter((h) => h.key !== key));
     onClearError("headers");
     requestAnimationFrame(() => document.getElementById(`${base}-add-header`)?.focus());
@@ -145,13 +169,22 @@ export function SecurityTab({
             </Hint>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant="ghost" onClick={() => onHeaders(applySecurityPreset(headers))}>
+            <Button size="sm" variant="ghost" onClick={applyPreset}>
               Modelo segurança
             </Button>
             <Button id={`${base}-add-header`} size="sm" disabled={full} onClick={add}>
               Adicionar cabeçalho
             </Button>
           </div>
+        </div>
+        <div role="status" aria-live="polite">
+          {notes.length > 0 && (
+            <ul className="mt-2 space-y-0.5 border-l-2 border-info pl-2 text-xs text-fg-muted">
+              {notes.map((n) => (
+                <li key={n}>{n}</li>
+              ))}
+            </ul>
+          )}
         </div>
         {errors.headers && (
           <p role="alert" className="mt-2 text-xs text-danger">
@@ -213,9 +246,10 @@ export function SecurityTab({
                     size="sm"
                     variant="ghost"
                     className="justify-self-start enabled:hover:bg-danger-bg enabled:hover:text-danger"
+                    aria-label={`Remover o cabeçalho ${n}`}
                     onClick={() => remove(h.key)}
                   >
-                    Remover<span className="sr-only"> o cabeçalho {n}</span>
+                    Remover
                   </Button>
                 </li>
               );

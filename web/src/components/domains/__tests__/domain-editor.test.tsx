@@ -138,6 +138,12 @@ async function openNew() {
 const tab = (dialog: HTMLElement, name: string) =>
   fireEvent.click(within(dialog).getByRole("tab", { name }));
 
+const escapeRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+/** Grupo da rota pelo caminho no rótulo "Rota N (caminho)". */
+const group = (dialog: HTMLElement, path: string) =>
+  within(dialog).getByRole("group", { name: new RegExp(`^Rota \\d+ \\(${escapeRe(path)}\\)$`) });
+
 const routeGroups = (dialog: HTMLElement) =>
   within(dialog)
     .getAllByRole("group", { name: /^Rota / })
@@ -152,32 +158,28 @@ describe("Editor de domínio", () => {
       target: { value: "127.0.0.1:5000" },
     });
 
-    // Duas rotas por caminho.
+    // Duas rotas por caminho; a nova entra no topo.
     fireEvent.click(within(dialog).getByRole("button", { name: "Adicionar rota por caminho" }));
     let path = within(dialog).getAllByRole("textbox", { name: "Caminho" });
     expect(path).toHaveLength(1);
     fireEvent.change(path[0], { target: { value: "/a/" } });
-    fireEvent.blur(path[0]);
     fireEvent.click(within(dialog).getByRole("button", { name: "Adicionar rota" }));
     path = within(dialog).getAllByRole("textbox", { name: "Caminho" });
     const fresh = path.find((p) => (p as HTMLInputElement).value === "") as HTMLElement;
     fireEvent.change(fresh, { target: { value: "/api/v1/" } });
-    fireEvent.blur(fresh);
 
-    // Ordem de precedência: o prefixo mais longo primeiro, "/" por último.
-    expect(routeGroups(dialog)).toEqual(["Rota /api/v1/", "Rota /a/", "Rota /"]);
+    // Ordem de precedência: o prefixo mais longo primeiro, "/" por último; rótulos únicos.
+    expect(routeGroups(dialog)).toEqual(["Rota 1 (/api/v1/)", "Rota 2 (/a/)", "Rota 3 (/)"]);
 
     // "/" não pode ser removida; as outras sim.
-    const rootGroup = within(dialog).getByRole("group", { name: "Rota /" });
-    expect(within(rootGroup).queryByRole("button", { name: /Remover/ })).not.toBeInTheDocument();
-    const a = within(dialog).getByRole("group", { name: "Rota /a/" });
-    fireEvent.click(within(a).getByRole("button", { name: /Remover/ }));
-    expect(routeGroups(dialog)).toEqual(["Rota /api/v1/", "Rota /"]);
+    expect(within(group(dialog, "/")).queryByRole("button", { name: /Remover/ })).not.toBeInTheDocument();
+    fireEvent.click(within(group(dialog, "/a/")).getByRole("button", { name: "Remover rota 2 (/a/)" }));
+    expect(routeGroups(dialog)).toEqual(["Rota 1 (/api/v1/)", "Rota 2 (/)"]);
 
     // A rota nova precisa de destino válido antes de enviar.
     fireEvent.click(within(dialog).getByRole("button", { name: "Salvar" }));
     expect(await within(dialog).findByText("Escolha a aplicação.")).toBeInTheDocument();
-    const v1 = within(dialog).getByRole("group", { name: "Rota /api/v1/" });
+    const v1 = group(dialog, "/api/v1/");
     fireEvent.click(within(v1).getByRole("tab", { name: "Endereço" }));
     fireEvent.change(within(v1).getByRole("textbox", { name: /host:porta/ }), {
       target: { value: "127.0.0.1:6000" },
@@ -188,6 +190,80 @@ describe("Editor de domínio", () => {
     expect(sentBody("POST", "/api/domains").routes).toEqual([
       { path: "/api/v1/", targetType: "address", address: "127.0.0.1:6000", maxBodyBytes: 0, noBuffering: false, spa: false },
       { path: "/", targetType: "address", address: "127.0.0.1:5000", maxBodyBytes: 0, noBuffering: false, spa: false },
+    ]);
+  });
+
+  it("digitar um caminho e clicar Remover em outra rota remove a rota clicada", async () => {
+    const dialog = await openNew();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Adicionar rota por caminho" }));
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Caminho" }), { target: { value: "/bb/" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Adicionar rota" }));
+    const fresh = within(dialog)
+      .getAllByRole("textbox", { name: "Caminho" })
+      .find((p) => (p as HTMLInputElement).value === "") as HTMLElement;
+    // Caminho curto na linha nova (topo); o foco sai dela ao clicar em outra linha.
+    fresh.focus();
+    fireEvent.change(fresh, { target: { value: "/a/" } });
+    fireEvent.blur(fresh);
+    // Sair do campo não reordena: a linha sob o ponteiro continua a mesma.
+    expect(routeGroups(dialog)).toEqual(["Rota 1 (/a/)", "Rota 2 (/bb/)", "Rota 3 (/)"]);
+    fireEvent.click(within(group(dialog, "/bb/")).getByRole("button", { name: /^Remover rota/ }));
+    expect(routeGroups(dialog)).toEqual(["Rota 1 (/a/)", "Rota 2 (/)"]);
+  });
+
+  it("limite do corpo: bytes gravados voltam iguais; editar converte MiB exato", async () => {
+    const d = domain({
+      id: 2,
+      routes: [
+        root({ path: "/api/", address: "127.0.0.1:6000", maxBodyBytes: 1500000 }),
+        root({ maxBodyBytes: 100 }),
+      ],
+    });
+    routes["GET /api/domains"] = () => json({ domains: [panelDomain, d] });
+    routes["PUT /api/domains/2"] = () => okSave(d);
+    renderPage();
+    await screen.findByRole("link", { name: /^loja\.exemplo\.com/ });
+
+    fireEvent.click(within(row("loja.exemplo.com")).getByRole("button", { name: /Editar/ }));
+    let dialog = screen.getByRole("dialog", { name: "Editar domínio" });
+    const small = within(group(dialog, "/")).getByRole("spinbutton", { name: /Limite do corpo/ }) as HTMLInputElement;
+    expect(small.value).not.toBe("");
+    expect(Number(small.value)).toBeGreaterThan(0);
+    expect(within(group(dialog, "/")).getByText(/100 bytes/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Salvar" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(sentBody("PUT", "/api/domains/2").routes.map((r: { maxBodyBytes: number }) => r.maxBodyBytes)).toEqual([
+      1500000, 100,
+    ]);
+
+    // Editar para 2 MB envia 2 MiB.
+    fireEvent.click(within(row("loja.exemplo.com")).getByRole("button", { name: /Editar/ }));
+    dialog = screen.getByRole("dialog", { name: "Editar domínio" });
+    fireEvent.change(within(group(dialog, "/")).getByRole("spinbutton", { name: /Limite do corpo/ }), {
+      target: { value: "2" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Salvar" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(sentBody("PUT", "/api/domains/2").routes.map((r: { maxBodyBytes: number }) => r.maxBodyBytes)).toEqual([
+      1500000, 2097152,
+    ]);
+  });
+
+  it("valida só os campos visíveis do tipo de destino atual", async () => {
+    routes["POST /api/domains"] = () => okSave(domain({ id: 2 }));
+    const dialog = await openNew();
+    tab(dialog, "Endereço");
+    fireEvent.change(within(dialog).getByRole("spinbutton", { name: /Limite do corpo/ }), { target: { value: "-1" } });
+    tab(dialog, "Pasta");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Cache imutável/ }), { target: { value: "ruim" } });
+    tab(dialog, "Aplicação");
+    const appSelect = within(dialog).getByRole("combobox", { name: /Aplicação/ });
+    await within(appSelect).findByRole("option", { name: "blog" });
+    fireEvent.change(appSelect, { target: { value: "3" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Salvar" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(sentBody("POST", "/api/domains").routes).toEqual([
+      { path: "/", targetType: "app", appId: 3, maxBodyBytes: 0, noBuffering: false, spa: false },
     ]);
   });
 
@@ -256,6 +332,36 @@ describe("Editor de domínio", () => {
     expect(body.headers).toEqual(expected);
     expect(body.compression).toBe(true);
     expect(body.cloudflareOnly).toBe(false);
+  });
+
+  it("modelo segurança mantém o valor atual de um cabeçalho e avisa; sem vagas, avisa e não descarta", async () => {
+    const custom = domain({ id: 2, headers: [{ name: "strict-transport-security", value: "max-age=60" }] });
+    const full = domain({
+      id: 3,
+      hostname: "blog.exemplo.com",
+      headers: Array.from({ length: 28 }, (_, i) => ({ name: `X-H${i}`, value: "1" })),
+    });
+    routes["GET /api/domains"] = () => json({ domains: [panelDomain, custom, full] });
+    renderPage();
+    await screen.findByRole("link", { name: /^loja\.exemplo\.com/ });
+
+    fireEvent.click(within(row("loja.exemplo.com")).getByRole("button", { name: /Editar/ }));
+    let dialog = screen.getByRole("dialog", { name: "Editar domínio" });
+    tab(dialog, "Segurança");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Modelo segurança" }));
+    expect(within(dialog).getByRole("textbox", { name: "Valor do cabeçalho 1" })).toHaveValue("max-age=60");
+    expect(within(dialog).getByText(/mantido o valor atual de strict-transport-security/i)).toBeInTheDocument();
+    expect(within(dialog).getByRole("textbox", { name: "Nome do cabeçalho 4" })).toHaveValue("Permissions-Policy");
+    expect(within(dialog).queryByRole("textbox", { name: "Nome do cabeçalho 5" })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancelar" }));
+
+    fireEvent.click(within(row("blog.exemplo.com")).getByRole("button", { name: /Editar/ }));
+    dialog = screen.getByRole("dialog", { name: "Editar domínio" });
+    tab(dialog, "Segurança");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Modelo segurança" }));
+    expect(within(dialog).getByText(/limite de 30/)).toBeInTheDocument();
+    expect(within(dialog).getByRole("textbox", { name: "Nome do cabeçalho 28" })).toHaveValue("X-H27");
+    expect(within(dialog).queryByRole("textbox", { name: "Nome do cabeçalho 29" })).not.toBeInTheDocument();
   });
 
   it("certificado próprio: escolher existente ou adicionar colando PEM; a resposta nunca mostra chave", async () => {

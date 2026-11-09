@@ -17,9 +17,15 @@ export interface RouteDraft {
   targetType: RouteTarget;
   appId: string;
   address: string;
-  /** Limite do corpo em MB, como digitado ("" ou "0" = sem limite). */
+  /** Limite do corpo gravado, em bytes; volta igual enquanto o campo não for editado. */
+  maxBodyBytes: number;
+  /** Limite do corpo em MB (MiB) como exibido/digitado ("" ou "0" = sem limite). */
   maxMb: string;
+  /** O campo de limite foi editado: envia `maxMb` convertido em vez de `maxBodyBytes`. */
+  maxEdited: boolean;
   noBuffering: boolean;
+  /** "Sem buffer" gravado: rotas de aplicação não mostram a opção e o reenviam igual. */
+  storedNoBuffering: boolean;
   root: string;
   spa: boolean;
   immutablePrefix: string;
@@ -40,8 +46,11 @@ export function newRoute(path = ""): RouteDraft {
     targetType: "app",
     appId: "",
     address: "",
+    maxBodyBytes: 0,
     maxMb: "",
+    maxEdited: false,
     noBuffering: false,
+    storedNoBuffering: false,
     root: "",
     spa: false,
     immutablePrefix: "",
@@ -56,18 +65,38 @@ export function routeDraft(r: DomainRoute): RouteDraft {
     targetType: r.targetType,
     appId: r.appId ? String(r.appId) : "",
     address: r.address ?? "",
-    maxMb: r.maxBodyBytes > 0 ? String(Math.round((r.maxBodyBytes / MB) * 100) / 100) : "",
+    maxBodyBytes: r.maxBodyBytes,
+    maxMb: formatMb(r.maxBodyBytes),
+    maxEdited: false,
     noBuffering: r.noBuffering,
+    storedNoBuffering: r.noBuffering,
     root: r.root ?? "",
     spa: r.spa,
     immutablePrefix: r.immutablePrefix ?? "",
   };
 }
 
-const maxBytes = (mb: string) => {
+/**
+ * Bytes → MB (MiB) para exibir. Múltiplo exato de MB vira inteiro; o resto
+ * mantém 4 algarismos significativos, para nunca virar "0" (100 bytes →
+ * "0.00009537"). O valor exato aparece na dica e volta igual se não for editado.
+ */
+export function formatMb(bytes: number): string {
+  if (bytes <= 0) return "";
+  if (bytes % MB === 0) return String(bytes / MB);
+  return String(Number((bytes / MB).toPrecision(4)));
+}
+
+/** MB (MiB) digitado → bytes: 1 = 1048576. */
+export function mbToBytes(mb: string): number {
   const n = Number(mb.trim() || "0");
   return Number.isFinite(n) && n > 0 ? Math.round(n * MB) : 0;
-};
+}
+
+const bytesFmt = new Intl.NumberFormat("pt-BR");
+
+/** Bytes enviados para uma rota de endereço. */
+const addressMaxBytes = (d: RouteDraft) => (d.maxEdited ? mbToBytes(d.maxMb) : d.maxBodyBytes);
 
 /** Rascunho → corpo da API, só com os campos do tipo escolhido. */
 export function routeInput(d: RouteDraft): DomainRoute {
@@ -78,8 +107,9 @@ export function routeInput(d: RouteDraft): DomainRoute {
         path,
         targetType: "app",
         appId: Number(d.appId),
-        maxBodyBytes: maxBytes(d.maxMb),
-        noBuffering: d.noBuffering,
+        // Opções não exibidas para aplicação: voltam como gravadas.
+        maxBodyBytes: d.maxBodyBytes,
+        noBuffering: d.storedNoBuffering,
         spa: false,
       };
     case "address":
@@ -87,7 +117,7 @@ export function routeInput(d: RouteDraft): DomainRoute {
         path,
         targetType: "address",
         address: d.address.trim(),
-        maxBodyBytes: maxBytes(d.maxMb),
+        maxBodyBytes: addressMaxBytes(d),
         noBuffering: d.noBuffering,
         spa: false,
       };
@@ -102,7 +132,10 @@ export function routeInput(d: RouteDraft): DomainRoute {
 
 export const sortRoutes = (rs: RouteDraft[]) => [...rs].sort((a, b) => byPrecedence(a.path.trim(), b.path.trim()));
 
-/** Confere as rotas como o servidor; devolve os erros por `rota.campo`. */
+/**
+ * Confere as rotas como o servidor, só nos campos visíveis do tipo de destino
+ * atual; devolve os erros por `rota.campo`.
+ */
 export function validateRoutes(rs: RouteDraft[]): { key: number; field: RouteField; message: string }[] {
   const out: { key: number; field: RouteField; message: string }[] = [];
   const seen = new Set<string>();
@@ -122,7 +155,7 @@ export function validateRoutes(rs: RouteDraft[]): { key: number; field: RouteFie
     if (r.targetType === "address" && !validAddress(r.address.trim())) {
       out.push({ key: r.key, field: "address", message: "Endereço inválido. Use host:porta, como 127.0.0.1:5000." });
     }
-    if (r.targetType !== "static") {
+    if (r.targetType === "address" && r.maxEdited) {
       const n = Number(r.maxMb.trim() || "0");
       if (!Number.isFinite(n) || n < 0) {
         out.push({ key: r.key, field: "maxBodyBytes", message: "Use um número de MB maior ou igual a 0 (0 = sem limite)." });
@@ -249,14 +282,15 @@ export function RouteList({ base, routes, onChange, errors, listError, onClearEr
         </p>
       )}
       <ol className="mt-3 space-y-2" aria-describedby={`${base}-routes-hint`}>
-        {routes.map((r) => {
+        {routes.map((r, i) => {
           const isRoot = r.isDefault;
-          const label = r.path.trim() || "nova";
+          // Rótulo único por linha: posição e caminho.
+          const label = `rota ${i + 1} (${r.path.trim() || "nova"})`;
           return (
             <li key={r.key}>
               <div
                 role="group"
-                aria-label={`Rota ${label}`}
+                aria-label={`R${label.slice(1)}`}
                 className={cn(
                   "border border-line bg-bg/30",
                   isRoot && "shadow-[inset_2px_0_0_0_var(--color-line-strong)]",
@@ -280,7 +314,6 @@ export function RouteList({ base, routes, onChange, errors, listError, onClearEr
                           update(r.key, { path });
                           onClearError(r.key, "path");
                         }}
-                        onCommit={() => onChange(sortRoutes(routes))}
                       />
                     </div>
                   )}
@@ -289,9 +322,10 @@ export function RouteList({ base, routes, onChange, errors, listError, onClearEr
                       size="sm"
                       variant="ghost"
                       className="shrink-0 enabled:hover:bg-danger-bg enabled:hover:text-danger"
+                      aria-label={`Remover ${label}`}
                       onClick={() => remove(r.key)}
                     >
-                      Remover<span className="sr-only"> a rota {label}</span>
+                      Remover
                     </Button>
                   )}
                 </div>
@@ -310,13 +344,11 @@ function PathInput({
   route,
   error,
   onChange,
-  onCommit,
 }: {
   base: string;
   route: RouteDraft;
   error?: string;
   onChange: (path: string) => void;
-  onCommit: () => void;
 }) {
   const id = routeFieldId(base, route.key, "path");
   return (
@@ -337,7 +369,6 @@ function PathInput({
         aria-describedby={describedBy(error && errorId(base, route.key, "path"))}
         className="max-w-60"
         onChange={(e) => onChange(e.target.value)}
-        onBlur={onCommit}
       />
       <div className="w-full">
         <FieldError id={errorId(base, route.key, "path")}>{error}</FieldError>
@@ -441,10 +472,15 @@ function RouteFields({
               placeholder="0"
               invalid={Boolean(err("maxBodyBytes"))}
               aria-describedby={desc("maxBodyBytes", `${id("maxBodyBytes")}-hint`)}
-              onChange={(e) => set("maxBodyBytes", { maxMb: e.target.value })}
+              onChange={(e) => set("maxBodyBytes", { maxMb: e.target.value, maxEdited: true })}
             />
             <FieldError id={errorId(base, r.key, "maxBodyBytes")}>{err("maxBodyBytes")}</FieldError>
-            <Hint id={`${id("maxBodyBytes")}-hint`}>0 = sem limite. Acima dele, a resposta é 413.</Hint>
+            <Hint id={`${id("maxBodyBytes")}-hint`}>
+              {!r.maxEdited && r.maxBodyBytes > 0 && r.maxBodyBytes % MB !== 0
+                ? `Gravado: ${bytesFmt.format(r.maxBodyBytes)} bytes, mantido se você não mudar. `
+                : ""}
+              0 = sem limite. 1 MB = 1.048.576 bytes. Acima do limite, a resposta é 413.
+            </Hint>
           </div>
           <div className="sm:pt-5">
             <Checkbox
