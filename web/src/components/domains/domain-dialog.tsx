@@ -7,6 +7,8 @@ import { useApps } from "@/lib/apps";
 import { cn } from "@/lib/cn";
 import {
   domainRoutes,
+  MIGRATING_TITLE,
+  useMigrating,
   useSaveDomain,
   type DnsCheck,
   type Domain,
@@ -147,6 +149,8 @@ export function DomainDialog({ domain, onClose }: DomainDialogProps) {
 
   const apps = useApps();
   const save = useSaveDomain();
+  // Troca de servidor em andamento: o diálogo aberto continua visível, mas não grava.
+  const migrating = useMigrating();
 
   const [tab, setTab] = useState<EditorTab>(isPanel ? "certificado" : "rotas");
   const [hostname, setHostname] = useState(domain?.hostname ?? "");
@@ -186,7 +190,7 @@ export function DomainDialog({ domain, onClose }: DomainDialogProps) {
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (save.isPending) return;
+    if (save.isPending || migrating) return;
     const host = hostname.trim().toLowerCase();
     const sorted = sortRoutes(routes);
     const next: Record<ErrorKey, string> = {};
@@ -277,9 +281,15 @@ export function DomainDialog({ domain, onClose }: DomainDialogProps) {
       confirmLabel="Salvar"
       formId={formId}
       loading={save.isPending}
+      confirmDisabled={migrating}
       onCancel={onClose}
     >
       <form id={formId} noValidate onSubmit={submit} className="space-y-4 text-fg">
+        {migrating && (
+          <Alert variant="info" title={MIGRATING_TITLE}>
+            Salvar fica bloqueado até a troca terminar; as alterações continuam aqui.
+          </Alert>
+        )}
         {formError && <Alert variant="danger">{formError}</Alert>}
 
         {isPanel ? (

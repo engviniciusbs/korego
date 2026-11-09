@@ -243,6 +243,8 @@ export function TakeoverDialog({
 
   function submit(e: FormEvent) {
     e.preventDefault();
+    // Enter repetido ou duplo clique: um envio só.
+    if (phase !== "form") return;
     setFormError(null);
     const clean = cleanAuthCode(code);
     if (!validAuthCode(clean)) {
@@ -252,6 +254,8 @@ export function TakeoverDialog({
     }
     setCodeError(null);
     prevAt.current = proxy?.lastMigration?.at;
+    // O código vale uma vez: não fica no campo depois de enviado.
+    setCode("");
     setPhase("sending");
     start.mutate(clean, {
       onSuccess: () => setPhase((p) => (p === "sending" ? "running" : p)),

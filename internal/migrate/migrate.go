@@ -396,8 +396,8 @@ func (j *job) step(step, status, msg string) {
 	}
 }
 
-// finish grava e publica o resultado final.
-func (j *job) finish(ctx context.Context, res Result) {
+// record grava o resultado final (e apaga a marca de troca em andamento).
+func (j *job) record(ctx context.Context, res Result) {
 	log.Printf("proxy: troca (%s) terminou: %s: %s", j.op, res.Outcome, res.Message)
 	if err := j.e.DB.DeleteSetting(ctx, SettingInProgress); err != nil {
 		log.Printf("proxy: apagar a marca de troca em andamento: %v", err)
@@ -408,6 +408,12 @@ func (j *job) finish(ctx context.Context, res Result) {
 			log.Printf("proxy: gravar o resultado da troca: %v", err)
 		}
 	}
+}
+
+// publishDone publica o evento final. Chamado só depois de retomar os
+// domínios e liberar a vaga: quem relê GET /api/proxy ao recebê-lo já vê
+// migrating=false.
+func (j *job) publishDone(res Result) {
 	if j.e.Hub != nil {
 		j.e.Hub.Publish(TopicMigration, Event{Op: j.op, Message: res.Message, Done: true, Result: res.Outcome})
 	}
@@ -509,8 +515,8 @@ func (e *Engine) mark(ctx context.Context, op, unit string) error {
 }
 
 // run executa fn em segundo plano. Ao fim relê o estado do proxy, grava o
-// resultado (e apaga a marca), retoma os domínios, libera a vaga e chama
-// onDone. Um pânico em fn vira resultado failed: os domínios são retomados,
+// resultado (e apaga a marca), retoma os domínios, libera a vaga, publica o
+// evento final e chama onDone. Um pânico em fn vira resultado failed: os domínios são retomados,
 // uma reconciliação roda na hora (portas livres → Caddy em 80/443) e o
 // estado final vai na mensagem.
 func (e *Engine) run(ctx context.Context, ss *session, op, unit string, fn func(context.Context, *job) Result, onDone func(Result)) {
@@ -528,8 +534,13 @@ func (e *Engine) run(ctx context.Context, ss *session, op, unit string, fn func(
 			cancel()
 			res.Message += e.settle(jctx, unit, st)
 		}
-		j.finish(jctx, res)
-		ss.end(final)
+		j.record(jctx, res)
+		// Solta domínios e vaga antes do done; o defer publica mesmo se a
+		// retomada entrar em pânico.
+		func() {
+			defer j.publishDone(res)
+			ss.end(final)
+		}()
 		if onDone != nil {
 			onDone(res)
 		}
@@ -586,10 +597,18 @@ func (e *Engine) RecoverInterrupted(ctx context.Context) error {
 	if err := e.claim(); err != nil {
 		return err
 	}
+	j := &job{e: e, op: m.Op}
+	var res Result
+	// Defers em ordem inversa: libera a vaga e só então publica o done.
+	defer func() {
+		if res.Outcome != "" {
+			j.publishDone(res)
+		}
+	}()
 	defer e.release()
 	st := e.Domains.Reconcile(ctx)
-	j := &job{e: e, op: m.Op}
-	j.finish(ctx, Result{Outcome: OutcomeFailed, Message: InterruptedMessage + "." + e.settle(ctx, m.Unit, st)})
+	res = Result{Outcome: OutcomeFailed, Message: InterruptedMessage + "." + e.settle(ctx, m.Unit, st)}
+	j.record(ctx, res)
 	return nil
 }
 

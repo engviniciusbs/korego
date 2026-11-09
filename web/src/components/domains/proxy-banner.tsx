@@ -6,6 +6,7 @@ import { Alert, Button, Spinner } from "@/components/ui";
 import { focusRing } from "@/components/ui/focus";
 import { cn } from "@/lib/cn";
 import {
+  MIGRATING_TITLE,
   processUnit,
   trialFailure,
   trialResult,
@@ -18,7 +19,7 @@ import {
 import { formatDateTime } from "@/lib/format";
 import { MigrationResult, TakeoverDialog, type MigrationOp } from "./takeover-dialog";
 
-export const MIGRATING_TITLE = "Troca de servidor em andamento";
+export { MIGRATING_TITLE };
 
 /** Título do aviso por estado; `active` não mostra aviso. */
 export function proxyBannerTitle(s: ProxyStatus): string {

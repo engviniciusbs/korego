@@ -64,6 +64,17 @@ function renderPage() {
 }
 
 describe("Configurações → Painel", () => {
+  it("domínio do painel bloqueado durante a troca de servidor", async () => {
+    routes["GET /api/proxy"] = () => json({ state: "trial", process: "nginx (pid 7)", guideUrl: "", migrating: true });
+    renderPage();
+    const input = await screen.findByLabelText("Domínio do painel");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Salvar domínio" })).toBeDisabled());
+    expect(input).toHaveAttribute("readonly");
+    expect(document.getElementById(input.getAttribute("aria-describedby")!.split(" ").at(-1)!)).toHaveTextContent(
+      "Troca de servidor em andamento",
+    );
+  });
+
   it("porta 8000 não pode ser desligada fora do domínio com HTTPS", async () => {
     routes["GET /api/settings/panel"] = () =>
       json(panel({ requestHTTPS: false, requestHost: "203.0.113.10" }));

@@ -284,6 +284,9 @@ export function useProxyStatus() {
   return q;
 }
 
+/** Aviso mostrado onde a edição de domínios fica bloqueada durante a troca. */
+export const MIGRATING_TITLE = "Troca de servidor em andamento";
+
 /** Edição de domínios bloqueada durante a troca de servidor. */
 export function useMigrating(): boolean {
   return Boolean(useProxyStatus().data?.migrating);

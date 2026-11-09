@@ -145,6 +145,8 @@ type fakeDomains struct {
 	dns map[string]bool
 	// reconcile: o que Reconcile devolve (nil = status atual).
 	reconcile func(ctx context.Context) proxy.Status
+	// onResume roda depois de cada Resume (fora do lock).
+	onResume func()
 }
 
 func (d *fakeDomains) DNSReady(_ context.Context, host string) (bool, string) {
@@ -185,14 +187,19 @@ func (d *fakeDomains) Pause() {
 }
 func (d *fakeDomains) Resume(st proxy.Status) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if !d.paused {
+		d.mu.Unlock()
 		panic("Resume sem Pause")
 	}
 	d.paused = false
 	d.resumed = append(d.resumed, st)
 	if st.State != "" {
 		d.status = st
+	}
+	hook := d.onResume
+	d.mu.Unlock()
+	if hook != nil {
+		hook()
 	}
 }
 

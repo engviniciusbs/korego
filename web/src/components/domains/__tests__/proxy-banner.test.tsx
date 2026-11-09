@@ -210,6 +210,34 @@ describe("ProxyBanner — ensaio e troca de servidor", () => {
     expect(await screen.findByRole("button", { name: "Voltar para o nginx" })).toBeInTheDocument();
   });
 
+  it("envio duplo não repete o POST e o código é limpo ao enviar", async () => {
+    let release: (r: Response) => void = () => {};
+    routes["POST /api/proxy/takeover"] = () => {
+      throw new Error("não usado");
+    };
+    fetchMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+      const key = `${init?.method ?? "GET"} ${url.split("?")[0]}`;
+      if (key === "POST /api/proxy/takeover") return new Promise<Response>((r) => (release = r));
+      const h = routes[key];
+      return h ? h(init) : json({ error: { code: "NOT_FOUND", message: "não" } }, 404);
+    });
+    renderBanner();
+    const btn = await screen.findByRole("button", { name: "Assumir as portas" });
+    await waitFor(() => expect(btn).toBeEnabled());
+    fireEvent.click(btn);
+    const dialog = await screen.findByRole("dialog");
+    const code = within(dialog).getByLabelText(/Código/);
+    fireEvent.change(code, { target: { value: "123456" } });
+    const form = dialog.querySelector("form")!;
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    await waitFor(() => expect(calls("POST /api/proxy/takeover")).toHaveLength(1));
+    expect(code).toHaveValue("");
+    release(json({ status: "running", topic: "proxy-migration" }, 202));
+    await within(dialog).findByRole("list", { name: "Passos da troca" });
+    expect(calls("POST /api/proxy/takeover")).toHaveLength(1);
+  });
+
   it("resultado rolled_back mostra 'voltou para o nginx: <motivo>'", async () => {
     routes["POST /api/proxy/takeover"] = () => json({ status: "running", topic: "proxy-migration" }, 202);
     renderBanner();
@@ -301,6 +329,34 @@ describe("ProxyBanner — ensaio e troca de servidor", () => {
 });
 
 describe("Domínios durante a troca de servidor", () => {
+  it("diálogo de domínio aberto desabilita Salvar quando a troca começa", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    routes["GET /api/proxy"] = () => json(proxy());
+    routes["GET /api/domains"] = () => json({ domains: [] });
+    routes["GET /api/apps"] = () => json({ apps: [] });
+    routes["GET /api/certificates"] = () => json({ certificates: [] });
+    render(
+      <QueryClientProvider client={client}>
+        <DominiosPage />
+      </QueryClientProvider>,
+    );
+    const add = await screen.findByRole("button", { name: "Adicionar domínio" });
+    await waitFor(() => expect(add).toBeEnabled());
+    fireEvent.click(add);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("button", { name: "Salvar" })).toBeEnabled();
+
+    act(() => {
+      client.setQueryData(["proxy"], proxy({ migrating: true }));
+    });
+    // O TanStack Query notifica de forma assíncrona.
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Salvar" })).toBeDisabled());
+    expect(within(dialog).getByText(/Troca de servidor em andamento/)).toBeInTheDocument();
+    // Enter no formulário também não grava.
+    fireEvent.submit(dialog.querySelector("form")!);
+    expect(calls("POST /api/domains")).toHaveLength(0);
+  });
+
   it("bloqueia Adicionar, Editar e Remover enquanto a troca está em andamento", async () => {
     const d = {
       id: 1,
