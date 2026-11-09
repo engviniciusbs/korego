@@ -60,11 +60,15 @@ func (f *fakeProcs) Snapshot(context.Context) ([]procs.Proc, error) {
 }
 
 type fakePM2 struct {
-	snap pm2.Snapshot
-	err  error
+	snap  pm2.Snapshot
+	err   error
+	calls atomic.Int64
 }
 
-func (f *fakePM2) Snapshot(context.Context) (pm2.Snapshot, error) { return f.snap, f.err }
+func (f *fakePM2) Snapshot(context.Context) (pm2.Snapshot, error) {
+	f.calls.Add(1)
+	return f.snap, f.err
+}
 
 func cid(c byte) string { return strings.Repeat(string(c), 64) }
 
@@ -216,6 +220,7 @@ func TestCollector_MinuteTopAndRest(t *testing.T) {
 	runC(t, c)
 
 	waitLatest(t, c)
+	waitReadings(t, src) // a primeira leitura não entra no minuto
 	assert.Empty(t, minuteRows(t, db, cbase), "nada gravado antes de virar o minuto")
 	clk.Set(cbase.Add(65 * time.Second))
 
@@ -250,6 +255,7 @@ func TestCollector_MinuteAverageAndNoRestWhenAllSelected(t *testing.T) {
 	runC(t, c)
 
 	waitReadings(t, src)
+	waitReadings(t, src) // a primeira leitura não entra no minuto; garante outras com 10
 	src.mu.Lock()
 	src.ps = []procs.Proc{svcProc(1, "a", 30, 300)}
 	src.mu.Unlock()
@@ -282,6 +288,7 @@ func TestCollector_DockerDownGoesToOther(t *testing.T) {
 	assert.Equal(t, 1, o.ProcCount)
 	assert.Equal(t, 7.0, o.CPUPercent)
 
+	waitReadings(t, src) // a primeira leitura não entra no minuto
 	stop()
 	rows := byKey(minuteRows(t, db, cbase))
 	assert.Contains(t, rows, "other")
@@ -437,6 +444,7 @@ func TestCollector_FlushOnStop(t *testing.T) {
 	stop := runC(t, c)
 
 	waitLatest(t, c)
+	waitReadings(t, src) // a primeira leitura não entra no minuto
 	assert.Empty(t, minuteRows(t, db, cbase))
 	stop()
 	rows := minuteRows(t, db, cbase)
@@ -455,4 +463,184 @@ func TestContainerID(t *testing.T) {
 	assert.Equal(t, id, usage.ContainerID("/docker/"+id))
 	assert.Equal(t, "", usage.ContainerID("/docker/0123abcd"))
 	assert.Equal(t, "", usage.ContainerID("/system.slice/nginx.service"))
+}
+
+func TestCollector_PM2CacheDe60s(t *testing.T) {
+	src := &fakeProcs{ps: []procs.Proc{{PID: 100, PPID: 1, Name: "node", Cmdline: []string{"node"}, CPUPercent: 1}}}
+	pp := &fakePM2{snap: pm2.Snapshot{Available: true, DaemonRunning: true, Processes: []pm2.Process{{Name: "api", PID: 100}}}}
+	t0 := cbase.Add(time.Second)
+	clk := newClock(t0)
+	c := &usage.Collector{Procs: src, Docker: &dockertest.Fake{}, PM2: pp, DB: store.OpenMemory(t), Interval: time.Millisecond, Now: clk.Now}
+	runC(t, c)
+
+	waitLatest(t, c)
+	waitReadings(t, src)
+	waitReadings(t, src)
+	assert.EqualValues(t, 1, pp.calls.Load(), "várias leituras, uma só chamada ao PM2")
+	s, _ := c.Latest()
+	_, ok := ownerByKey(s.Owners, "pm2:api")
+	assert.True(t, ok, "o mapa em cache continua valendo")
+
+	clk.Set(t0.Add(59 * time.Second))
+	waitReadings(t, src)
+	assert.EqualValues(t, 1, pp.calls.Load())
+
+	clk.Set(t0.Add(60 * time.Second))
+	waitReadings(t, src)
+	assert.EqualValues(t, 2, pp.calls.Load(), "renova após 60 s")
+	waitReadings(t, src)
+	assert.EqualValues(t, 2, pp.calls.Load())
+}
+
+func TestCollector_PM2ErroTambemFicaEmCache(t *testing.T) {
+	src := &fakeProcs{ps: []procs.Proc{{PID: 100, PPID: 1, Name: "node", CPUPercent: 1}}}
+	pp := &fakePM2{err: errors.New("pm2 falhou")}
+	t0 := cbase.Add(time.Second)
+	clk := newClock(t0)
+	c := &usage.Collector{Procs: src, Docker: &dockertest.Fake{}, PM2: pp, DB: store.OpenMemory(t), Interval: time.Millisecond, Now: clk.Now}
+	runC(t, c)
+
+	waitLatest(t, c)
+	waitReadings(t, src)
+	waitReadings(t, src)
+	assert.EqualValues(t, 1, pp.calls.Load(), "o erro não é repetido a cada leitura")
+	clk.Set(t0.Add(60 * time.Second))
+	waitReadings(t, src)
+	assert.EqualValues(t, 2, pp.calls.Load())
+}
+
+func TestCollector_DockerListTimeoutDe3s(t *testing.T) {
+	var rem atomic.Int64
+	var hasDeadline atomic.Bool
+	dk := &dockertest.Fake{ListFn: func(ctx context.Context) ([]docker.Container, error) {
+		if dl, ok := ctx.Deadline(); ok {
+			hasDeadline.Store(true)
+			rem.Store(int64(time.Until(dl)))
+		}
+		return nil, nil
+	}}
+	src := &fakeProcs{ps: []procs.Proc{svcProc(1, "a", 1, 1)}}
+	c := &usage.Collector{Procs: src, Docker: dk, PM2: &fakePM2{}, DB: store.OpenMemory(t), Interval: time.Millisecond, Now: newClock(cbase).Now}
+	runC(t, c)
+	waitLatest(t, c)
+	require.True(t, hasDeadline.Load())
+	assert.LessOrEqual(t, time.Duration(rem.Load()), 3*time.Second)
+	assert.Greater(t, time.Duration(rem.Load()), 2*time.Second)
+}
+
+// Com o Docker fora, um id desconhecido não refaz a lista a cada 5 s: só o
+// refresh periódico de 30 s tenta de novo.
+func TestCollector_DockerForaSemRefreshPorIdDesconhecido(t *testing.T) {
+	var calls atomic.Int64
+	dk := &dockertest.Fake{ListFn: func(context.Context) ([]docker.Container, error) {
+		calls.Add(1)
+		return nil, docker.ErrUnavailable
+	}}
+	t0 := cbase.Add(time.Second)
+	clk := newClock(t0)
+	src := &fakeProcs{ps: []procs.Proc{ctrProc(10, cid('a'), 1)}}
+	c := &usage.Collector{Procs: src, Docker: dk, PM2: &fakePM2{}, DB: store.OpenMemory(t), Interval: time.Millisecond, Now: clk.Now}
+	runC(t, c)
+
+	waitLatest(t, c)
+	waitReadings(t, src)
+	assert.EqualValues(t, 1, calls.Load())
+	for _, d := range []time.Duration{5, 10, 29} {
+		clk.Set(t0.Add(d * time.Second))
+		waitReadings(t, src)
+		assert.EqualValues(t, 1, calls.Load(), "Docker fora: sem nova tentativa em %v", d*time.Second)
+	}
+	clk.Set(t0.Add(30 * time.Second))
+	waitReadings(t, src)
+	assert.EqualValues(t, 2, calls.Load())
+}
+
+// triedAt é marcado quando List volta: uma chamada lenta não encurta o
+// intervalo até a próxima.
+func TestCollector_DockerTriedAtDepoisDaChamada(t *testing.T) {
+	idA := cid('a')
+	t0 := cbase.Add(time.Second)
+	clk := newClock(t0)
+	var calls atomic.Int64
+	dk := &dockertest.Fake{ListFn: func(context.Context) ([]docker.Container, error) {
+		if calls.Add(1) == 1 {
+			clk.Set(t0.Add(3 * time.Second)) // a primeira chamada leva 3 s
+		}
+		return []docker.Container{{ID: idA, Name: "a"}}, nil
+	}}
+	src := &fakeProcs{ps: []procs.Proc{ctrProc(10, idA, 1)}}
+	c := &usage.Collector{Procs: src, Docker: dk, PM2: &fakePM2{}, DB: store.OpenMemory(t), Interval: time.Millisecond, Now: clk.Now}
+	runC(t, c)
+
+	waitLatest(t, c)
+	clk.Set(t0.Add(32 * time.Second)) // 29 s depois do fim da chamada
+	waitReadings(t, src)
+	assert.EqualValues(t, 1, calls.Load())
+	clk.Set(t0.Add(33 * time.Second))
+	waitReadings(t, src)
+	assert.EqualValues(t, 2, calls.Load())
+}
+
+// seqProcs devolve first na primeira leitura e rest nas demais.
+type seqProcs struct {
+	first, rest []procs.Proc
+	calls       atomic.Int64
+}
+
+func (f *seqProcs) Snapshot(context.Context) ([]procs.Proc, error) {
+	if f.calls.Add(1) == 1 {
+		return append([]procs.Proc(nil), f.first...), nil
+	}
+	return append([]procs.Proc(nil), f.rest...), nil
+}
+
+// A primeira leitura (CPU 0%, sem leitura anterior) aparece em Latest, mas
+// não entra na média do minuto.
+func TestCollector_PrimeiraLeituraNaoEntraNoMinuto(t *testing.T) {
+	db := store.OpenMemory(t)
+	src := &seqProcs{first: []procs.Proc{svcProc(1, "a", 0, 4096)}, rest: []procs.Proc{svcProc(1, "a", 50, 4096)}}
+	c := &usage.Collector{Procs: src, Docker: &dockertest.Fake{}, PM2: &fakePM2{}, DB: db, Interval: time.Millisecond, Now: newClock(cbase.Add(5 * time.Second)).Now}
+	stop := runC(t, c)
+
+	s := waitLatest(t, c)
+	o, ok := ownerByKey(s.Owners, "service:a")
+	require.True(t, ok)
+	assert.EqualValues(t, 4096, o.MemBytes, "a RAM aparece já na primeira leitura")
+	require.Eventually(t, func() bool { return src.calls.Load() >= 4 }, 2*time.Second, time.Millisecond)
+	stop()
+	rows := minuteRows(t, db, cbase)
+	require.Len(t, rows, 1)
+	assert.InDelta(t, 50.0, rows[0].CPUPercent, 1e-9, "o 0% da primeira leitura não puxa a média")
+}
+
+// firstOnlyProcs devolve uma leitura e bloqueia as seguintes até o fim.
+type firstOnlyProcs struct{ calls atomic.Int64 }
+
+func (f *firstOnlyProcs) Snapshot(ctx context.Context) ([]procs.Proc, error) {
+	if f.calls.Add(1) == 1 {
+		return []procs.Proc{svcProc(1, "a", 0, 4096)}, nil
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// Só houve a primeira leitura: ela é publicada, mas nada é gravado.
+func TestCollector_SoAPrimeiraLeituraNaoGravaNada(t *testing.T) {
+	db := store.OpenMemory(t)
+	src := &firstOnlyProcs{}
+	hub := events.NewHub()
+	ch, unsub := hub.Subscribe("usage")
+	defer unsub()
+	c := &usage.Collector{Procs: src, Docker: &dockertest.Fake{}, PM2: &fakePM2{}, Hub: hub, DB: db, Interval: time.Millisecond, Now: newClock(cbase.Add(5 * time.Second)).Now}
+	stop := runC(t, c)
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a primeira leitura deve ser publicada")
+	}
+	waitLatest(t, c)
+	require.Eventually(t, func() bool { return src.calls.Load() >= 2 }, 2*time.Second, time.Millisecond)
+	stop()
+	assert.Empty(t, minuteRows(t, db, cbase))
 }

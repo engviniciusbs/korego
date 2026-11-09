@@ -8,6 +8,9 @@ import (
 
 const maxProcsPerOwner = 50
 
+// maskCmd é MaskCmd; variável só para o teste contar as chamadas.
+var maskCmd = MaskCmd
+
 // ProcView é um processo como mostrado dentro de um dono.
 type ProcView struct {
 	PID             int
@@ -35,37 +38,47 @@ func Aggregate(ps []procs.Proc, l Lookup) []Owner {
 			l.Parent[p.PID] = p.PPID
 		}
 	}
-	byKey := map[string]*Owner{}
+	type group struct {
+		o  *Owner
+		ps []procs.Proc
+	}
+	byKey := map[string]*group{}
 	for _, p := range ps {
 		ref := Classify(p, l)
-		o := byKey[ref.Key]
-		if o == nil {
-			o = &Owner{Ref: ref}
-			byKey[ref.Key] = o
+		g := byKey[ref.Key]
+		if g == nil {
+			g = &group{o: &Owner{Ref: ref}}
+			byKey[ref.Key] = g
 		}
-		o.CPUPercent += p.CPUPercent
-		o.MemBytes += p.RSSBytes
-		o.ProcCount++
-		o.Processes = append(o.Processes, ProcView{
-			PID: p.PID, Name: p.Name, Cmd: MaskCmd(p.Cmdline), User: p.User,
-			CPUPercent: p.CPUPercent, MemBytes: p.RSSBytes,
-		})
+		g.o.CPUPercent += p.CPUPercent
+		g.o.MemBytes += p.RSSBytes
+		g.o.ProcCount++
+		g.ps = append(g.ps, p)
 	}
 	owners := make([]Owner, 0, len(byKey))
-	for _, o := range byKey {
+	for _, g := range byKey {
+		o := g.o
 		if o.CPUPercent > 100 {
 			o.CPUPercent = 100
 		}
-		sort.Slice(o.Processes, func(i, j int) bool {
-			a, b := o.Processes[i], o.Processes[j]
+		sort.Slice(g.ps, func(i, j int) bool {
+			a, b := g.ps[i], g.ps[j]
 			if a.CPUPercent != b.CPUPercent {
 				return a.CPUPercent > b.CPUPercent
 			}
 			return a.PID < b.PID
 		})
-		if len(o.Processes) > maxProcsPerOwner {
-			o.Processes = o.Processes[:maxProcsPerOwner]
+		if len(g.ps) > maxProcsPerOwner {
+			g.ps = g.ps[:maxProcsPerOwner]
 			o.Truncated = true
+		}
+		// A máscara só roda nos processos que ficam depois do corte.
+		o.Processes = make([]ProcView, 0, len(g.ps))
+		for _, p := range g.ps {
+			o.Processes = append(o.Processes, ProcView{
+				PID: p.PID, Name: p.Name, Cmd: maskCmd(p.Cmdline), User: p.User,
+				CPUPercent: p.CPUPercent, MemBytes: p.RSSBytes,
+			})
 		}
 		owners = append(owners, *o)
 	}

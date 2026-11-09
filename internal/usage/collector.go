@@ -20,7 +20,8 @@ const (
 	dockerRefresh     = 30 * time.Second // refresh periódico da lista de containers
 	dockerMinRefresh  = 5 * time.Second  // intervalo mínimo entre listas (id desconhecido)
 	dockerStaleAfter  = 5 * time.Minute  // por quanto tempo o último mapa bom vale com o Docker fora
-	dockerListTimeout = 10 * time.Second
+	dockerListTimeout = 3 * time.Second
+	pm2CacheTTL       = 60 * time.Second // por quanto tempo o mapa pid → app (ou o erro) vale
 	flushTimeout      = 5 * time.Second
 	topN              = 15
 
@@ -107,7 +108,11 @@ type loopState struct {
 	tried      bool                        // já houve uma chamada a List
 	triedAt    time.Time                   // última chamada a List
 	okAt       time.Time                   // último List com sucesso
-	dockerOK   bool
+	dockerOK   bool                        // o último List deu certo
+
+	pm2Map   map[int]string // último resultado do PM2 (nil com erro ou daemon parado)
+	pm2Tried bool
+	pm2At    time.Time // última chamada ao PM2
 
 	// erros já registrados no log, para não repetir a cada leitura
 	procsErr, dockerErr, pm2Err bool
@@ -122,6 +127,9 @@ func (c *Collector) Run(ctx context.Context) {
 	st := &loopState{}
 
 	var cur *minuteAcc
+	// A primeira leitura não tem anterior, então a CPU de todos sai 0%: ela é
+	// publicada e fica em Latest (a RAM aparece logo), mas não entra no minuto.
+	skipFirst := true
 	flush := func(fctx context.Context) {
 		if cur == nil {
 			return
@@ -144,7 +152,9 @@ func (c *Collector) Run(ctx context.Context) {
 	defer tick.Stop()
 
 	for {
-		if snap, ok := c.collect(ctx, st); ok {
+		if snap, ok := c.collect(ctx, st); ok && skipFirst {
+			skipFirst = false
+		} else if ok {
 			m := snap.Time.Truncate(time.Minute)
 			if cur != nil && !cur.minute.Equal(m) {
 				flush(ctx)
@@ -190,7 +200,7 @@ func (c *Collector) collect(ctx context.Context, st *loopState) (Snapshot, bool)
 	now := c.now()
 	l := Lookup{
 		Containers: c.containers(ctx, st, ps, now),
-		PM2:        c.pm2Apps(ctx, st),
+		PM2:        c.pm2Apps(ctx, st, now),
 	}
 	if ctx.Err() != nil {
 		return Snapshot{}, false
@@ -219,15 +229,17 @@ func livePayload(s Snapshot) LivePayload {
 
 // containers devolve o mapa de containers (decisão C1): lista de novo a cada
 // 30 s, ou já quando um processo traz um id fora do mapa (no máximo a cada
-// 5 s). Com erro no List, mantém o último mapa bom por até 5 min.
+// 5 s, e só se o último List deu certo: com o Docker fora ou travado, é uma
+// tentativa a cada 30 s). Com erro no List, mantém o último mapa bom por até
+// 5 min.
 func (c *Collector) containers(ctx context.Context, st *loopState, ps []procs.Proc, now time.Time) map[string]docker.Container {
 	since := now.Sub(st.triedAt)
 	need := !st.tried || since >= dockerRefresh || since < 0 // since < 0: relógio voltou
-	if !need && since >= dockerMinRefresh && hasUnknownContainer(ps, st.containers) {
+	if !need && st.dockerOK && since >= dockerMinRefresh && hasUnknownContainer(ps, st.containers) {
 		need = true
 	}
 	if need {
-		c.refreshContainers(ctx, st, now)
+		c.refreshContainers(ctx, st)
 	}
 	if !st.dockerOK && st.containers != nil && now.Sub(st.okAt) > dockerStaleAfter {
 		st.containers = nil
@@ -235,15 +247,20 @@ func (c *Collector) containers(ctx context.Context, st *loopState, ps []procs.Pr
 	return st.containers
 }
 
-func (c *Collector) refreshContainers(ctx context.Context, st *loopState, now time.Time) {
-	st.tried, st.triedAt = true, now
+// refreshContainers chama List com limite de 3 s. triedAt (e okAt) são
+// marcados quando a chamada volta, para que uma chamada lenta não encurte o
+// intervalo até a próxima.
+func (c *Collector) refreshContainers(ctx context.Context, st *loopState) {
+	st.tried = true
 	if c.Docker == nil {
-		st.dockerOK = false
+		st.triedAt, st.dockerOK = c.now(), false
 		return
 	}
 	lctx, cancel := context.WithTimeout(ctx, dockerListTimeout)
 	list, err := c.Docker.List(lctx)
 	cancel()
+	now := c.now()
+	st.triedAt = now
 	if err != nil {
 		st.dockerOK = false
 		if !st.dockerErr && ctx.Err() == nil {
@@ -270,15 +287,25 @@ func hasUnknownContainer(ps []procs.Proc, known map[string]docker.Container) boo
 	return false
 }
 
-// pm2Apps devolve pid → app. Com erro ou daemon parado, mapa vazio. O leitor
-// do PM2 já guarda o resultado em cache por 10 s.
-func (c *Collector) pm2Apps(ctx context.Context, st *loopState) map[int]string {
+// pm2Apps devolve pid → app. Com erro ou daemon parado, mapa vazio. O
+// resultado, inclusive o erro, fica em cache por 60 s: o cache do leitor do
+// PM2 é de só 10 s, e sem isto o coletor rodaria "pm2 jlist" a cada 10 s
+// para sempre. Um app novo no PM2 leva até 1 min para ganhar dono próprio.
+func (c *Collector) pm2Apps(ctx context.Context, st *loopState, now time.Time) map[int]string {
 	if c.PM2 == nil {
 		return nil
 	}
+	if since := now.Sub(st.pm2At); st.pm2Tried && since >= 0 && since < pm2CacheTTL {
+		return st.pm2Map
+	}
 	snap, err := c.PM2.Snapshot(ctx)
+	if ctx.Err() != nil {
+		// Cancelado no meio: não guarda nada, a próxima leitura tenta de novo.
+		return st.pm2Map
+	}
+	st.pm2Tried, st.pm2At, st.pm2Map = true, now, nil
 	if err != nil {
-		if !st.pm2Err && ctx.Err() == nil {
+		if !st.pm2Err {
 			log.Printf("consumo: ler PM2: %v", err)
 			st.pm2Err = true
 		}
@@ -294,6 +321,7 @@ func (c *Collector) pm2Apps(ctx context.Context, st *loopState) map[int]string {
 			m[p.PID] = p.Name
 		}
 	}
+	st.pm2Map = m
 	return m
 }
 

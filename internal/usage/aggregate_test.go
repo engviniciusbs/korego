@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,6 +30,33 @@ func TestAggregate_SumsSortsCaps(t *testing.T) {
 	assert.Equal(t, []string{"service:big", "service:c", "service:a", "service:b"},
 		[]string{owners[0].Key, owners[1].Key, owners[2].Key, owners[3].Key})
 	assert.False(t, owners[1].Truncated)
+}
+
+// Só os processos que ficam depois do corte de 50 por dono passam pela máscara.
+func TestAggregate_MascaraSoOsMantidos(t *testing.T) {
+	var masked []string
+	orig := maskCmd
+	maskCmd = func(argv []string) string {
+		masked = append(masked, argv[0])
+		return MaskCmd(argv)
+	}
+	t.Cleanup(func() { maskCmd = orig })
+
+	var ps []procs.Proc
+	for i := 0; i < 60; i++ {
+		// CPU decrescente com o pid: ficam os pids 100..149.
+		ps = append(ps, procs.Proc{PID: 100 + i, Cmdline: []string{fmt.Sprintf("p%d", 100+i), "--token=x"}, Cgroup: "/system.slice/big.service", CPUPercent: float64(100 - i)})
+	}
+	o := Aggregate(ps, Lookup{})
+	assert.Len(t, o[0].Processes, 50)
+	assert.True(t, o[0].Truncated)
+	assert.Equal(t, 60, o[0].ProcCount)
+	assert.Len(t, masked, 50)
+	assert.NotContains(t, masked, "p150")
+	assert.NotContains(t, masked, "p159")
+	assert.Contains(t, masked, "p149")
+	assert.Equal(t, "p100 --token=••••", o[0].Processes[0].Cmd)
+	assert.Equal(t, "p149 --token=••••", o[0].Processes[49].Cmd)
 }
 
 func TestAggregate_ProcessosOrdenadosEMascarados(t *testing.T) {
