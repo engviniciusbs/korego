@@ -190,7 +190,7 @@ func runServe(args []string) error {
 	}
 
 	handler := api.NewRouter(api.Deps{
-		Auth: svc, Node: nd, Hub: hub, Web: web, Metrics: collector, DB: db,
+		Auth: svc, Node: nd, Hub: hub, Web: web, Metrics: collector, Usage: usageCollector, DB: db,
 		Updater: &update.System{ExePath: exe, ConfigPath: *cfgPath},
 		Domains: domSvc, Deploys: deploySvc, DataDir: cfg.DataDir, Runner: deploy.ExecRunner{}, Box: box,
 		GitHub:          ghSvc,
