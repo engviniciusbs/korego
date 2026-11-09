@@ -163,3 +163,33 @@ func TestReapply_StaleStatusFallsBackToTrial(t *testing.T) {
 	require.NoError(t, s.Reapply(ctx))
 	assert.Equal(t, proxy.ListenTrial, fake.LastMode())
 }
+
+func TestReapply_StaleTrialStatusEndsApplyingNormal(t *testing.T) {
+	ctx := context.Background()
+	s, fake := newTestService(t)
+	// Status visto: trial. O proxy, porém, já serve em modo normal.
+	fake.EnsureFn = func(context.Context) proxy.Status {
+		return proxy.Status{State: proxy.StateTrial, Mode: proxy.ListenTrial}
+	}
+	s.Reconcile(ctx)
+	calls := 0
+	fake.ApplyFn = func(_ context.Context, _ []proxy.Site, mode proxy.Listen, _ []string) error {
+		calls++
+		if mode == proxy.ListenTrial {
+			return proxy.ErrTrialMode
+		}
+		return nil
+	}
+	require.NoError(t, s.Reapply(ctx))
+	assert.Equal(t, proxy.ListenNormal, fake.LastMode())
+	assert.Equal(t, 2, calls)
+
+	// Os dois modos recusados: erro, sem laço.
+	calls = 0
+	fake.ApplyFn = func(context.Context, []proxy.Site, proxy.Listen, []string) error {
+		calls++
+		return proxy.ErrTrialMode
+	}
+	assert.ErrorIs(t, s.Reapply(ctx), proxy.ErrTrialMode)
+	assert.Equal(t, 2, calls)
+}

@@ -152,8 +152,13 @@ func (s *Service) Reapply(ctx context.Context) error {
 	}
 	err = s.Proxy.Apply(ctx, routes, mode, nil)
 	if errors.Is(err, proxy.ErrTrialMode) {
-		// O status visto estava velho: o proxy já está em ensaio.
-		err = s.Proxy.Apply(ctx, routes, proxy.ListenTrial, nil)
+		// O status visto estava velho: o proxy está no outro modo. Uma única
+		// tentativa, sem laço.
+		other := proxy.ListenTrial
+		if mode == proxy.ListenTrial {
+			other = proxy.ListenNormal
+		}
+		err = s.Proxy.Apply(ctx, routes, other, nil)
 	}
 	return err
 }

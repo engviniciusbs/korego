@@ -241,7 +241,11 @@ const adminPort = 2019
 // Nas portas 80/443, o dono é alheio quando não é nosso, ou quando a config
 // atual não escuta em :443 (config vazia ou de ensaio: o Caddy não as segura).
 func (c *Caddy) probe(ctx context.Context, ct docker.Container) (Status, verdict) {
-	pid := c.containerPid(ctx, ct)
+	pid, err := c.containerPid(ctx, ct)
+	if err != nil {
+		// Sem o PID não dá para saber de quem são as portas: não conclui nada.
+		return Status{State: StateStarting, Message: "falha ao inspecionar o container " + ContainerName}, unknown
+	}
 	if owner, busy := c.PortOwner(adminPort); busy && !c.ours(owner, pid) {
 		return Status{
 			State:   StateError,
@@ -273,16 +277,16 @@ func (c *Caddy) probe(ctx context.Context, ct docker.Container) (Status, verdict
 	return Status{State: StateActive, Mode: ListenNormal}, notServing
 }
 
-// containerPid devolve o PID do container no host (0 se desconhecido).
-func (c *Caddy) containerPid(ctx context.Context, ct docker.Container) int {
+// containerPid devolve o PID do container no host (0 se ainda não há container).
+func (c *Caddy) containerPid(ctx context.Context, ct docker.Container) (int, error) {
 	if ct.ID == "" {
-		return 0
+		return 0, nil
 	}
 	d, err := c.docker.Inspect(ctx, ct.ID)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return d.Pid
+	return d.Pid, nil
 }
 
 // ours diz se o dono ("nome (pid N)") é o processo do container ou descende dele.
@@ -344,7 +348,9 @@ func (c *Caddy) Apply(ctx context.Context, sites []Site, mode Listen, cf []strin
 	if state != StateActive && state != StateTrial {
 		return ErrInactive
 	}
-	if state == StateTrial && mode == ListenNormal {
+	// Simétrico: normal em ensaio derrubaria o Caddy ao disputar 80/443 e
+	// ensaio num Caddy servindo tiraria :80/:443 do ar.
+	if (state == StateTrial && mode == ListenNormal) || (state == StateActive && mode == ListenTrial) {
 		return ErrTrialMode
 	}
 	cfg, err := BuildConfig(sites, mode, cf)

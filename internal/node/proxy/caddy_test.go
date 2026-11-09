@@ -75,7 +75,7 @@ func TestEnsure_StartsWhenPortsFree(t *testing.T) {
 			return "c1", nil
 		},
 	}
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.PortOwner = freePorts
 
 	st := c.Ensure(context.Background())
@@ -110,7 +110,7 @@ func TestEnsure_SkipsPullWhenImagePresent(t *testing.T) {
 		},
 		RunFn: func(context.Context, docker.RunSpec) (string, error) { return "c1", nil },
 	}
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.PortOwner = freePorts
 	assert.Equal(t, StateActive, c.Ensure(context.Background()).State)
 }
@@ -123,7 +123,7 @@ func TestEnsure_PullFailureIsError(t *testing.T) {
 			return assert.AnError
 		},
 	}
-	c := NewCaddy(d, downAdmin(t))
+	c := newCaddy(d, downAdmin(t))
 	c.PortOwner = freePorts
 	st := c.Ensure(context.Background())
 	assert.Equal(t, StateError, st.State)
@@ -136,7 +136,7 @@ func TestEnsure_StartingUntilAdminAnswers(t *testing.T) {
 			return []docker.Container{{ID: "c1", Name: ContainerName, State: "running", Managed: true, Labels: specLabels}}, nil
 		},
 	}
-	c := NewCaddy(d, downAdmin(t))
+	c := newCaddy(d, downAdmin(t))
 	c.PortOwner = freePorts
 	assert.Equal(t, StateStarting, c.Ensure(context.Background()).State)
 }
@@ -153,7 +153,7 @@ func TestEnsure_OwnContainerHoldingPortsIsActive(t *testing.T) {
 			return "", nil
 		},
 	}
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	// O próprio Caddy ocupa as portas: a checagem não pode acusá-lo.
 	c.PortOwner = func(int) (string, bool) { return "caddy (pid 99)", true }
 	c.docker = withPid(d, 99)
@@ -171,14 +171,14 @@ func TestEnsure_RestartsStopped(t *testing.T) {
 		},
 		StartFn: func(_ context.Context, id string) error { started = append(started, id); return nil },
 	}
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.PortOwner = freePorts
 	assert.Equal(t, StateActive, c.Ensure(context.Background()).State)
 	assert.Equal(t, []string{"c1"}, started)
 }
 
 func TestEnsure_DockerDown(t *testing.T) {
-	c := NewCaddy(&dockertest.Fake{}, downAdmin(t)) // ListFn nil → ErrUnavailable
+	c := newCaddy(&dockertest.Fake{}, downAdmin(t)) // ListFn nil → ErrUnavailable
 	c.PortOwner = freePorts
 	st := c.Ensure(context.Background())
 	assert.Equal(t, StateDockerUnavailable, st.State)
@@ -192,7 +192,7 @@ func TestApply_InactiveError(t *testing.T) {
 			return []docker.Container{{ID: "c1", Name: ContainerName, State: "running", Managed: true, Labels: specLabels}}, nil
 		},
 	}
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.PortOwner = freePorts
 	routes := []Site{simple("exemplo.com", "127.0.0.1:20001", false, "")}
 
@@ -219,7 +219,7 @@ func TestApply_InactiveError(t *testing.T) {
 
 func TestInSync_DetectsEmptyAfterRestart(t *testing.T) {
 	fa, admin := newFakeAdmin(t)
-	c := NewCaddy(&dockertest.Fake{}, admin)
+	c := newCaddy(&dockertest.Fake{}, admin)
 	routes := []Site{simple("exemplo.com", "127.0.0.1:20001", true, "")}
 
 	ok, err := c.InSync(context.Background(), routes, ListenNormal, nil)
@@ -235,7 +235,7 @@ func TestInSync_DetectsEmptyAfterRestart(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok)
 
-	_, err = NewCaddy(&dockertest.Fake{}, downAdmin(t)).InSync(context.Background(), routes, ListenNormal, nil)
+	_, err = newCaddy(&dockertest.Fake{}, downAdmin(t)).InSync(context.Background(), routes, ListenNormal, nil)
 	assert.Error(t, err)
 }
 
@@ -270,7 +270,7 @@ func TestEnsure_ForeignContainerWithSameName(t *testing.T) {
 				return nil
 			},
 		}
-		c := NewCaddy(d, admin)
+		c := newCaddy(d, admin)
 		c.PortOwner = freePorts
 		st := c.Ensure(context.Background())
 		assert.Equal(t, StateError, st.State, state)

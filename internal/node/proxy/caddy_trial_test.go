@@ -36,7 +36,7 @@ func TestEnsure_ForeignPortsGivesTrial(t *testing.T) {
 		ImagesFn: imagePresent,
 		RunFn:    func(context.Context, docker.RunSpec) (string, error) { runs++; return "c1", nil },
 	}
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.EnsureWWW = func() error { return nil }
 	c.PortOwner = nginxOn80
 	st := c.Ensure(context.Background())
@@ -62,7 +62,7 @@ func TestEnsure_TrialConfigStillForeign(t *testing.T) {
 	cfg, err := BuildConfig([]Site{simple("exemplo.com", "127.0.0.1:20001", false, "")}, ListenTrial, nil)
 	require.NoError(t, err)
 	fa.config = string(cfg) // Caddy em 18080/18443, não em :443
-	c := NewCaddy(&dockertest.Fake{ListFn: runningOwn(specLabels)}, admin)
+	c := newCaddy(&dockertest.Fake{ListFn: runningOwn(specLabels)}, admin)
 
 	// Mesmo um dono chamado "caddy" é alheio: nossa config não escuta em :443.
 	c.PortOwner = func(p int) (string, bool) { return onlyWeb(p, "caddy (pid 5)") }
@@ -80,7 +80,7 @@ func TestEnsure_TrialConfigStillForeign(t *testing.T) {
 func TestEnsure_NormalConfigWithForeignOwnerIsTrial(t *testing.T) {
 	fa, admin := newFakeAdmin(t)
 	fa.config = normalCfg
-	c := NewCaddy(&dockertest.Fake{ListFn: runningOwn(specLabels)}, admin)
+	c := newCaddy(&dockertest.Fake{ListFn: runningOwn(specLabels)}, admin)
 	c.PortOwner = func(p int) (string, bool) {
 		switch p {
 		case 443:
@@ -111,7 +111,7 @@ func TestEnsure_RecreatesOldSpecWhenNotServing(t *testing.T) {
 			return "c2", nil
 		},
 	}
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.EnsureWWW = func() error { return nil }
 	c.PortOwner = freePorts
 	st := c.Ensure(context.Background())
@@ -135,7 +135,7 @@ func TestEnsure_DoesNotRecreateWhileServingNormal(t *testing.T) {
 			return "", nil
 		},
 	}
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.PortOwner = func(int) (string, bool) { return "caddy (pid 99)", true }
 	c.docker = withPid(d, 99)
 	st := c.Ensure(context.Background())
@@ -151,7 +151,7 @@ func TestEnsure_RunSpecHasWwwBindAndLabel(t *testing.T) {
 		ImagesFn: imagePresent,
 		RunFn:    func(_ context.Context, s docker.RunSpec) (string, error) { spec = s; return "c1", nil },
 	}
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.PortOwner = freePorts
 	wwwCalls := 0
 	c.EnsureWWW = func() error { wwwCalls++; return nil }
@@ -182,7 +182,7 @@ func TestEnsure_HostCaddyOwningAdminPortIsErrorAndNeverApplied(t *testing.T) {
 	fa, admin := newFakeAdmin(t) // faz o papel da Admin API do Caddy do host
 	fa.config = normalCfg
 	d := withPid(&dockertest.Fake{ListFn: runningOwn(specLabels)}, 100)
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.PortOwner = func(int) (string, bool) { return "caddy (pid 555)", true } // 80, 443 e 2019
 	c.Descends = func(pid, anc int) bool { return pid == anc }
 	st := c.Ensure(context.Background())
@@ -198,7 +198,7 @@ func TestEnsure_CrashLoopBecauseAdminPortTaken(t *testing.T) {
 	d := &dockertest.Fake{ListFn: func(context.Context) ([]docker.Container, error) {
 		return []docker.Container{{ID: "c1", Name: ContainerName, State: "restarting", Managed: true, Labels: specLabels}}, nil
 	}}
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.PortOwner = func(p int) (string, bool) {
 		if p == 2019 {
 			return "caddy (pid 555)", true
@@ -215,7 +215,7 @@ func TestEnsure_HostCaddyOn80And443IsTrial(t *testing.T) {
 	fa, admin := newFakeAdmin(t) // nossa Admin API (2019 é do nosso container)
 	fa.config = normalCfg
 	d := withPid(&dockertest.Fake{ListFn: runningOwn(specLabels)}, 100)
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.PortOwner = func(p int) (string, bool) {
 		switch p {
 		case 2019:
@@ -234,7 +234,7 @@ func TestEnsure_OwnerPidMatchesContainerOrDescendant(t *testing.T) {
 	fa, admin := newFakeAdmin(t)
 	fa.config = normalCfg
 	d := withPid(&dockertest.Fake{ListFn: runningOwn(specLabels)}, 100)
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.PortOwner = func(p int) (string, bool) {
 		if p == 2019 {
 			return "caddy (pid 100)", true
@@ -250,7 +250,7 @@ func TestEnsure_OwnerPidMatchesContainerOrDescendant(t *testing.T) {
 func TestEnsure_DockerProxyIsNotWhitelisted(t *testing.T) {
 	fa, admin := newFakeAdmin(t)
 	fa.config = normalCfg
-	c := NewCaddy(withPid(&dockertest.Fake{ListFn: runningOwn(specLabels)}, 100), admin)
+	c := newCaddy(withPid(&dockertest.Fake{ListFn: runningOwn(specLabels)}, 100), admin)
 	c.PortOwner = func(p int) (string, bool) { return onlyWeb(p, "docker-proxy (pid 8)") }
 	c.Descends = func(int, int) bool { return false }
 	assert.Equal(t, StateTrial, c.Ensure(context.Background()).State)
@@ -265,7 +265,7 @@ func TestEnsure_NoRecreateOnAdminTimeout(t *testing.T) {
 			return nil
 		},
 	}
-	c := NewCaddy(d, downAdmin(t))
+	c := newCaddy(d, downAdmin(t))
 	c.PortOwner = freePorts
 	assert.Equal(t, StateStarting, c.Ensure(context.Background()).State)
 }
@@ -281,7 +281,7 @@ func TestEnsure_WwwFailureAbortsRecreation(t *testing.T) {
 			return nil
 		},
 	}
-	c := NewCaddy(d, admin)
+	c := newCaddy(d, admin)
 	c.PortOwner = freePorts
 	c.EnsureWWW = func() error { return assert.AnError }
 	assert.Equal(t, StateError, c.Ensure(context.Background()).State)
@@ -289,7 +289,7 @@ func TestEnsure_WwwFailureAbortsRecreation(t *testing.T) {
 
 func TestApply_NormalRefusedInTrial(t *testing.T) {
 	fa, admin := newFakeAdmin(t)
-	c := NewCaddy(&dockertest.Fake{ListFn: runningOwn(specLabels)}, admin)
+	c := newCaddy(&dockertest.Fake{ListFn: runningOwn(specLabels)}, admin)
 	c.PortOwner = nginxOn80
 	require.Equal(t, StateTrial, c.Ensure(context.Background()).State)
 	sites := []Site{simple("exemplo.com", "127.0.0.1:20001", false, "")}
@@ -297,4 +297,43 @@ func TestApply_NormalRefusedInTrial(t *testing.T) {
 	assert.Zero(t, fa.loads)
 	require.NoError(t, c.Apply(context.Background(), sites, ListenTrial, nil))
 	assert.Equal(t, 1, fa.loads)
+}
+
+func TestApply_TrialRefusedWhileServingNormal(t *testing.T) {
+	fa, admin := newFakeAdmin(t)
+	c := newCaddy(&dockertest.Fake{ListFn: runningOwn(specLabels)}, admin)
+	c.PortOwner = freePorts
+	require.Equal(t, StateActive, c.Ensure(context.Background()).State)
+	sites := []Site{simple("exemplo.com", "127.0.0.1:20001", false, "")}
+	assert.ErrorIs(t, c.Apply(context.Background(), sites, ListenTrial, nil), ErrTrialMode)
+	assert.Zero(t, fa.loads)
+	require.NoError(t, c.Apply(context.Background(), sites, ListenNormal, nil))
+}
+
+func TestEnsure_InspectFailureIsStartingNotForeign(t *testing.T) {
+	fa, admin := newFakeAdmin(t)
+	fa.config = normalCfg
+	d := &dockertest.Fake{
+		ListFn: runningOwn(specLabels),
+		InspectFn: func(context.Context, string) (docker.Details, error) {
+			return docker.Details{}, assert.AnError
+		},
+	}
+	c := newCaddy(d, admin)
+	c.PortOwner = func(int) (string, bool) { return "caddy (pid 100)", true } // 2019, 80, 443
+	st := c.Ensure(context.Background())
+	assert.Equal(t, StateStarting, st.State)
+	assert.Equal(t, "falha ao inspecionar o container korego-caddy", st.Message)
+	assert.NotContains(t, st.Message, "2019")
+	assert.ErrorIs(t, c.Apply(context.Background(), nil, ListenNormal, nil), ErrInactive)
+	assert.Zero(t, fa.loads)
+	assert.Zero(t, fa.gets)
+}
+
+// newCaddy cria o Caddy dos testes; sem InspectFn, o container tem PID 0.
+func newCaddy(d *dockertest.Fake, a *AdminClient) *Caddy {
+	if d.InspectFn == nil {
+		d.InspectFn = func(context.Context, string) (docker.Details, error) { return docker.Details{}, nil }
+	}
+	return NewCaddy(d, a)
 }
