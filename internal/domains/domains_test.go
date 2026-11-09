@@ -20,7 +20,7 @@ func addrInput(host string) DomainInput {
 func TestCreate_SavesEvenWhenProxyBlocked(t *testing.T) {
 	ctx := context.Background()
 	s, fake := newTestService(t)
-	fake.ApplyFn = func(context.Context, []proxy.Route) error { return proxy.ErrInactive }
+	fake.ApplyFn = func(context.Context, []proxy.Site, proxy.Listen, []string) error { return proxy.ErrInactive }
 
 	d, dns, err := s.Create(ctx, addrInput("exemplo.com"))
 	require.NoError(t, err)
@@ -37,7 +37,7 @@ func TestCreate_SavesEvenWhenProxyBlocked(t *testing.T) {
 func TestCreate_OtherApplyErrorStillSaves(t *testing.T) {
 	ctx := context.Background()
 	s, fake := newTestService(t)
-	fake.ApplyFn = func(context.Context, []proxy.Route) error { return errors.New("caddy fora") }
+	fake.ApplyFn = func(context.Context, []proxy.Site, proxy.Listen, []string) error { return errors.New("caddy fora") }
 	d, _, err := s.Create(ctx, addrInput("exemplo.com"))
 	require.NoError(t, err)
 	_, err = s.DB.GetDomain(ctx, d.ID)
@@ -53,8 +53,8 @@ func TestCreate_AppliesRoutes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "none", d.WWWRedirect) // vazio vira none
 	assert.Empty(t, d.Address)             // endereço não se aplica a app
-	assert.Equal(t, []proxy.Route{{Host: "app.exemplo.com", Upstream: "127.0.0.1:20001",
-		ForceHTTPS: true, WWWRedirect: proxy.WWWNone}}, fake.LastApplied())
+	assert.Equal(t, []proxy.Site{{Host: "app.exemplo.com",
+		ForceHTTPS: true, WWWRedirect: proxy.WWWNone, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:20001"}}}}, fake.LastApplied())
 }
 
 func invalidField(t *testing.T, err error) string {
@@ -148,7 +148,7 @@ func TestUpdateDelete(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, d.ID, u.ID)
 	assert.Equal(t, "127.0.0.1:6000", u.Address)
-	assert.Equal(t, "127.0.0.1:6000", fake.LastApplied()[0].Upstream)
+	assert.Equal(t, "127.0.0.1:6000", fake.LastApplied()[0].Routes[0].Upstream)
 
 	require.NoError(t, s.Delete(ctx, d.ID))
 	_, err = s.DB.GetDomain(ctx, d.ID)

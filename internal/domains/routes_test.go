@@ -29,13 +29,13 @@ func TestRoutes_AppAddressPanel(t *testing.T) {
 
 	routes, err := s.Routes(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, []proxy.Route{
-		{Host: "app.exemplo.com", Upstream: "127.0.0.1:20001", ForceHTTPS: true, WWWRedirect: proxy.WWWNone},
-		{Host: "exemplo.com", Upstream: "127.0.0.1:5000", WWWRedirect: proxy.WWWToApex},
-		{Host: "painel.exemplo.com", Upstream: "127.0.0.1:8000", ForceHTTPS: true, WWWRedirect: proxy.WWWNone},
+	assert.Equal(t, []proxy.Site{
+		{Host: "app.exemplo.com", ForceHTTPS: true, WWWRedirect: proxy.WWWNone, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:20001"}}},
+		{Host: "exemplo.com", WWWRedirect: proxy.WWWToApex, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:5000"}}},
+		{Host: "painel.exemplo.com", ForceHTTPS: true, WWWRedirect: proxy.WWWNone, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:8000"}}},
 	}, routes)
 
-	_, err = proxy.BuildConfig(routes)
+	_, err = proxy.BuildConfig(routes, proxy.ListenNormal, nil)
 	assert.NoError(t, err)
 }
 
@@ -55,11 +55,11 @@ func TestRoutes_SkipsConflictingRows(t *testing.T) {
 
 	routes, err := s.Routes(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, []proxy.Route{
-		{Host: "exemplo.com", Upstream: "127.0.0.1:5000", WWWRedirect: proxy.WWWToApex},
-		{Host: "www.zz.exemplo.com", Upstream: "127.0.0.1:8000", WWWRedirect: proxy.WWWNone},
+	assert.Equal(t, []proxy.Site{
+		{Host: "exemplo.com", WWWRedirect: proxy.WWWToApex, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:5000"}}},
+		{Host: "www.zz.exemplo.com", WWWRedirect: proxy.WWWNone, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:8000"}}},
 	}, routes)
-	_, err = proxy.BuildConfig(routes)
+	_, err = proxy.BuildConfig(routes, proxy.ListenNormal, nil)
 	assert.NoError(t, err)
 }
 
@@ -76,8 +76,8 @@ func TestRoutes_SkipsInvalidWWWMode(t *testing.T) {
 
 	routes, err := s.Routes(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, []proxy.Route{{Host: "ok.exemplo.com", Upstream: "127.0.0.1:5003", WWWRedirect: proxy.WWWNone}}, routes)
-	_, err = proxy.BuildConfig(routes)
+	assert.Equal(t, []proxy.Site{{Host: "ok.exemplo.com", WWWRedirect: proxy.WWWNone, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:5003"}}}}, routes)
+	_, err = proxy.BuildConfig(routes, proxy.ListenNormal, nil)
 	assert.NoError(t, err)
 }
 

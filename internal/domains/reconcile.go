@@ -48,14 +48,14 @@ func (s *Service) Reconcile(ctx context.Context) proxy.Status {
 		log.Printf("proxy: %v", err)
 		return st
 	}
-	ok, err := s.Proxy.InSync(ctx, routes)
+	ok, err := s.Proxy.InSync(ctx, routes, proxy.ListenNormal, nil)
 	if err != nil {
 		log.Printf("proxy: comparar configuração: %v", err)
 	}
 	if ok && err == nil {
 		return st
 	}
-	if err := s.Proxy.Apply(ctx, routes); err != nil {
+	if err := s.Proxy.Apply(ctx, routes, proxy.ListenNormal, nil); err != nil {
 		log.Printf("proxy: reaplicar configuração: %v", err)
 		return st
 	}

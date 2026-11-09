@@ -174,25 +174,25 @@ func failure(what string, err error) Status {
 	return Status{State: StateError, Message: fmt.Sprintf("%s: %v", what, err)}
 }
 
-// Apply substitui a configuração do Caddy pela gerada para routes.
-func (c *Caddy) Apply(ctx context.Context, routes []Route) error {
+// Apply substitui a configuração do Caddy pela gerada para os sites.
+func (c *Caddy) Apply(ctx context.Context, sites []Site, mode Listen, cf []string) error {
 	c.mu.Lock()
 	state := c.last.State
 	c.mu.Unlock()
 	if state != StateActive {
 		return ErrInactive
 	}
-	cfg, err := BuildConfig(routes)
+	cfg, err := BuildConfig(sites, mode, cf)
 	if err != nil {
 		return err
 	}
 	return c.admin.Load(ctx, cfg)
 }
 
-// InSync compara a configuração atual do Caddy com BuildConfig(routes). Um
+// InSync compara a configuração atual do Caddy com BuildConfig(sites, mode, cf). Um
 // Caddy recém-reiniciado (config "null") nunca está em sincronia.
-func (c *Caddy) InSync(ctx context.Context, routes []Route) (bool, error) {
-	want, err := BuildConfig(routes)
+func (c *Caddy) InSync(ctx context.Context, sites []Site, mode Listen, cf []string) (bool, error) {
+	want, err := BuildConfig(sites, mode, cf)
 	if err != nil {
 		return false, err
 	}

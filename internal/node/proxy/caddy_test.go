@@ -214,48 +214,48 @@ func TestApply_InactiveError(t *testing.T) {
 	}
 	c := NewCaddy(d, admin)
 	c.PortOwner = freePorts
-	routes := []Route{{Host: "exemplo.com", Upstream: "127.0.0.1:20001"}}
+	routes := []Site{simple("exemplo.com", "127.0.0.1:20001", false, "")}
 
 	// Sem Ensure ainda: inativo.
-	assert.ErrorIs(t, c.Apply(context.Background(), routes), ErrInactive)
+	assert.ErrorIs(t, c.Apply(context.Background(), routes, ListenNormal, nil), ErrInactive)
 	assert.Equal(t, 0, fa.loads)
 
 	require.Equal(t, StateActive, c.Ensure(context.Background()).State)
-	require.NoError(t, c.Apply(context.Background(), routes))
+	require.NoError(t, c.Apply(context.Background(), routes, ListenNormal, nil))
 	assert.Equal(t, 1, fa.loads)
-	want, err := BuildConfig(routes)
+	want, err := BuildConfig(routes, ListenNormal, nil)
 	require.NoError(t, err)
 	assert.True(t, SameConfig(want, []byte(fa.config)))
 
 	// Rota inválida: erro do BuildConfig, nada enviado.
-	assert.Error(t, c.Apply(context.Background(), []Route{{Host: "exemplo.com"}}))
+	assert.Error(t, c.Apply(context.Background(), []Site{{Host: "exemplo.com"}}, ListenNormal, nil))
 	assert.Equal(t, 1, fa.loads)
 
 	// Docker caiu: o último estado deixa de ser active.
 	d.ListFn = nil
 	require.Equal(t, StateDockerUnavailable, c.Ensure(context.Background()).State)
-	assert.ErrorIs(t, c.Apply(context.Background(), routes), ErrInactive)
+	assert.ErrorIs(t, c.Apply(context.Background(), routes, ListenNormal, nil), ErrInactive)
 }
 
 func TestInSync_DetectsEmptyAfterRestart(t *testing.T) {
 	fa, admin := newFakeAdmin(t)
 	c := NewCaddy(&dockertest.Fake{}, admin)
-	routes := []Route{{Host: "exemplo.com", Upstream: "127.0.0.1:20001", ForceHTTPS: true}}
+	routes := []Site{simple("exemplo.com", "127.0.0.1:20001", true, "")}
 
-	ok, err := c.InSync(context.Background(), routes)
+	ok, err := c.InSync(context.Background(), routes, ListenNormal, nil)
 	require.NoError(t, err)
 	assert.False(t, ok, "config null não está em sincronia")
 
-	cfg, err := BuildConfig(routes)
+	cfg, err := BuildConfig(routes, ListenNormal, nil)
 	require.NoError(t, err)
 	fa.mu.Lock()
 	fa.config = string(cfg)
 	fa.mu.Unlock()
-	ok, err = c.InSync(context.Background(), routes)
+	ok, err = c.InSync(context.Background(), routes, ListenNormal, nil)
 	require.NoError(t, err)
 	assert.True(t, ok)
 
-	_, err = NewCaddy(&dockertest.Fake{}, downAdmin(t)).InSync(context.Background(), routes)
+	_, err = NewCaddy(&dockertest.Fake{}, downAdmin(t)).InSync(context.Background(), routes, ListenNormal, nil)
 	assert.Error(t, err)
 }
 
@@ -312,7 +312,7 @@ func TestEnsure_RunningNullConfigPortBusyIsBlocked(t *testing.T) {
 	assert.Equal(t, "apache2 (pid 31)", st.Process)
 	assert.Equal(t, "Proxy inativo: as portas 80/443 estão em uso por apache2 (pid 31)", st.Message)
 
-	err := c.Apply(context.Background(), []Route{{Host: "exemplo.com", Upstream: "127.0.0.1:20001"}})
+	err := c.Apply(context.Background(), []Site{simple("exemplo.com", "127.0.0.1:20001", false, "")}, ListenNormal, nil)
 	assert.ErrorIs(t, err, ErrInactive)
 	assert.Equal(t, 0, fa.loads)
 }
@@ -360,6 +360,6 @@ func TestEnsure_ForeignContainerWithSameName(t *testing.T) {
 		st := c.Ensure(context.Background())
 		assert.Equal(t, StateError, st.State, state)
 		assert.Equal(t, "Já existe um container korego-caddy que não foi criado pelo KoreGO.", st.Message)
-		assert.ErrorIs(t, c.Apply(context.Background(), nil), ErrInactive)
+		assert.ErrorIs(t, c.Apply(context.Background(), nil, ListenNormal, nil), ErrInactive)
 	}
 }

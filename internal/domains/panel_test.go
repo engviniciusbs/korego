@@ -108,8 +108,8 @@ func TestPanel_SetDomainCreatesPanelRoute(t *testing.T) {
 	assert.Zero(t, p.DomainID)
 
 	require.NoError(t, s.SetPanelDomain(ctx, "painel.exemplo.com"))
-	want := []proxy.Route{{Host: "painel.exemplo.com", Upstream: "127.0.0.1:8000",
-		ForceHTTPS: true, WWWRedirect: proxy.WWWNone}}
+	want := []proxy.Site{{Host: "painel.exemplo.com",
+		ForceHTTPS: true, WWWRedirect: proxy.WWWNone, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:8000"}}}}
 	routes, err := s.Routes(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, want, routes)
@@ -127,8 +127,8 @@ func TestPanel_SetDomainCreatesPanelRoute(t *testing.T) {
 	require.NoError(t, s.SetPanelDomain(ctx, "admin.exemplo.com"))
 	routes, err = s.Routes(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, []proxy.Route{{Host: "admin.exemplo.com", Upstream: "127.0.0.1:8000",
-		ForceHTTPS: true, WWWRedirect: proxy.WWWNone}}, routes)
+	assert.Equal(t, []proxy.Site{{Host: "admin.exemplo.com",
+		ForceHTTPS: true, WWWRedirect: proxy.WWWNone, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:8000"}}}}, routes)
 	list, err := s.DB.ListDomains(ctx)
 	require.NoError(t, err)
 	require.Len(t, list, 1)
@@ -144,7 +144,7 @@ func TestPanel_SetDomainCreatesPanelRoute(t *testing.T) {
 	require.ErrorAs(t, s.SetPanelDomain(ctx, "www.exemplo.com"), &ie)
 
 	// Proxy inativo não impede a gravação.
-	fake.ApplyFn = func(context.Context, []proxy.Route) error { return proxy.ErrInactive }
+	fake.ApplyFn = func(context.Context, []proxy.Site, proxy.Listen, []string) error { return proxy.ErrInactive }
 	require.NoError(t, s.SetPanelDomain(ctx, "painel.exemplo.com"))
 
 	// Vazio remove.
@@ -156,7 +156,7 @@ func TestPanel_SetDomainCreatesPanelRoute(t *testing.T) {
 	routes, err = s.Routes(ctx)
 	require.NoError(t, err)
 	for _, r := range routes {
-		assert.NotEqual(t, "127.0.0.1:8000", r.Upstream)
+		assert.NotEqual(t, "127.0.0.1:8000", r.Routes[0].Upstream)
 	}
 	// Remover sem domínio não é erro.
 	require.NoError(t, s.SetPanelDomain(ctx, ""))

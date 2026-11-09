@@ -32,7 +32,7 @@ func TestRun_ReappliesWhenOutOfSync(t *testing.T) {
 	before := fake.Applies()
 
 	var calls atomic.Int32
-	fake.InSyncFn = func(context.Context, []proxy.Route) (bool, error) {
+	fake.InSyncFn = func(context.Context, []proxy.Site, proxy.Listen, []string) (bool, error) {
 		return calls.Add(1) != 2, nil // fora de sincronia só na 2ª volta
 	}
 	s.Interval = 5 * time.Millisecond
@@ -50,7 +50,10 @@ func TestRun_SkipsSyncWhenNotActive(t *testing.T) {
 	s, fake := newTestService(t)
 	var insync atomic.Int32
 	fake.EnsureFn = func(context.Context) proxy.Status { return proxy.Status{State: proxy.StateBlocked} }
-	fake.InSyncFn = func(context.Context, []proxy.Route) (bool, error) { insync.Add(1); return false, nil }
+	fake.InSyncFn = func(context.Context, []proxy.Site, proxy.Listen, []string) (bool, error) {
+		insync.Add(1)
+		return false, nil
+	}
 	s.Interval = time.Hour // só a volta imediata
 	stop := runAsync(s)
 	require.Eventually(t, func() bool { return s.Status().State == proxy.StateBlocked }, 2*time.Second, time.Millisecond)
@@ -112,7 +115,7 @@ func TestReapplyApp_BlockedIsNil(t *testing.T) {
 	fake.EnsureFn = func(context.Context) proxy.Status {
 		return proxy.Status{State: proxy.StateBlocked, Message: "porta 80 em uso por nginx"}
 	}
-	fake.ApplyFn = func(context.Context, []proxy.Route) error { return proxy.ErrInactive }
+	fake.ApplyFn = func(context.Context, []proxy.Site, proxy.Listen, []string) error { return proxy.ErrInactive }
 	s.Reconcile(ctx)
 	assert.NoError(t, s.ReapplyApp(ctx, 1))
 	assert.NoError(t, s.ReapplyApp(ctx, 1))
@@ -123,7 +126,7 @@ func TestReapplyApp_OtherInactiveStatesFail(t *testing.T) {
 	for _, state := range []proxy.State{proxy.StateStarting, proxy.StateDockerUnavailable, proxy.StateError} {
 		s, fake := newTestService(t)
 		fake.EnsureFn = func(context.Context) proxy.Status { return proxy.Status{State: state} }
-		fake.ApplyFn = func(context.Context, []proxy.Route) error { return proxy.ErrInactive }
+		fake.ApplyFn = func(context.Context, []proxy.Site, proxy.Listen, []string) error { return proxy.ErrInactive }
 		s.Reconcile(ctx)
 		assert.ErrorIs(t, s.ReapplyApp(ctx, 1), proxy.ErrInactive, string(state))
 	}

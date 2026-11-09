@@ -29,7 +29,8 @@ func localUpstream(port int) string {
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 }
 
-// Routes monta as rotas do proxy a partir dos domínios gravados:
+// Routes monta os sites do proxy a partir dos domínios gravados, cada um com
+// uma única rota "/" (as rotas por caminho entram na Task 6):
 //   - painel → 127.0.0.1:<PanelPort> (fica de fora se PanelPort ≤ 0);
 //   - app → 127.0.0.1:<host_port>, só com host_port > 0 e app existente;
 //   - endereço manual → como está.
@@ -39,7 +40,7 @@ func localUpstream(port int) string {
 // não combina com o hostname ou host (ou par www) já tomado por outra linha
 // ficam de fora e vão para o log. O domínio do painel reserva os seus hosts
 // primeiro; depois vale a ordem por hostname. A saída segue por hostname.
-func (s *Service) Routes(ctx context.Context) ([]proxy.Route, error) {
+func (s *Service) Routes(ctx context.Context) ([]proxy.Site, error) {
 	list, err := s.DB.ListDomains(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("montar rotas: %w", err)
@@ -113,14 +114,15 @@ func (s *Service) Routes(ctx context.Context) ([]proxy.Route, error) {
 		accepted[i] = true
 	}
 
-	routes := []proxy.Route{}
+	sites := []proxy.Site{}
 	for i, c := range cands {
 		if accepted[i] {
-			routes = append(routes, proxy.Route{Host: c.d.Hostname, Upstream: c.upstream,
-				ForceHTTPS: c.d.ForceHTTPS, WWWRedirect: wwwMode(c.d.WWWRedirect)})
+			sites = append(sites, proxy.Site{Host: c.d.Hostname,
+				ForceHTTPS: c.d.ForceHTTPS, WWWRedirect: wwwMode(c.d.WWWRedirect),
+				Routes: []proxy.SiteRoute{{Path: "/", Upstream: c.upstream}}})
 		}
 	}
-	return routes, nil
+	return sites, nil
 }
 
 func (s *Service) appsByID(ctx context.Context) (map[int64]store.App, error) {
@@ -144,7 +146,7 @@ func (s *Service) Reapply(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return s.Proxy.Apply(ctx, routes)
+	return s.Proxy.Apply(ctx, routes, proxy.ListenNormal, nil)
 }
 
 // ReapplyApp é chamado pelo deploy depois de trocar a porta da app.

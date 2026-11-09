@@ -48,11 +48,11 @@ func TestCaddy_Integration(t *testing.T) {
 	}
 	waitActive()
 
-	routes := []Route{{
-		Host:     "teste.korego.localhost",
-		Upstream: strings.TrimPrefix(upstream.URL, "http://"),
+	routes := []Site{{
+		Host:   "teste.korego.localhost",
+		Routes: []SiteRoute{{Path: "/", Upstream: strings.TrimPrefix(upstream.URL, "http://")}},
 	}}
-	require.NoError(t, c.Apply(ctx, routes))
+	require.NoError(t, c.Apply(ctx, routes, ListenNormal, nil))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:80/", nil)
 	require.NoError(t, err)
@@ -64,7 +64,7 @@ func TestCaddy_Integration(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "korego-upstream", string(body))
 
-	ok, err := c.InSync(ctx, routes)
+	ok, err := c.InSync(ctx, routes, ListenNormal, nil)
 	require.NoError(t, err)
 	assert.True(t, ok)
 
@@ -72,12 +72,12 @@ func TestCaddy_Integration(t *testing.T) {
 	out, err := exec.Command("docker", "restart", ContainerName).CombinedOutput()
 	require.NoError(t, err, string(out))
 	waitActive()
-	ok, err = c.InSync(ctx, routes)
+	ok, err = c.InSync(ctx, routes, ListenNormal, nil)
 	require.NoError(t, err)
 	assert.False(t, ok)
 
-	require.NoError(t, c.Apply(ctx, routes))
-	ok, err = c.InSync(ctx, routes)
+	require.NoError(t, c.Apply(ctx, routes, ListenNormal, nil))
+	ok, err = c.InSync(ctx, routes, ListenNormal, nil)
 	require.NoError(t, err)
 	assert.True(t, ok)
 }
