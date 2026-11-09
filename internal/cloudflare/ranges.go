@@ -22,10 +22,14 @@ const (
 	defaultV4URL    = "https://www.cloudflare.com/ips-v4"
 	defaultV6URL    = "https://www.cloudflare.com/ips-v6"
 	refreshInterval = 24 * time.Hour
-	fetchTimeout    = 15 * time.Second
-	maxBody         = 1 << 20
-	minV4           = 10
-	minV6           = 1
+	// retryAfterFailure é a espera após uma atualização que falhou.
+	retryAfterFailure = time.Hour
+	minV4Bits         = 8
+	minV6Bits         = 20
+	fetchTimeout      = 15 * time.Second
+	maxBody           = 1 << 20
+	minV4             = 10
+	minV6             = 1
 )
 
 type list struct {
@@ -38,6 +42,9 @@ type list struct {
 type Ranges struct {
 	// V4URL e V6URL são as fontes das listas (trocáveis em testes).
 	V4URL, V6URL string
+
+	// retryInterval é a espera após uma atualização que falhou.
+	retryInterval time.Duration
 
 	db     *store.DB
 	client *http.Client
@@ -54,7 +61,8 @@ func New(db *store.DB, client *http.Client) *Ranges {
 	}
 	r := &Ranges{
 		V4URL: defaultV4URL, V6URL: defaultV6URL, db: db, client: client,
-		cur: list{V4: defaultV4, V6: defaultV6},
+		retryInterval: retryAfterFailure,
+		cur:           list{V4: defaultV4, V6: defaultV6},
 	}
 	if db != nil {
 		if raw, ok, err := db.GetSetting(context.Background(), settingKey); err == nil && ok {
@@ -79,16 +87,21 @@ func (r *Ranges) Get() []string {
 	return append(out, r.cur.V6...)
 }
 
-// Run atualiza agora e depois a cada 24 h, até ctx terminar.
+// Run atualiza agora e depois a cada 24 h (1 h após uma falha), até ctx terminar.
 func (r *Ranges) Run(ctx context.Context) {
-	t := time.NewTicker(refreshInterval)
-	defer t.Stop()
 	for {
-		if err := r.Refresh(ctx); err != nil && ctx.Err() == nil {
+		wait := refreshInterval
+		if err := r.Refresh(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			log.Printf("cloudflare: atualizar faixas: %v", err)
+			wait = r.retryInterval
 		}
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case <-t.C:
 		}
@@ -155,6 +168,10 @@ func valid(lines []string, v4 bool) []string {
 	for _, ln := range lines {
 		p, err := netip.ParsePrefix(strings.TrimSpace(ln))
 		if err != nil || p.Addr().Is4() != v4 || p.Addr().Is4In6() {
+			continue
+		}
+		// Recusa faixas absurdamente largas (ex.: 0.0.0.0/0 liberaria o mundo).
+		if (v4 && p.Bits() < minV4Bits) || (!v4 && p.Bits() < minV6Bits) {
 			continue
 		}
 		out = append(out, p.Masked().String())

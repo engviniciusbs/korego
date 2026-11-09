@@ -48,9 +48,12 @@ type Caddy struct {
 	CertTimeout time.Duration
 	// EnsureWWW cria /var/www no host se faltar (padrão: ensureWWWDir).
 	EnsureWWW func() error
+	// Descends diz se pid descende de ancestor (padrão: cadeia de PPID em /proc).
+	Descends func(pid, ancestor int) bool
 
-	mu   sync.Mutex
-	last Status
+	mu         sync.Mutex
+	last       Status
+	pendingKey string // estado em que a recriação pendente já foi logada
 }
 
 var _ Proxy = (*Caddy)(nil)
@@ -64,6 +67,7 @@ func NewCaddy(d docker.Client, admin *AdminClient) *Caddy {
 		CertAddr:    defaultCertAddr,
 		CertTimeout: defaultCertWait,
 		EnsureWWW:   ensureWWWDir,
+		Descends:    descendsOf,
 	}
 }
 
@@ -96,42 +100,68 @@ func (c *Caddy) ensure(ctx context.Context) Status {
 		}
 		running := ct.State == "running" || ct.State == "restarting"
 		if specVersion(ct.Labels) >= CaddySpec {
-			return c.start(ctx, ct, running)
+			c.notePending("")
+			return c.use(ctx, ct, running)
 		}
-		// Spec antiga: recria, mas só se o Caddy não está servindo 80/443.
+		// Spec antiga: só recria após um "não serve" definitivo. Servindo, ou
+		// sem resposta clara (starting, erro), a recriação fica pendente.
 		if running {
-			if st, serving := c.probe(ctx); serving {
-				log.Printf("proxy: recriação pendente (spec do %s desatualizada); Caddy está servindo", ContainerName)
+			if st, v := c.probe(ctx, ct); v != notServing {
+				c.notePending(string(st.State))
 				return st
 			}
+		}
+		c.notePending("")
+		// /var/www precisa existir antes de derrubar o container antigo.
+		if err := c.ensureWWW(); err != nil {
+			return failure("criar "+wwwDir, err)
 		}
 		_ = c.docker.Stop(ctx, ct.ID) // pode já estar parado
 		if err := c.docker.RemoveForce(ctx, ct.ID); err != nil {
 			return failure("remover "+ContainerName, err)
 		}
-		break
+		return c.create(ctx, false)
 	}
-	return c.create(ctx)
+	return c.create(ctx, true)
 }
 
-// start usa o container existente, iniciando-o se estiver parado.
-func (c *Caddy) start(ctx context.Context, ct docker.Container, running bool) Status {
+func (c *Caddy) ensureWWW() error {
+	if c.EnsureWWW == nil {
+		return nil
+	}
+	return c.EnsureWWW()
+}
+
+// notePending loga "recriação pendente" uma vez por mudança de estado; key ""
+// limpa a marca.
+func (c *Caddy) notePending(key string) {
+	c.mu.Lock()
+	changed := c.pendingKey != key
+	c.pendingKey = key
+	c.mu.Unlock()
+	if changed && key != "" {
+		log.Printf("proxy: recriação pendente (spec do %s desatualizada; estado %s)", ContainerName, key)
+	}
+}
+
+// use usa o container existente, iniciando-o se estiver parado.
+func (c *Caddy) use(ctx context.Context, ct docker.Container, running bool) Status {
 	if !running {
 		if err := c.docker.Start(ctx, ct.ID); err != nil {
 			return failure("iniciar "+ContainerName, err)
 		}
 	}
-	st, _ := c.probe(ctx)
+	st, _ := c.probe(ctx, ct)
 	return st
 }
 
-func (c *Caddy) create(ctx context.Context) Status {
+func (c *Caddy) create(ctx context.Context, ensureWWW bool) Status {
 	if err := c.ensureImage(ctx); err != nil {
 		return failure("baixar "+CaddyImage, err)
 	}
-	if c.EnsureWWW != nil {
-		if err := c.EnsureWWW(); err != nil {
-			log.Printf("proxy: criar %s: %v", wwwDir, err)
+	if ensureWWW {
+		if err := c.ensureWWW(); err != nil {
+			return failure("criar "+wwwDir, err)
 		}
 	}
 	_, err := c.docker.Run(ctx, docker.RunSpec{
@@ -154,7 +184,15 @@ func (c *Caddy) create(ctx context.Context) Status {
 	if err != nil && !errors.Is(err, docker.ErrConflict) {
 		return failure("criar "+ContainerName, err)
 	}
-	st, _ := c.probe(ctx)
+	if list, lerr := c.docker.List(ctx); lerr == nil {
+		for _, ct := range list {
+			if ct.Name == ContainerName && ct.Managed {
+				st, _ := c.probe(ctx, ct)
+				return st
+			}
+		}
+	}
+	st, _ := c.probe(ctx, docker.Container{})
 	return st
 }
 
@@ -181,39 +219,92 @@ func (c *Caddy) ensureImage(ctx context.Context) error {
 	return c.docker.Pull(ctx, CaddyImage, nil)
 }
 
-// probe consulta a Admin API e as portas 80/443. Sem resposta → starting.
-// serving diz se o Caddy está de fato servindo 80/443 (config escuta :443 e
-// as portas são dele).
+// verdict é a resposta de probe sobre o Caddy estar servindo 80/443.
+type verdict int
+
+const (
+	unknown    verdict = iota // sem resposta clara (starting, erro)
+	serving                   // config escuta :443 e as portas são do nosso container
+	notServing                // a Admin API respondeu e o Caddy não serve 80/443
+)
+
+// adminPort é a porta da Admin API do Caddy (loopback).
+const adminPort = 2019
+
+// probe consulta a Admin API e as portas. Antes de falar com a Admin API,
+// confere que quem escuta em 127.0.0.1:2019 é o nosso container: um Caddy do
+// host ocupando a 2019 nunca recebe a nossa config (estado error).
 //
-// Um processo alheio ocupa as portas quando o dono não é docker-proxy nem
-// caddy, ou quando a config atual não escuta em :443 (config vazia ou de
-// ensaio: o Caddy não segura 80/443, então qualquer dono é outro processo).
-func (c *Caddy) probe(ctx context.Context) (st Status, serving bool) {
+// "Nosso" é decidido pelo PID: o dono da porta é o PID do container (docker
+// inspect) ou descende dele. Nomes de processo não contam.
+//
+// Nas portas 80/443, o dono é alheio quando não é nosso, ou quando a config
+// atual não escuta em :443 (config vazia ou de ensaio: o Caddy não as segura).
+func (c *Caddy) probe(ctx context.Context, ct docker.Container) (Status, verdict) {
+	pid := c.containerPid(ctx, ct)
+	if owner, busy := c.PortOwner(adminPort); busy && !c.ours(owner, pid) {
+		return Status{
+			State:   StateError,
+			Process: owner,
+			Message: fmt.Sprintf("a porta %d da Admin API está em uso por %s", adminPort, owner),
+		}, unknown
+	}
 	pctx, cancel := context.WithTimeout(ctx, adminPingTimeout)
 	defer cancel()
 	cfg, err := c.admin.Config(pctx)
 	if err != nil {
-		return Status{State: StateStarting, Message: "aguardando a Admin API do Caddy"}, false
+		return Status{State: StateStarting, Message: "aguardando a Admin API do Caddy"}, unknown
 	}
 	listens := listensOn443(cfg)
 	for _, port := range []int{80, 443} {
 		owner, busy := c.PortOwner(port)
-		if busy && (!listens || !isCaddyOwner(owner)) {
+		if busy && (!listens || !c.ours(owner, pid)) {
 			return Status{
 				State:   StateTrial,
 				Mode:    ListenTrial,
 				Process: owner,
 				Message: "Proxy em modo ensaio: as portas 80/443 estão em uso por " + owner,
-			}, false
+			}, notServing
 		}
 	}
-	return Status{State: StateActive, Mode: ListenNormal}, listens
+	if listens {
+		return Status{State: StateActive, Mode: ListenNormal}, serving
+	}
+	return Status{State: StateActive, Mode: ListenNormal}, notServing
 }
 
-// isCaddyOwner diz se o dono da porta ("nome (pid N)") é docker-proxy ou caddy.
-func isCaddyOwner(owner string) bool {
-	name, _, _ := strings.Cut(owner, " ")
-	return name == "docker-proxy" || name == "caddy"
+// containerPid devolve o PID do container no host (0 se desconhecido).
+func (c *Caddy) containerPid(ctx context.Context, ct docker.Container) int {
+	if ct.ID == "" {
+		return 0
+	}
+	d, err := c.docker.Inspect(ctx, ct.ID)
+	if err != nil {
+		return 0
+	}
+	return d.Pid
+}
+
+// ours diz se o dono ("nome (pid N)") é o processo do container ou descende dele.
+func (c *Caddy) ours(owner string, containerPid int) bool {
+	p := ownerPid(owner)
+	if p <= 0 || containerPid <= 0 {
+		return false
+	}
+	return p == containerPid || (c.Descends != nil && c.Descends(p, containerPid))
+}
+
+// ownerPid extrai N de "nome (pid N)"; 0 se não houver.
+func ownerPid(owner string) int {
+	i := strings.LastIndex(owner, "(pid ")
+	if i < 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSuffix(owner[i+len("(pid "):], ")"))
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // listensOn443 diz se a config JSON do Caddy tem algum servidor escutando :443.
@@ -252,6 +343,9 @@ func (c *Caddy) Apply(ctx context.Context, sites []Site, mode Listen, cf []strin
 	c.mu.Unlock()
 	if state != StateActive && state != StateTrial {
 		return ErrInactive
+	}
+	if state == StateTrial && mode == ListenNormal {
+		return ErrTrialMode
 	}
 	cfg, err := BuildConfig(sites, mode, cf)
 	if err != nil {

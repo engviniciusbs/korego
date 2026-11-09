@@ -146,7 +146,16 @@ func (s *Service) Reapply(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return s.Proxy.Apply(ctx, routes, proxy.ListenNormal, nil)
+	mode := s.Status().Mode
+	if mode == "" {
+		mode = proxy.ListenNormal
+	}
+	err = s.Proxy.Apply(ctx, routes, mode, nil)
+	if errors.Is(err, proxy.ErrTrialMode) {
+		// O status visto estava velho: o proxy já está em ensaio.
+		err = s.Proxy.Apply(ctx, routes, proxy.ListenTrial, nil)
+	}
+	return err
 }
 
 // ReapplyApp é chamado pelo deploy depois de trocar a porta da app.

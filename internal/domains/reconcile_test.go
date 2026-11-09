@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/engviniciusbs/korego/internal/node/proxy"
+	"github.com/engviniciusbs/korego/internal/node/proxy/proxytest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -130,4 +131,35 @@ func TestReapplyApp_OtherInactiveStatesFail(t *testing.T) {
 		s.Reconcile(ctx)
 		assert.ErrorIs(t, s.ReapplyApp(ctx, 1), proxy.ErrInactive, string(state))
 	}
+}
+
+func trialOnly(fake *proxytest.Fake) {
+	fake.EnsureFn = func(context.Context) proxy.Status {
+		return proxy.Status{State: proxy.StateTrial, Mode: proxy.ListenTrial, Process: "nginx (pid 1)"}
+	}
+	fake.ApplyFn = func(_ context.Context, _ []proxy.Site, mode proxy.Listen, _ []string) error {
+		if mode == proxy.ListenNormal {
+			return proxy.ErrTrialMode
+		}
+		return nil
+	}
+}
+
+func TestReapplyApp_UsesTrialModeInTrial(t *testing.T) {
+	ctx := context.Background()
+	s, fake := newTestService(t)
+	trialOnly(fake)
+	s.Reconcile(ctx)
+	require.NoError(t, s.ReapplyApp(ctx, 1), "deploy em ensaio deve passar")
+	assert.Equal(t, proxy.ListenTrial, fake.LastMode())
+	require.NoError(t, s.Reapply(ctx))
+	assert.Equal(t, proxy.ListenTrial, fake.LastMode())
+}
+
+func TestReapply_StaleStatusFallsBackToTrial(t *testing.T) {
+	ctx := context.Background()
+	s, fake := newTestService(t) // nenhum Reconcile ainda: status vazio
+	trialOnly(fake)
+	require.NoError(t, s.Reapply(ctx))
+	assert.Equal(t, proxy.ListenTrial, fake.LastMode())
 }

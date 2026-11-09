@@ -62,6 +62,7 @@ type Details struct {
 	EnvNames     []string  `json:"envNames"` // só os nomes, em ordem alfabética
 	Networks     []string  `json:"networks"`
 	Mounts       []Mount   `json:"mounts"`
+	Pid          int       `json:"pid"`      // PID do processo principal no host (0 se parado)
 	ExitCode     int       `json:"exitCode"` // código de saída da última execução (State.ExitCode)
 }
 

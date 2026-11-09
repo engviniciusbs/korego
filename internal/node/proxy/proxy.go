@@ -130,3 +130,7 @@ type Proxy interface {
 
 // ErrInactive indica que o proxy não está ativo.
 var ErrInactive = errors.New("proxy inativo")
+
+// ErrTrialMode indica que o modo normal foi recusado porque o proxy está em
+// ensaio (outro processo segura 80/443).
+var ErrTrialMode = errors.New("proxy em modo ensaio: o modo normal não pode ser aplicado")

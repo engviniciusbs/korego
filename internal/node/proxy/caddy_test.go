@@ -20,6 +20,7 @@ type fakeAdmin struct {
 	mu     sync.Mutex
 	config string
 	loads  int
+	gets   int
 }
 
 func newFakeAdmin(t *testing.T) (*fakeAdmin, *AdminClient) {
@@ -34,6 +35,7 @@ func newFakeAdmin(t *testing.T) (*fakeAdmin, *AdminClient) {
 			fa.config = string(b)
 			fa.loads++
 		case r.Method == http.MethodGet && r.URL.Path == "/config/":
+			fa.gets++
 			_, _ = io.WriteString(w, fa.config+"\n")
 		default:
 			http.NotFound(w, r)
@@ -135,7 +137,7 @@ func TestEnsure_StartingUntilAdminAnswers(t *testing.T) {
 		},
 	}
 	c := NewCaddy(d, downAdmin(t))
-	c.PortOwner = func(int) (string, bool) { t.Error("portas não devem ser checadas"); return "", false }
+	c.PortOwner = freePorts
 	assert.Equal(t, StateStarting, c.Ensure(context.Background()).State)
 }
 
@@ -154,6 +156,7 @@ func TestEnsure_OwnContainerHoldingPortsIsActive(t *testing.T) {
 	c := NewCaddy(d, admin)
 	// O próprio Caddy ocupa as portas: a checagem não pode acusá-lo.
 	c.PortOwner = func(int) (string, bool) { return "caddy (pid 99)", true }
+	c.docker = withPid(d, 99)
 	st := c.Ensure(context.Background())
 	assert.Equal(t, StateActive, st.State)
 	assert.Empty(t, st.Process)

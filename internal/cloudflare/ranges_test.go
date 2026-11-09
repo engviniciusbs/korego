@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -122,6 +123,46 @@ func TestRanges_InvalidStoredListFallsBackToEmbedded(t *testing.T) {
 func TestRanges_RunRefreshesAtStartAndStops(t *testing.T) {
 	srv := server(t, v4List(12), v6Good, 200)
 	r := newRanges(t, nil, srv)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	require.Eventually(t, func() bool { return len(r.Get()) == 14 }, 2*time.Second, 5*time.Millisecond)
+	cancel()
+	<-done
+}
+
+func TestRanges_RejectsTooBroadCIDRs(t *testing.T) {
+	// 0.0.0.0/0 e ::/0 não contam nem entram.
+	broad := "0.0.0.0/0\n" + v4List(5)
+	srv := server(t, broad, "::/0\n", 200)
+	r := newRanges(t, nil, srv)
+	require.Error(t, r.Refresh(context.Background()))
+	assert.Len(t, r.Get(), 22)
+
+	srv = server(t, "0.0.0.0/0\n1.0.0.0/7\n"+v4List(10), "::/0\n2000::/16\n"+v6Good, 200)
+	r = newRanges(t, nil, srv)
+	require.NoError(t, r.Refresh(context.Background()))
+	got := r.Get()
+	assert.NotContains(t, got, "0.0.0.0/0")
+	assert.NotContains(t, got, "1.0.0.0/7")
+	assert.NotContains(t, got, "::/0")
+	assert.NotContains(t, got, "2000::/16")
+	assert.Len(t, got, 12)
+}
+
+func TestRanges_RunRetriesSoonAfterFailedRefresh(t *testing.T) {
+	var calls atomic.Int32
+	good := server(t, v4List(12), v6Good, 200)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 1 { // primeira chamada (v4 do boot) falha
+			w.WriteHeader(500)
+			return
+		}
+		http.Redirect(w, r, good.URL+r.URL.Path, http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	r := newRanges(t, nil, srv)
+	r.retryInterval = 20 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { r.Run(ctx); close(done) }()

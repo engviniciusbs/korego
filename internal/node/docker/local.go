@@ -350,6 +350,7 @@ func toDetails(r container.InspectResponse) Details {
 		d.State = string(r.State.Status)
 		d.StartedAt = parseTime(r.State.StartedAt)
 		d.ExitCode = r.State.ExitCode
+		d.Pid = r.State.Pid
 		if r.State.Health != nil {
 			d.Health = healthString(r.State.Health.Status)
 		}
