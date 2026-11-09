@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
 import { buildSegments, niceMax, type ChartPoint } from "@/lib/chart";
 import { cn } from "@/lib/cn";
 import { focusRing } from "@/components/ui/focus";
@@ -27,6 +27,13 @@ export interface LineChartProps {
   /** Altura da área do gráfico em px. */
   height?: number;
   className?: string;
+  /**
+   * Clique (ou Enter com o foco no gráfico) num ponto: recebe o `t` do ponto.
+   * Com ela o gráfico ganha cursor de clique e a dica da ação.
+   */
+  onPointClick?: (t: number) => void;
+  /** O que o clique faz, para a dica e o rótulo acessível. Ex.: "ver quem estava usando". */
+  pointActionLabel?: string;
 }
 
 const SERIES_COLORS = ["var(--color-series-1)", "var(--color-series-2)"];
@@ -44,6 +51,9 @@ const timeLong = new Intl.DateTimeFormat("pt-BR", {
   minute: "2-digit",
 });
 
+/** Hora de um ponto no formato do tooltip do gráfico ("06/11, 12:00"). */
+export const formatChartTime = (t: number) => timeLong.format(new Date(t * 1000));
+
 const colorOf = (s: LineSeries, i: number) => s.color ?? SERIES_COLORS[i % SERIES_COLORS.length];
 
 /** Gráfico de linha em SVG próprio: buracos viram cortes, eixo Y com teto "redondo". */
@@ -55,8 +65,13 @@ export function LineChart({
   domain,
   height = 160,
   className,
+  onPointClick,
+  pointActionLabel = "ver os detalhes deste momento",
 }: LineChartProps) {
   const [hover, setHover] = useState<number | null>(null);
+  // Ponto acionado por último: quando o foco volta ao gráfico (ex.: ao fechar
+  // o diálogo aberto pelo clique), a leitura recomeça nele e não no fim.
+  const picked = useRef<number | null>(null);
 
   const d0 = domain?.[0];
   const d1 = domain?.[1];
@@ -150,7 +165,31 @@ export function LineChart({
     setHover(nearest(t0 + frac * (t1 - t0)));
   };
 
+  const pick = (i: number | null) => {
+    if (!onPointClick || i === null || i >= times.length) return;
+    picked.current = times[i];
+    onPointClick(times[i]);
+  };
+
+  const onClick = (e: MouseEvent<HTMLDivElement>) => {
+    if (!onPointClick) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    if (r.width > 0) {
+      const frac = Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1);
+      const i = nearest(t0 + frac * (t1 - t0));
+      setHover(i);
+      pick(i);
+    } else {
+      pick(hover);
+    }
+  };
+
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Enter" && onPointClick) {
+      e.preventDefault();
+      pick(hover ?? times.length - 1);
+      return;
+    }
     const cur = hover ?? times.length - 1;
     const next =
       e.key === "ArrowLeft"
@@ -190,11 +229,23 @@ export function LineChart({
         <div
           role="group"
           tabIndex={0}
-          aria-label={`${summary}. Use as setas para percorrer os valores.`}
-          className={cn("relative min-w-0 flex-1 touch-pan-y", focusRing)}
+          aria-label={
+            onPointClick
+              ? `${summary}. Use as setas para percorrer os valores e Enter para ${pointActionLabel}.`
+              : `${summary}. Use as setas para percorrer os valores.`
+          }
+          className={cn("relative min-w-0 flex-1 touch-pan-y", onPointClick && "cursor-pointer", focusRing)}
           onPointerMove={onPointerMove}
           onPointerLeave={() => setHover(null)}
-          onFocus={() => setHover((h) => h ?? times.length - 1)}
+          onClick={onPointClick ? onClick : undefined}
+          onFocus={() =>
+            setHover((h) => {
+              if (h !== null) return h;
+              const back = picked.current;
+              picked.current = null;
+              return back === null ? times.length - 1 : nearest(back);
+            })
+          }
           onBlur={() => setHover(null)}
           onKeyDown={onKeyDown}
         >
@@ -297,6 +348,11 @@ export function LineChart({
                   );
                 })}
               </ul>
+              {onPointClick && (
+                <p className="mt-1.5 border-t border-line pt-1.5 text-[10px] text-fg-subtle">
+                  Clique para {pointActionLabel}
+                </p>
+              )}
             </div>
           )}
         </div>

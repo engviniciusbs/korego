@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { LineChart } from "../line-chart";
 
 const fmt = (v: number) => `${v} u`;
@@ -77,6 +77,57 @@ describe("LineChart", () => {
       />,
     );
     expect(screen.getAllByText(/\d{2}\/\d{2}, \d{2}:\d{2}/).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("LineChart chama onPointClick com o t do ponto (clique e Enter)", () => {
+    const points = [0, 60, 120].map((t, i) => ({ t, v: (i + 1) * 10 }));
+    const onPointClick = vi.fn();
+    const { rerender } = render(
+      <LineChart
+        series={[{ label: "CPU", points }]}
+        stepSeconds={60}
+        format={fmt}
+        onPointClick={onPointClick}
+        pointActionLabel="ver quem estava usando"
+      />,
+    );
+    const area = screen.getByRole("group");
+    expect(area).toHaveClass("cursor-pointer");
+    expect(area).toHaveAccessibleName(/Enter para ver quem estava usando/);
+
+    // Clique: o ponto mais próximo da posição do ponteiro (aqui, o do meio).
+    vi.spyOn(area, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 300,
+      height: 100,
+      right: 300,
+      bottom: 100,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    fireEvent.click(area, { clientX: 140 });
+    expect(onPointClick).toHaveBeenLastCalledWith(60);
+
+    // Teclado: foco começa no último ponto; ← volta um; Enter dispara.
+    fireEvent.focus(area);
+    fireEvent.keyDown(area, { key: "End" });
+    fireEvent.keyDown(area, { key: "Enter" });
+    expect(onPointClick).toHaveBeenLastCalledWith(120);
+    fireEvent.keyDown(area, { key: "Home" });
+    fireEvent.keyDown(area, { key: "Enter" });
+    expect(onPointClick).toHaveBeenLastCalledWith(0);
+    expect(onPointClick).toHaveBeenCalledTimes(3);
+
+    // Sem a prop: nada de cursor de clique e o Enter não faz nada.
+    rerender(<LineChart series={[{ label: "CPU", points }]} stepSeconds={60} format={fmt} />);
+    const plain = screen.getByRole("group");
+    expect(plain).not.toHaveClass("cursor-pointer");
+    expect(plain).not.toHaveAccessibleName(/Enter/);
+    fireEvent.keyDown(plain, { key: "Enter" });
+    fireEvent.click(plain);
+    expect(onPointClick).toHaveBeenCalledTimes(3);
   });
 
   it("sem pontos mostra o estado vazio", () => {

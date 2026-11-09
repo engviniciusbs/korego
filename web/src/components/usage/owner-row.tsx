@@ -27,7 +27,7 @@ const subTh = "px-3 py-1.5 text-left font-mono text-[10px] font-medium uppercase
 const subTd = "px-3 py-1.5 align-top";
 
 /** Descrição curta abaixo do nome: o tipo, distinguindo projeto compose de container avulso. */
-function ownerKindText(o: UsageOwnerLive): string {
+export function ownerKindText(o: Pick<UsageOwnerLive, "key" | "kind">): string {
   if (o.key.startsWith("project:")) return "Projeto compose";
   if (o.key.startsWith("container:")) return "Container avulso";
   return kindLabel(o.kind);
