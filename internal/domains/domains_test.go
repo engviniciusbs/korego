@@ -14,7 +14,7 @@ import (
 
 func addrInput(host string) DomainInput {
 	return DomainInput{Hostname: host, TargetType: TargetAddress, Address: "127.0.0.1:5000",
-		WWWRedirect: "none", ForceHTTPS: true}
+		WWWRedirect: "none", ForceHTTPS: ptr(true)}
 }
 
 func TestCreate_SavesEvenWhenProxyBlocked(t *testing.T) {
@@ -49,7 +49,7 @@ func TestCreate_AppliesRoutes(t *testing.T) {
 	s, fake := newTestService(t)
 	app := mkApp(t, s.DB, "web", 20001)
 	d, _, err := s.Create(ctx, DomainInput{Hostname: "app.exemplo.com", TargetType: TargetApp,
-		AppID: &app.ID, Address: "ignorado:1", ForceHTTPS: true})
+		AppID: &app.ID, Address: "ignorado:1", ForceHTTPS: ptr(true)})
 	require.NoError(t, err)
 	assert.Equal(t, "none", d.WWWRedirect) // vazio vira none
 	assert.Empty(t, d.Address)             // endereço não se aplica a app

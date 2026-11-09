@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
 	"net"
 	"net/http"
 	"testing"
@@ -344,4 +345,109 @@ func TestPanelDomain_CustomCertAndCloudflareOnly(t *testing.T) {
 	// Remover continua protegido.
 	w = e.do(t, http.MethodDelete, "/api/domains/1", nil, mut(c, csrf)...)
 	assert.Equal(t, http.StatusConflict, w.Code)
+}
+
+// createRich cria loja.exemplo.net com duas rotas, certificado próprio, só
+// Cloudflare e um cabeçalho; devolve o id do certificado.
+func createRich(t *testing.T, e *env, svc *domains.Service, c *http.Cookie, csrf string) int64 {
+	t.Helper()
+	cert, err := svc.Certs.Add(context.Background(), "loja", []byte(genCertPEM(t, "loja.exemplo.net", time.Now().Add(90*24*time.Hour))))
+	require.NoError(t, err)
+	body := map[string]any{
+		"hostname": "loja.exemplo.net", "forceHttps": true,
+		"routes": []any{
+			map[string]any{"path": "/", "targetType": "address", "address": "127.0.0.1:5000", "maxBodyBytes": 2048},
+			map[string]any{"path": "/api/", "targetType": "address", "address": "127.0.0.1:6000"},
+		},
+		"tls":            map[string]any{"mode": "custom", "certId": cert.ID},
+		"cloudflareOnly": true,
+		"headers":        []any{map[string]any{"name": "X-Frame-Options", "value": "DENY"}},
+	}
+	w := e.do(t, http.MethodPost, "/api/domains", body, mut(c, csrf)...)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	return cert.ID
+}
+
+func TestAPI_UpdateOnlyCompressionKeepsEverythingElse(t *testing.T) {
+	e, svc, _, c, csrf := domainsEnv(t, "203.0.113.10")
+	certID := createRich(t, e, svc, c, csrf)
+	w := e.do(t, http.MethodPut, "/api/domains/1", map[string]any{"compression": false}, mut(c, csrf)...)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	d := decode(t, w)["domain"].(map[string]any)
+	assert.Equal(t, false, d["compression"])
+	assert.Equal(t, "loja.exemplo.net", d["hostname"])
+	assert.Equal(t, true, d["forceHttps"])
+	assert.Equal(t, true, d["cloudflareOnly"])
+	assert.Equal(t, "custom", d["tls"].(map[string]any)["mode"])
+	assert.Equal(t, float64(certID), d["tls"].(map[string]any)["certId"])
+	assert.Len(t, d["headers"], 1)
+	require.Len(t, d["routes"], 2)
+	assert.Equal(t, float64(2048), d["routes"].([]any)[0].(map[string]any)["maxBodyBytes"])
+}
+
+func TestAPI_LegacyPutReplacesOnlyRootTarget(t *testing.T) {
+	e, svc, _, c, csrf := domainsEnv(t, "203.0.113.10")
+	createRich(t, e, svc, c, csrf)
+	in := addrDomain("loja.exemplo.net")
+	in["address"] = "127.0.0.1:5001"
+	w := e.do(t, http.MethodPut, "/api/domains/1", in, mut(c, csrf)...)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	d := decode(t, w)["domain"].(map[string]any)
+	assert.Equal(t, "127.0.0.1:5001", d["address"])
+	routes := d["routes"].([]any)
+	require.Len(t, routes, 2)
+	assert.Equal(t, "/", routes[0].(map[string]any)["path"])
+	assert.Equal(t, "127.0.0.1:5001", routes[0].(map[string]any)["address"])
+	assert.Equal(t, float64(2048), routes[0].(map[string]any)["maxBodyBytes"])
+	assert.Equal(t, "/api/", routes[1].(map[string]any)["path"])
+	assert.Equal(t, "127.0.0.1:6000", routes[1].(map[string]any)["address"])
+	assert.Equal(t, true, d["cloudflareOnly"])
+
+	// Rota "/" estática: o corpo antigo que repete targetType static a mantém.
+	body := map[string]any{"hostname": "site.exemplo.com", "routes": []any{
+		map[string]any{"path": "/", "targetType": "static", "root": "/var/www/site", "spa": true}}}
+	w = e.do(t, http.MethodPost, "/api/domains", body, mut(c, csrf)...)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	id := decode(t, w)["domain"].(map[string]any)["id"]
+	legacy := map[string]any{"hostname": "site.exemplo.com", "targetType": "static", "address": "", "forceHttps": true}
+	w = e.do(t, http.MethodPut, fmt.Sprintf("/api/domains/%v", id), legacy, mut(c, csrf)...)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	r0 := decode(t, w)["domain"].(map[string]any)["routes"].([]any)[0].(map[string]any)
+	assert.Equal(t, "static", r0["targetType"])
+	assert.Equal(t, "/var/www/site", r0["root"])
+	assert.Equal(t, true, r0["spa"])
+}
+
+func TestPanelDomain_PartialPutAndPortOff(t *testing.T) {
+	e, svc, fake, c, csrf := domainsEnv(t, "203.0.113.10")
+	ctx := context.Background()
+	require.NoError(t, svc.SetPanelDomain(ctx, "painel.exemplo.com"))
+	cert, err := svc.Certs.Add(ctx, "painel", []byte(genCertPEM(t, "painel.exemplo.com", time.Now().Add(90*24*time.Hour))))
+	require.NoError(t, err)
+	cert2, err := svc.Certs.Add(ctx, "painel2", []byte(genCertPEM(t, "painel.exemplo.com", time.Now().Add(60*24*time.Hour))))
+	require.NoError(t, err)
+	body := map[string]any{"tls": map[string]any{"mode": "custom", "certId": cert.ID}, "cloudflareOnly": true}
+	w := e.do(t, http.MethodPut, "/api/domains/1", body, mut(c, csrf)...)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	// Só compressão: certificado e só Cloudflare mantidos.
+	w = e.do(t, http.MethodPut, "/api/domains/1", map[string]any{"compression": false}, mut(c, csrf)...)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	d := decode(t, w)["domain"].(map[string]any)
+	assert.Equal(t, true, d["cloudflareOnly"])
+	assert.Equal(t, float64(cert.ID), d["tls"].(map[string]any)["certId"])
+	assert.Equal(t, false, d["compression"])
+	assert.True(t, fake.LastApplied()[0].CloudflareOnly)
+
+	// Porta pública desligada: trocar o certificado passa; ligar o só
+	// Cloudflare é recusado.
+	require.NoError(t, svc.DB.SetSetting(ctx, domains.SettingPublicPort, "false"))
+	w = e.do(t, http.MethodPut, "/api/domains/1", map[string]any{"tls": map[string]any{"mode": "custom", "certId": cert2.ID}}, mut(c, csrf)...)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, float64(cert2.ID), decode(t, w)["domain"].(map[string]any)["tls"].(map[string]any)["certId"])
+	w = e.do(t, http.MethodPut, "/api/domains/1", map[string]any{"cloudflareOnly": false}, mut(c, csrf)...)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	w = e.do(t, http.MethodPut, "/api/domains/1", map[string]any{"cloudflareOnly": true}, mut(c, csrf)...)
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	assert.Equal(t, "PANEL_PORT_OFF", errCode(decode(t, w)))
 }

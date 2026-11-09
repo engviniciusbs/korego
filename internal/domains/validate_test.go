@@ -101,15 +101,15 @@ func TestValidate_Routes(t *testing.T) {
 			in.Headers = []store.Header{{Name: "X-A", Value: "1"}, {Name: "x-a", Value: "2"}}
 		}, CodeInvalidHeader, "headers[1].name"},
 		{"31 cabeçalhos", func(in *DomainInput) { in.Headers = manyHeaders }, CodeInvalidHeader, "headers"},
-		{"custom sem certificado", func(in *DomainInput) { in.TLS = TLSInput{Mode: proxy.TLSCustom} }, CodeInvalidCert, "tls.certId"},
-		{"certificado inexistente", func(in *DomainInput) { in.TLS = TLSInput{Mode: proxy.TLSCustom, CertID: ptr(int64(999))} }, CodeInvalidCert, "tls.certId"},
-		{"modo desconhecido", func(in *DomainInput) { in.TLS = TLSInput{Mode: "x"} }, CodeInvalidCert, "tls.mode"},
+		{"custom sem certificado", func(in *DomainInput) { in.TLS = &TLSInput{Mode: proxy.TLSCustom} }, CodeInvalidCert, "tls.certId"},
+		{"certificado inexistente", func(in *DomainInput) { in.TLS = &TLSInput{Mode: proxy.TLSCustom, CertID: ptr(int64(999))} }, CodeInvalidCert, "tls.certId"},
+		{"modo desconhecido", func(in *DomainInput) { in.TLS = &TLSInput{Mode: "x"} }, CodeInvalidCert, "tls.mode"},
 		{"não cobre o par www", func(in *DomainInput) {
 			in.WWWRedirect = WWWToApex
-			in.TLS = TLSInput{Mode: proxy.TLSCustom, CertID: &apexOnly.ID}
+			in.TLS = &TLSInput{Mode: proxy.TLSCustom, CertID: &apexOnly.ID}
 		}, CodeCertMismatch, "tls.certId"},
-		{"não cobre o hostname", func(in *DomainInput) { in.TLS = TLSInput{Mode: proxy.TLSCustom, CertID: &both.ID} }, CodeCertMismatch, "tls.certId"},
-		{"vencido", func(in *DomainInput) { in.TLS = TLSInput{Mode: proxy.TLSCustom, CertID: &expiredID} }, CodeCertExpired, "tls.certId"},
+		{"não cobre o hostname", func(in *DomainInput) { in.TLS = &TLSInput{Mode: proxy.TLSCustom, CertID: &both.ID} }, CodeCertMismatch, "tls.certId"},
+		{"vencido", func(in *DomainInput) { in.TLS = &TLSInput{Mode: proxy.TLSCustom, CertID: &expiredID} }, CodeCertExpired, "tls.certId"},
 		{"hostname com chaves", func(in *DomainInput) { in.Hostname = "{x}.exemplo.com" }, CodeInvalidDomain, "hostname"},
 	}
 	for _, c := range cases {
@@ -130,6 +130,6 @@ func TestValidate_Routes(t *testing.T) {
 	require.NoError(t, err)
 	_, _, err = s.Create(ctx, DomainInput{Hostname: "loja.exemplo.net", WWWRedirect: WWWToApex,
 		TargetType: TargetAddress, Address: "127.0.0.1:5000",
-		TLS: TLSInput{Mode: proxy.TLSCustom, CertID: &both.ID}})
+		TLS: &TLSInput{Mode: proxy.TLSCustom, CertID: &both.ID}})
 	require.NoError(t, err)
 }

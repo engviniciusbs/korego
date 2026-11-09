@@ -175,13 +175,26 @@ func (s *Service) Sites(ctx context.Context) ([]proxy.Site, error) {
 		}
 		if cands[i].site.TLS.Mode == proxy.TLSCustom {
 			pemText, err := s.certPEM(ctx, d)
-			if err != nil {
+			switch {
+			case err == nil:
+				cands[i].site.TLS.CertPEM = pemText
+			case d.IsPanel:
+				// O painel nunca sai do proxy: volta ao certificado automático.
+				log.Printf("proxy: domínio do painel %s: certificado próprio ilegível, usando o automático: %v", d.Hostname, err)
+				cands[i].site.TLS = proxy.SiteTLS{Mode: proxy.TLSAuto}
+			default:
 				log.Printf("proxy: domínio %s (id %d) ignorado: certificado próprio: %v", d.Hostname, d.ID, err)
 				continue
 			}
-			cands[i].site.TLS.CertPEM = pemText
 		}
-		if _, err := proxy.BuildConfig([]proxy.Site{cands[i].site}, proxy.ListenNormal, cf); err != nil {
+		_, err := proxy.BuildConfig([]proxy.Site{cands[i].site}, proxy.ListenNormal, cf)
+		if err != nil && d.IsPanel && cands[i].site.TLS.Mode == proxy.TLSCustom {
+			// PEM que decifra mas não serve (cadeia ou chave ruim).
+			log.Printf("proxy: domínio do painel %s: certificado próprio recusado, usando o automático: %v", d.Hostname, err)
+			cands[i].site.TLS = proxy.SiteTLS{Mode: proxy.TLSAuto}
+			_, err = proxy.BuildConfig([]proxy.Site{cands[i].site}, proxy.ListenNormal, cf)
+		}
+		if err != nil {
 			log.Printf("proxy: domínio %s (id %d) ignorado: %v", d.Hostname, d.ID, err)
 			continue
 		}

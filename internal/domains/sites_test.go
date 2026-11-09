@@ -1,8 +1,10 @@
 package domains
 
 import (
+	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/engviniciusbs/korego/internal/node/proxy"
 	"github.com/engviniciusbs/korego/internal/store"
@@ -131,14 +133,14 @@ func TestSites_RoutesStaticHeadersAndOptions(t *testing.T) {
 	app := mkApp(t, s.DB, "web", 20001)
 	semPorta := mkApp(t, s.DB, "nova", 0)
 	off := false
-	_, _, err := s.Create(ctx, DomainInput{Hostname: "exemplo.com", WWWRedirect: WWWNone, ForceHTTPS: true,
+	_, _, err := s.Create(ctx, DomainInput{Hostname: "exemplo.com", WWWRedirect: WWWNone, ForceHTTPS: ptr(true),
 		Routes: []RouteInput{
 			{Path: "/", TargetType: TargetApp, AppID: &app.ID, MaxBodyBytes: 1024, NoBuffering: true},
 			{Path: "/static/", TargetType: TargetStatic, Root: "/var/www/site/", SPA: true, ImmutablePrefix: "/assets/"},
 			{Path: "/api/", TargetType: TargetAddress, Address: "127.0.0.1:5000"},
 			{Path: "/nova/", TargetType: TargetApp, AppID: &semPorta.ID}, // sem porta: fica de fora
 		},
-		CloudflareOnly: true, Compression: &off,
+		CloudflareOnly: ptr(true), Compression: &off,
 		Headers: []store.Header{{Name: "X-Frame-Options", Value: "DENY"}}})
 	require.NoError(t, err)
 
@@ -170,12 +172,12 @@ func TestSites_CustomCertIncludedAndBadCertSkipped(t *testing.T) {
 	c := addCert(t, cs, "exemplo.com", "www.exemplo.com")
 	in := addrInput("exemplo.com")
 	in.WWWRedirect = WWWToApex
-	in.TLS = TLSInput{Mode: proxy.TLSCustom, CertID: &c.ID}
+	in.TLS = &TLSInput{Mode: proxy.TLSCustom, CertID: &c.ID}
 	_, _, err := s.Create(ctx, in)
 	require.NoError(t, err)
 	bad := addCert(t, cs, "loja.exemplo.net")
 	in = addrInput("loja.exemplo.net")
-	in.TLS = TLSInput{Mode: proxy.TLSCustom, CertID: &bad.ID}
+	in.TLS = &TLSInput{Mode: proxy.TLSCustom, CertID: &bad.ID}
 	_, _, err = s.Create(ctx, in)
 	require.NoError(t, err)
 	_, _, err = s.Create(ctx, addrInput("app.exemplo.com"))
@@ -227,4 +229,53 @@ func TestSites_BadStoredRowSkipped(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, sites, 1)
 	assert.Equal(t, "ok.exemplo.com", sites[0].Host)
+}
+
+func TestSites_PanelUnreadableCertFallsBackToAuto(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestService(t)
+	cs := withCerts(t, s)
+	require.NoError(t, s.SetPanelDomain(ctx, "painel.exemplo.com"))
+	panel, _, err := s.DB.PanelDomain(ctx)
+	require.NoError(t, err)
+	c := addCert(t, cs, "painel.exemplo.com")
+	panel.TLSMode, panel.CertID = proxy.TLSCustom, &c.ID
+	require.NoError(t, s.DB.UpdateDomain(ctx, &panel))
+	other := addCert(t, cs, "loja.exemplo.net")
+	d := store.Domain{Hostname: "loja.exemplo.net", WWWRedirect: "none", TLSMode: proxy.TLSCustom, CertID: &other.ID,
+		Routes: []store.DomainRoute{{Path: "/", TargetType: TargetAddress, Address: "127.0.0.1:5000"}}}
+	require.NoError(t, s.DB.InsertDomain(ctx, &d))
+
+	sites, err := s.Sites(ctx)
+	require.NoError(t, err)
+	require.Len(t, sites, 2)
+	assert.Equal(t, proxy.TLSCustom, sites[1].TLS.Mode)
+
+	// PEM que não decifra: o painel continua, com certificado automático; o
+	// outro domínio sai.
+	_, err = s.DB.SQL().ExecContext(ctx, `UPDATE certificates SET pem_enc = 'lixo'`)
+	require.NoError(t, err)
+	sites, err = s.Sites(ctx)
+	require.NoError(t, err)
+	require.Len(t, sites, 1)
+	assert.Equal(t, "painel.exemplo.com", sites[0].Host)
+	assert.Equal(t, autoTLS, sites[0].TLS)
+
+	// PEM que decifra mas não serve (chave de outro certificado): idem.
+	var bad []byte
+	certA := genCertPEM(t, time.Now().Add(time.Hour), "painel.exemplo.com")
+	certB := genCertPEM(t, time.Now().Add(time.Hour), "painel.exemplo.com")
+	bad = append(bad, certA[:bytes.Index(certA, []byte("-----BEGIN EC"))]...)
+	bad = append(bad, certB[bytes.Index(certB, []byte("-----BEGIN EC")):]...)
+	enc, err := cs.Box.Encrypt(bad)
+	require.NoError(t, err)
+	_, err = s.DB.SQL().ExecContext(ctx, `UPDATE certificates SET pem_enc = ? WHERE id = ?`, enc, c.ID)
+	require.NoError(t, err)
+	sites, err = s.Sites(ctx)
+	require.NoError(t, err)
+	require.Len(t, sites, 1)
+	assert.Equal(t, autoTLS, sites[0].TLS)
+
+	// Regravar o mesmo host não confere o certificado de novo.
+	require.NoError(t, s.SetPanelDomain(ctx, "painel.exemplo.com"))
 }

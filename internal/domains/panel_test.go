@@ -240,7 +240,7 @@ func TestPanel_UpdateOptionsKeepsRoutesAndSetDomainKeepsOptions(t *testing.T) {
 
 	// Opções aceitas; os campos de destino do corpo são ignorados.
 	in := DomainInput{Hostname: "painel.exemplo.com", TargetType: TargetAddress, Address: "127.0.0.1:1",
-		TLS: TLSInput{Mode: proxy.TLSCustom, CertID: &c.ID}, CloudflareOnly: true, Compression: &off,
+		TLS: &TLSInput{Mode: proxy.TLSCustom, CertID: &c.ID}, CloudflareOnly: ptr(true), Compression: &off,
 		Headers: []store.Header{{Name: "X-Frame-Options", Value: "DENY"}}}
 	d, _, err := s.Update(ctx, panel.ID, in)
 	require.NoError(t, err)
@@ -277,9 +277,10 @@ func TestPanel_UpdateOptionsKeepsRoutesAndSetDomainKeepsOptions(t *testing.T) {
 	code, _ = codeField(t, s.SetPanelDomain(ctx, "loja.exemplo.com"))
 	assert.Equal(t, CodeCertMismatch, code)
 
-	// Porta pública desligada: o domínio do painel não muda por aqui.
+	// Porta pública desligada: só ligar o só Cloudflare é recusado.
 	require.NoError(t, s.DB.SetSetting(ctx, SettingPublicPort, "false"))
-	in.Hostname = "admin.exemplo.com"
-	_, _, err = s.Update(ctx, panel.ID, in)
+	_, _, err = s.Update(ctx, panel.ID, DomainInput{CloudflareOnly: ptr(false)})
+	require.NoError(t, err)
+	_, _, err = s.Update(ctx, panel.ID, DomainInput{CloudflareOnly: ptr(true)})
 	assert.ErrorIs(t, err, ErrPanelPortOff)
 }

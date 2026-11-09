@@ -131,8 +131,10 @@ func (s *Service) SetPanelDomain(ctx context.Context, host string) error {
 	d := store.Domain{TLSMode: proxy.TLSAuto, Compression: true, Headers: []store.Header{}}
 	if exists {
 		d = cur
-		if d.TLSMode == proxy.TLSCustom {
-			if _, _, _, err := s.validTLS(ctx, TLSInput{Mode: proxy.TLSCustom, CertID: d.CertID}, []string{host}); err != nil {
+		// Host novo precisa estar coberto pelo certificado próprio; regravar o
+		// mesmo host não confere de novo.
+		if d.TLSMode == proxy.TLSCustom && host != cur.Hostname {
+			if _, _, _, err := s.validTLS(ctx, TLSInput{Mode: proxy.TLSCustom, CertID: d.CertID}, []string{host}, false); err != nil {
 				return err
 			}
 		}
@@ -152,11 +154,12 @@ func (s *Service) SetPanelDomain(ctx context.Context, host string) error {
 }
 
 // updatePanel altera as opções do domínio do painel (PUT /api/domains/{id}):
-// certificado, só Cloudflare, cabeçalhos e compressão. A rota é fixa (rotas
-// no corpo → INVALID_ROUTE), o hostname só muda pelas configurações do painel
-// (outro hostname → ErrPanelDomain) e os demais campos do corpo são
-// ignorados. Com a porta pública desligada → ErrPanelPortOff: o domínio é o
-// único acesso ao painel.
+// certificado, só Cloudflare, cabeçalhos e compressão; opção ausente mantém a
+// gravada. A rota é fixa (rotas no corpo → INVALID_ROUTE), o hostname só muda
+// pelas configurações do painel (outro hostname → ErrPanelDomain) e os demais
+// campos do corpo são ignorados. Com a porta pública desligada, ligar o só
+// Cloudflare → ErrPanelPortOff: o domínio é o único acesso ao painel e um
+// DNS fora da Cloudflare o trancaria.
 func (s *Service) updatePanel(ctx context.Context, id int64, in DomainInput) (store.Domain, error) {
 	s.panelMu.Lock()
 	defer s.panelMu.Unlock()
@@ -171,12 +174,15 @@ func (s *Service) updatePanel(ctx context.Context, id int64, in DomainInput) (st
 	if h := strings.TrimSpace(in.Hostname); h != "" && h != cur.Hostname {
 		return store.Domain{}, ErrPanelDomain
 	}
-	public, err := PublicPort(ctx, s.DB)
-	if err != nil {
-		return store.Domain{}, err
-	}
-	if !public {
-		return store.Domain{}, ErrPanelPortOff
+	keepOptions(cur, &in)
+	if *in.CloudflareOnly && !cur.CloudflareOnly {
+		public, err := PublicPort(ctx, s.DB)
+		if err != nil {
+			return store.Domain{}, err
+		}
+		if !public {
+			return store.Domain{}, ErrPanelPortOff
+		}
 	}
 	d := cur
 	d.Routes = s.panelRoutes()
@@ -185,9 +191,7 @@ func (s *Service) updatePanel(ctx context.Context, id int64, in DomainInput) (st
 	if err != nil {
 		return store.Domain{}, err
 	}
-	if in.Compression != nil {
-		d.Compression = *in.Compression
-	}
+	d.Compression = *in.Compression
 	if err := s.buildCheck(d, pemText); err != nil {
 		return store.Domain{}, err
 	}

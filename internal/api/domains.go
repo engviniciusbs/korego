@@ -187,15 +187,15 @@ func (h domainHandlers) save(w http.ResponseWriter, r *http.Request, action stri
 	defer cancel()
 	d, check, err := call(ctx, in)
 	if err != nil {
-		// Recusa: rotas e modo de TLS pedidos. Nunca o PEM.
-		routes, tls := len(in.Routes), in.TLS.Mode
-		if routes == 0 {
-			routes = 1
+		// Recusa: rotas e modo de TLS pedidos, quando vieram. Nunca o PEM.
+		meta := map[string]any{"ok": false}
+		if in.Routes != nil {
+			meta["routes"] = len(in.Routes)
 		}
-		if tls == "" {
-			tls = proxy.TLSAuto
+		if in.TLS != nil {
+			meta["tls"] = in.TLS.Mode
 		}
-		record(h.svc, r, action, in.Hostname, map[string]any{"ok": false, "routes": routes, "tls": tls})
+		record(h.svc, r, action, in.Hostname, meta)
 		domainError(w, err)
 		return
 	}

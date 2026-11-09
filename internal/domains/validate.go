@@ -152,9 +152,10 @@ func validHeaders(in []store.Header) ([]store.Header, error) {
 }
 
 // validTLS confere a escolha do certificado para os hosts do domínio (o
-// hostname e o par www). Devolve o modo, o certificado e o PEM decifrado
-// (só custom).
-func (s *Service) validTLS(ctx context.Context, in TLSInput, hosts []string) (string, *int64, string, error) {
+// hostname e o par www). checkExpiry=false pula o vencimento (certificado
+// mantido do banco). Devolve o modo, o certificado e o PEM decifrado (só
+// custom).
+func (s *Service) validTLS(ctx context.Context, in TLSInput, hosts []string, checkExpiry bool) (string, *int64, string, error) {
 	switch in.Mode {
 	case "", proxy.TLSAuto:
 		return proxy.TLSAuto, nil, "", nil
@@ -175,7 +176,7 @@ func (s *Service) validTLS(ctx context.Context, in TLSInput, hosts []string) (st
 	if err != nil {
 		return "", nil, "", err
 	}
-	if !c.NotAfter.After(s.now()) {
+	if checkExpiry && !c.NotAfter.After(s.now()) {
 		return "", nil, "", invalidCode(CodeCertExpired, "tls.certId", "O certificado escolhido está expirado.")
 	}
 	for _, h := range hosts {

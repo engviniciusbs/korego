@@ -112,21 +112,29 @@ type Service struct {
 
 // DomainInput são os campos editáveis de um domínio.
 //
-// Sem Routes, TargetType, AppID e Address viram uma única rota "/" (corpo
-// antigo). Com Routes, esses três campos são ignorados.
+// Na criação, campo ausente vale o padrão: sem Routes, TargetType, AppID e
+// Address viram uma única rota "/" (corpo antigo); TLS auto; só Cloudflare,
+// forceHttps e cabeçalhos desligados; compressão ligada.
+//
+// Na edição, campo ausente (nil ou vazio) mantém o valor gravado. Um corpo
+// antigo (targetType sem routes) troca só o destino da rota "/" e mantém as
+// demais rotas; targetType "static" repetido mantém a rota "/" estática.
 type DomainInput struct {
 	Hostname       string         `json:"hostname"`
 	TargetType     string         `json:"targetType"`
 	AppID          *int64         `json:"appId"`
 	Address        string         `json:"address"`
 	WWWRedirect    string         `json:"wwwRedirect"`
-	ForceHTTPS     bool           `json:"forceHttps"`
+	ForceHTTPS     *bool          `json:"forceHttps"`
 	Routes         []RouteInput   `json:"routes"`
-	TLS            TLSInput       `json:"tls"`
-	CloudflareOnly bool           `json:"cloudflareOnly"`
+	TLS            *TLSInput      `json:"tls"`
+	CloudflareOnly *bool          `json:"cloudflareOnly"`
 	Headers        []store.Header `json:"headers"`
-	// Compression: nil = ligada na criação e mantida na edição.
-	Compression *bool `json:"compression"`
+	Compression    *bool          `json:"compression"`
+
+	// keptTLS: o TLS veio do banco (não do corpo); o vencimento não é
+	// conferido de novo (o Caddy serve certificado vencido, só avisa no log).
+	keptTLS bool
 }
 
 // RouteInput é uma rota por caminho de um domínio.
@@ -172,7 +180,7 @@ func (s *Service) validate(ctx context.Context, in DomainInput, excludeID int64)
 	d := store.Domain{
 		Hostname:    strings.TrimSpace(in.Hostname),
 		WWWRedirect: in.WWWRedirect,
-		ForceHTTPS:  in.ForceHTTPS,
+		ForceHTTPS:  in.ForceHTTPS != nil && *in.ForceHTTPS,
 	}
 	if !ValidHostname(d.Hostname) {
 		return d, invalid("hostname", "Hostname inválido. Use letras minúsculas, números e hífens, como app.exemplo.com.")
@@ -248,12 +256,84 @@ func (s *Service) applyOptions(ctx context.Context, d *store.Domain, in DomainIn
 	if err != nil {
 		return "", err
 	}
-	mode, certID, pemText, err := s.validTLS(ctx, in.TLS, hostsOf(d.Hostname, d.WWWRedirect))
+	var tls TLSInput
+	if in.TLS != nil {
+		tls = *in.TLS
+	}
+	mode, certID, pemText, err := s.validTLS(ctx, tls, hostsOf(d.Hostname, d.WWWRedirect), !in.keptTLS)
 	if err != nil {
 		return "", err
 	}
-	d.Headers, d.TLSMode, d.CertID, d.CloudflareOnly = headers, mode, certID, in.CloudflareOnly
+	d.Headers, d.TLSMode, d.CertID = headers, mode, certID
+	d.CloudflareOnly = in.CloudflareOnly != nil && *in.CloudflareOnly
 	return pemText, nil
+}
+
+// keepOptions preenche as opções ausentes da entrada com as gravadas em cur
+// (certificado, só Cloudflare, cabeçalhos e compressão).
+func keepOptions(cur store.Domain, in *DomainInput) {
+	if in.TLS == nil {
+		in.TLS = &TLSInput{Mode: cur.TLSMode, CertID: cur.CertID}
+		in.keptTLS = true
+	}
+	if in.CloudflareOnly == nil {
+		v := cur.CloudflareOnly
+		in.CloudflareOnly = &v
+	}
+	if in.Headers == nil {
+		in.Headers = append([]store.Header{}, cur.Headers...)
+	}
+	if in.Compression == nil {
+		v := cur.Compression
+		in.Compression = &v
+	}
+}
+
+// mergeUpdate completa a entrada de uma edição com o domínio gravado: campo
+// ausente mantém o valor; corpo antigo troca só o destino da rota "/".
+func (s *Service) mergeUpdate(ctx context.Context, cur store.Domain, in DomainInput) (DomainInput, error) {
+	if strings.TrimSpace(in.Hostname) == "" {
+		in.Hostname = cur.Hostname
+	}
+	if in.WWWRedirect == "" {
+		in.WWWRedirect = cur.WWWRedirect
+	}
+	if in.ForceHTTPS == nil {
+		v := cur.ForceHTTPS
+		in.ForceHTTPS = &v
+	}
+	keepOptions(cur, &in)
+	if in.Routes != nil {
+		return in, nil
+	}
+	routes := make([]RouteInput, 0, len(cur.Routes)+1)
+	rootAt := -1
+	for _, r := range cur.Routes {
+		if r.Path == "/" {
+			rootAt = len(routes)
+		}
+		routes = append(routes, RouteInput{Path: r.Path, TargetType: r.TargetType, AppID: r.AppID,
+			Address: r.Address, MaxBodyBytes: r.MaxBodyBytes, NoBuffering: r.NoBuffering,
+			Root: r.Root, SPA: r.SPA, ImmutablePrefix: r.ImmutablePrefix})
+	}
+	keepStatic := in.TargetType == TargetStatic && rootAt >= 0 && routes[rootAt].TargetType == TargetStatic
+	if in.TargetType != "" && !keepStatic {
+		legacy, err := s.legacyRoute(ctx, in) // erros com os campos antigos
+		if err != nil {
+			return in, err
+		}
+		root := RouteInput{Path: "/", TargetType: legacy[0].TargetType, AppID: legacy[0].AppID, Address: legacy[0].Address}
+		if rootAt < 0 {
+			routes = append(routes, root)
+		} else {
+			if old := routes[rootAt]; old.TargetType != TargetStatic {
+				root.MaxBodyBytes, root.NoBuffering = old.MaxBodyBytes, old.NoBuffering
+			}
+			routes[rootAt] = root
+		}
+	}
+	in.Routes = routes
+	return in, nil
 }
 
 // wwwMismatch devolve a mensagem de erro se o redirecionamento www não for
@@ -351,15 +431,16 @@ func (s *Service) Update(ctx context.Context, id int64, in DomainInput) (store.D
 		}
 		return d, s.CheckDNS(ctx, d.Hostname), nil
 	}
+	in, err = s.mergeUpdate(ctx, cur, in)
+	if err != nil {
+		return store.Domain{}, DNSCheck{}, err
+	}
 	d, err := s.validate(ctx, in, id)
 	if err != nil {
 		return store.Domain{}, DNSCheck{}, err
 	}
 	d.ID, d.CreatedAt, d.IsPanel = id, cur.CreatedAt, cur.IsPanel
-	d.Compression = cur.Compression
-	if in.Compression != nil {
-		d.Compression = *in.Compression
-	}
+	d.Compression = *in.Compression
 	if err := s.DB.UpdateDomain(ctx, &d); err != nil {
 		return store.Domain{}, DNSCheck{}, err
 	}
