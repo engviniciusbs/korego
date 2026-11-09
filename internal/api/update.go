@@ -8,6 +8,7 @@ import (
 
 	"github.com/engviniciusbs/korego/internal/audit"
 	"github.com/engviniciusbs/korego/internal/auth"
+	"github.com/engviniciusbs/korego/internal/migrate"
 	"github.com/engviniciusbs/korego/internal/update"
 )
 
@@ -26,6 +27,9 @@ type Updater interface {
 type updateHandlers struct {
 	svc *auth.Service
 	up  Updater
+	// mig, se houver, recusa a atualização durante uma troca de servidor do
+	// proxy e bloqueia novas trocas enquanto ela roda.
+	mig *migrate.Engine
 
 	mu      sync.Mutex
 	cached  update.Release
@@ -101,10 +105,21 @@ func (h *updateHandlers) apply(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusConflict, "UPDATE_IN_PROGRESS", "Uma atualização já está em andamento.")
 		return
 	}
+	unblock := func() {}
+	if h.mig != nil {
+		release, err := h.mig.BlockForUpdate()
+		if err != nil {
+			h.stateMu.Unlock()
+			migrationError(w, err)
+			return
+		}
+		unblock = release
+	}
 	h.state = updateApplying
 	h.stateMu.Unlock()
 
 	if err := h.up.Apply(r.Context(), rel); err != nil {
+		unblock()
 		h.setState(updateIdle)
 		WriteError(w, http.StatusBadGateway, "UPDATE_FAILED", "Falha ao atualizar: "+err.Error())
 		return
@@ -117,6 +132,7 @@ func (h *updateHandlers) apply(w http.ResponseWriter, r *http.Request) {
 				"Falha ao agendar a finalização e ao restaurar o binário anterior; intervenção manual necessária: "+err.Error()+"; "+rerr.Error())
 			return
 		}
+		unblock()
 		h.setState(updateIdle)
 		WriteError(w, http.StatusBadGateway, "UPDATE_FAILED", "Falha ao agendar a finalização da atualização: "+err.Error())
 		return

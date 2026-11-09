@@ -23,3 +23,8 @@ func isUnique(err error) bool {
 	return strings.Contains(m, "UNIQUE constraint failed") ||
 		strings.Contains(m, "PRIMARY KEY constraint failed")
 }
+
+// isForeignKey informa se err é uma violação de FOREIGN KEY do SQLite.
+func isForeignKey(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "FOREIGN KEY constraint failed")
+}

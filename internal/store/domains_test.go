@@ -28,7 +28,7 @@ func TestDomains_CRUDAndConflict(t *testing.T) {
 	require.False(t, got.IsPanel)
 	require.Nil(t, got.AppID)
 
-	got.Address = "127.0.0.1:9100"
+	got.Routes[0].Address = "127.0.0.1:9100"
 	got.ForceHTTPS = false
 	got.WWWRedirect = "www_to_apex"
 	require.NoError(t, db.UpdateDomain(ctx, &got))
@@ -93,4 +93,89 @@ func TestDomains_PanelAndByApp(t *testing.T) {
 	none, err := db.DomainsByApp(ctx, appID+99)
 	require.NoError(t, err)
 	require.Empty(t, none)
+}
+
+func TestDomains_RoutesRoundTripOrdered(t *testing.T) {
+	db := OpenMemory(t)
+	ctx := context.Background()
+	d := &Domain{Hostname: "loja.exemplo.com", WWWRedirect: "none", ForceHTTPS: true,
+		CloudflareOnly: true, Compression: true, TLSMode: "auto",
+		Headers: []Header{{Name: "X-Frame-Options", Value: "DENY"}},
+		Routes: []DomainRoute{
+			{Position: 2, Path: "/static", TargetType: "static", Root: "/srv/site", SPA: true, ImmutablePrefix: "/assets"},
+			{Position: 0, Path: "/", TargetType: "address", Address: "127.0.0.1:9000", MaxBodyBytes: 1024, NoBuffering: true},
+			{Position: 1, Path: "/api", TargetType: "address", Address: "127.0.0.1:9001"},
+		}}
+	require.NoError(t, db.InsertDomain(ctx, d))
+
+	got, err := db.DomainByID(ctx, d.ID)
+	require.NoError(t, err)
+	require.True(t, got.CloudflareOnly)
+	require.True(t, got.Compression)
+	require.Equal(t, "auto", got.TLSMode)
+	require.Equal(t, []Header{{Name: "X-Frame-Options", Value: "DENY"}}, got.Headers)
+	require.Len(t, got.Routes, 3)
+	require.Equal(t, []string{"/", "/api", "/static"}, []string{got.Routes[0].Path, got.Routes[1].Path, got.Routes[2].Path})
+	require.Equal(t, int64(1024), got.Routes[0].MaxBodyBytes)
+	require.True(t, got.Routes[0].NoBuffering)
+	require.Equal(t, "/srv/site", got.Routes[2].Root)
+	require.True(t, got.Routes[2].SPA)
+	require.Equal(t, "/assets", got.Routes[2].ImmutablePrefix)
+	require.Equal(t, d.ID, got.Routes[0].DomainID)
+	// campos legados vêm da rota "/"
+	require.Equal(t, "address", got.TargetType)
+	require.Equal(t, "127.0.0.1:9000", got.Address)
+
+	list, err := db.ListDomains(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	require.Len(t, list[0].Routes, 3)
+
+	// sem rotas: uma rota "/" a partir dos campos legados
+	l := &Domain{Hostname: "b.exemplo.com", TargetType: "address", Address: "127.0.0.1:9100", WWWRedirect: "none"}
+	require.NoError(t, db.InsertDomain(ctx, l))
+	g2, err := db.GetDomain(ctx, l.ID)
+	require.NoError(t, err)
+	require.Len(t, g2.Routes, 1)
+	require.Equal(t, "/", g2.Routes[0].Path)
+	require.Equal(t, "auto", g2.TLSMode)
+	require.Equal(t, []Header{}, g2.Headers)
+}
+
+func TestDomains_UpdateReplacesRoutes(t *testing.T) {
+	db := OpenMemory(t)
+	ctx := context.Background()
+	d := &Domain{Hostname: "loja.exemplo.com", WWWRedirect: "none", Routes: []DomainRoute{
+		{Path: "/", TargetType: "address", Address: "127.0.0.1:9000"},
+		{Position: 1, Path: "/api", TargetType: "address", Address: "127.0.0.1:9001"},
+	}}
+	require.NoError(t, db.InsertDomain(ctx, d))
+
+	d.Routes = []DomainRoute{{Path: "/", TargetType: "static", Root: "/srv/x"}}
+	require.NoError(t, db.UpdateDomain(ctx, d))
+	got, err := db.DomainByID(ctx, d.ID)
+	require.NoError(t, err)
+	require.Len(t, got.Routes, 1)
+	require.Equal(t, "static", got.Routes[0].TargetType)
+	var legacyType, legacyAddr string
+	require.NoError(t, db.SQL().QueryRow(`SELECT target_type, address FROM domains WHERE id = ?`, d.ID).Scan(&legacyType, &legacyAddr))
+	require.Equal(t, "address", legacyType)
+	require.Equal(t, "", legacyAddr)
+
+	var n int
+	require.NoError(t, db.SQL().QueryRow(`SELECT COUNT(*) FROM domain_routes WHERE domain_id = ?`, d.ID).Scan(&n))
+	require.Equal(t, 1, n)
+}
+
+func TestDomains_DeleteCascadesRoutes(t *testing.T) {
+	db := OpenMemory(t)
+	ctx := context.Background()
+	d := &Domain{Hostname: "loja.exemplo.com", WWWRedirect: "none", Routes: []DomainRoute{
+		{Path: "/", TargetType: "address", Address: "127.0.0.1:9000"},
+	}}
+	require.NoError(t, db.InsertDomain(ctx, d))
+	require.NoError(t, db.DeleteDomain(ctx, d.ID))
+	var n int
+	require.NoError(t, db.SQL().QueryRow(`SELECT COUNT(*) FROM domain_routes`).Scan(&n))
+	require.Equal(t, 0, n)
 }

@@ -149,3 +149,56 @@ export function validAddress(s: string): boolean {
   if (p < 1 || p > 65535) return false;
   return host === "localhost" || isIPv4(host) || isIPv6(host) || validHostname(host);
 }
+
+const pathSegRe = /^[a-z0-9._~-]+$/;
+const headerNameRe = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+/** Espelha proxy.validPath: "/" ou "/seg/.../", segmentos em [a-z0-9._~-]. */
+export function validRoutePath(p: string): boolean {
+  if (p === "/") return true;
+  if (p.length < 3 || !p.startsWith("/") || !p.endsWith("/")) return false;
+  return p
+    .slice(1, -1)
+    .split("/")
+    .every((seg) => pathSegRe.test(seg));
+}
+
+/** Espelha proxy.ValidImmutablePrefix: um caminho de rota diferente de "/". */
+export function validImmutablePrefix(p: string): boolean {
+  return p !== "/" && validRoutePath(p);
+}
+
+/** Limpa um caminho absoluto como path.Clean do Go. */
+function cleanPath(p: string): string {
+  const out: string[] = [];
+  for (const seg of p.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") out.pop();
+    else out.push(seg);
+  }
+  return "/" + out.join("/");
+}
+
+/** Espelha proxy.ValidStaticRoot: absoluto e, depois de limpo, em /var/www. */
+export function validStaticRoot(root: string): boolean {
+  if (!root.startsWith("/")) return false;
+  const c = cleanPath(root);
+  return c === "/var/www" || c.startsWith("/var/www/");
+}
+
+/** Espelha proxy.ValidHeaderName (token HTTP). */
+export function validHeaderName(n: string): boolean {
+  return headerNameRe.test(n);
+}
+
+const CODE_RE = /^(\d{6}|[a-z0-9]{5}-?[a-z0-9]{5})$/i;
+
+/** Código 2FA: 6 dígitos do autenticador ou de recuperação (xxxxx-xxxxx). Espera o código já sem espaços. */
+export function validAuthCode(code: string): boolean {
+  return CODE_RE.test(code);
+}
+
+/** Remove espaços de um código digitado ("123 456" → "123456"). */
+export function cleanAuthCode(code: string): string {
+  return code.trim().replace(/\s/g, "");
+}

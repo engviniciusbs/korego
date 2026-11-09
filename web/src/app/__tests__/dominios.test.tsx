@@ -59,6 +59,7 @@ beforeEach(() => {
     "GET /api/proxy": () => json({ state: "active", guideUrl: "https://exemplo.com/guia" }),
     "GET /api/domains": () => json({ domains: [panelDomain] }),
     "GET /api/apps": () => json({ apps: [app] }),
+    "GET /api/certificates": () => json({ certificates: [] }),
   };
   vi.stubGlobal("WebSocket", FakeWS);
   fetchMock = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
@@ -127,7 +128,7 @@ describe("Domínios", () => {
       );
     };
     renderPage();
-    await screen.findByText("painel.exemplo.com");
+    await screen.findByRole("link", { name: /^painel\.exemplo\.com/ });
 
     fireEvent.click(screen.getByRole("button", { name: "Adicionar domínio" }));
     const dialog = screen.getByRole("dialog", { name: "Adicionar domínio" });
@@ -155,11 +156,15 @@ describe("Domínios", () => {
     );
     expect(sent).toEqual({
       hostname: "loja.exemplo.com",
-      targetType: "address",
-      appId: null,
-      address: "127.0.0.1:5000",
       wwwRedirect: "none",
       forceHttps: true,
+      routes: [
+        { path: "/", targetType: "address", address: "127.0.0.1:5000", maxBodyBytes: 0, noBuffering: false, spa: false },
+      ],
+      tls: { mode: "auto", certId: null },
+      cloudflareOnly: false,
+      headers: [],
+      compression: true,
     });
 
     // O domínio já está salvo e aparece na lista.
@@ -169,7 +174,7 @@ describe("Domínios", () => {
     expect(within(row("loja.exemplo.com")).getByText("Pendente")).toBeInTheDocument();
   });
 
-  it("domínio do painel aparece sem ações de editar/remover", async () => {
+  it("domínio do painel não pode ser removido; o hostname fica em Configurações", async () => {
     routes["GET /api/domains"] = () =>
       json({
         domains: [
@@ -178,11 +183,11 @@ describe("Domínios", () => {
         ],
       });
     renderPage();
-    await screen.findByText("painel.exemplo.com");
+    await screen.findByRole("link", { name: /^painel\.exemplo\.com/ });
 
     const p = row("painel.exemplo.com");
     expect(within(p).getByText("Painel")).toBeInTheDocument();
-    expect(within(p).queryByRole("button", { name: /Editar/ })).not.toBeInTheDocument();
+    expect(within(p).getByRole("button", { name: /Editar/ })).toBeInTheDocument();
     expect(within(p).queryByRole("button", { name: /Remover/ })).not.toBeInTheDocument();
     expect(within(p).getByRole("link", { name: /Configurações/ })).toHaveAttribute("href", "/configuracoes/painel/");
     expect(within(p).getByText("Ativo até 01/02/2027")).toBeInTheDocument();

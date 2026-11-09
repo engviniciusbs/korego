@@ -73,3 +73,21 @@ func TestPortOwner_RealProc(t *testing.T) {
 	assert.True(t, busy)
 	assert.Contains(t, owner, fmt.Sprintf("(pid %d)", os.Getpid()))
 }
+
+func TestDescendsAt(t *testing.T) {
+	root := t.TempDir()
+	stat := func(pid, ppid int) {
+		// comm com espaço e parêntese, como no kernel.
+		writeFixture(t, filepath.Join(root, fmt.Sprint(pid), "stat"),
+			fmt.Sprintf("%d (ca ddy) ) S %d 1 1 0 -1 0\n", pid, ppid))
+	}
+	stat(100, 1)
+	stat(101, 100)
+	stat(102, 101)
+	stat(200, 1)
+	assert.True(t, descendsAt(root, 100, 100))
+	assert.True(t, descendsAt(root, 102, 100))
+	assert.False(t, descendsAt(root, 200, 100))
+	assert.False(t, descendsAt(root, 999, 100), "pid inexistente")
+	assert.False(t, descendsAt(root, 102, 0))
+}

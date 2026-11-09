@@ -74,6 +74,12 @@ func toCreateConfig(s RunSpec) (*container.Config, *container.HostConfig, error)
 		}
 		host.Mounts = append(host.Mounts, mount.Mount{Type: mount.TypeVolume, Source: v.Volume, Target: v.Target})
 	}
+	for _, b := range s.Binds {
+		if b.Source == "" || b.Target == "" {
+			return nil, nil, errors.New("bind precisa de origem e destino")
+		}
+		host.Mounts = append(host.Mounts, mount.Mount{Type: mount.TypeBind, Source: b.Source, Target: b.Target, ReadOnly: b.ReadOnly})
+	}
 	return cfg, host, nil
 }
 

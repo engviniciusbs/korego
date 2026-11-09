@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/engviniciusbs/korego/internal/auth"
+	"github.com/engviniciusbs/korego/internal/certs"
 	"github.com/engviniciusbs/korego/internal/deploy"
 	"github.com/engviniciusbs/korego/internal/domains"
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/github"
+	"github.com/engviniciusbs/korego/internal/migrate"
 	"github.com/engviniciusbs/korego/internal/node"
 	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/secrets"
@@ -40,6 +42,11 @@ type Deps struct {
 	Usage LatestUsage
 	// Domains atende /api/proxy, /api/domains e /api/settings/panel (nil as desativa).
 	Domains *domains.Service
+	// Migrate atende /api/proxy/trial-check, /takeover e /rollback (nil as
+	// desativa; exige Domains).
+	Migrate *migrate.Engine
+	// Certs atende /api/certificates (nil a desativa).
+	Certs *certs.Service
 	// Deploys executa e consulta os deploys das aplicações.
 	Deploys *deploy.Service
 	// DataDir guarda logs e diretórios das aplicações (apagados com a app).
@@ -67,7 +74,7 @@ func NewRouter(d Deps) http.Handler {
 	usageH := usageHandlers{latest: d.Usage, db: d.DB, now: d.Now}
 	containersH := containerHandlers{svc: d.Auth, node: d.Node}
 	pm2H := pm2Handlers{node: d.Node}
-	updateH := &updateHandlers{svc: d.Auth, up: d.Updater}
+	updateH := &updateHandlers{svc: d.Auth, up: d.Updater, mig: d.Migrate}
 
 	if d.Hub == nil {
 		d.Hub = events.NewHub()
@@ -131,11 +138,17 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/containers/{id}/logs/download", containersH.download)
 			r.Get("/ws", wsH.serve)
 			if d.Domains != nil {
-				proxyH := proxyHandlers{dom: d.Domains}
+				proxyH := proxyHandlers{dom: d.Domains, mig: d.Migrate}
 				domainsH := domainHandlers{svc: d.Auth, dom: d.Domains}
 				settingsH := settingsHandlers{svc: d.Auth, dom: d.Domains}
 				r.Get("/proxy", proxyH.status)
 				r.Post("/proxy/retry", proxyH.retry)
+				if d.Migrate != nil {
+					migH := migrationHandlers{svc: d.Auth, mig: d.Migrate}
+					r.Get("/proxy/trial-check", migH.trialCheck)
+					r.Post("/proxy/takeover", migH.takeover)
+					r.Post("/proxy/rollback", migH.rollback)
+				}
 				r.Get("/domains", domainsH.list)
 				r.Post("/domains", domainsH.create)
 				r.Put("/domains/{id}", domainsH.update)
@@ -144,6 +157,12 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/settings/panel", settingsH.panel)
 				r.Put("/settings/panel/domain", settingsH.setDomain)
 				r.Put("/settings/panel/public-port", settingsH.setPublicPort)
+			}
+			if d.Certs != nil {
+				certsH := certHandlers{svc: d.Auth, certs: d.Certs}
+				r.Get("/certificates", certsH.list)
+				r.Post("/certificates", certsH.create)
+				r.Delete("/certificates/{id}", certsH.remove)
 			}
 			if d.DB != nil && d.Deploys != nil {
 				box := d.Box

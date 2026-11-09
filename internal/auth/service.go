@@ -284,6 +284,17 @@ func (s *Service) loginFailed(ctx context.Context, ip, email string) error {
 	return ErrInvalidCredentials
 }
 
+// VerifyCode confere um código TOTP novo (com anti-replay) ou um código de
+// recuperação (de uso único) do usuário, para confirmar ações sensíveis com
+// a sessão já aberta. Usuário inexistente devolve erro.
+func (s *Service) VerifyCode(ctx context.Context, userID int64, code string) (bool, error) {
+	u, err := s.DB.UserByID(ctx, userID)
+	if err != nil {
+		return false, fmt.Errorf("buscar usuário: %w", err)
+	}
+	return s.checkCode(ctx, u, code, s.now())
+}
+
 // checkCode accepts a 6-digit TOTP code (with anti-replay) or a recovery code.
 func (s *Service) checkCode(ctx context.Context, u store.User, code string, now time.Time) (bool, error) {
 	code = stripSpaces(code)

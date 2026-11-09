@@ -27,6 +27,9 @@ type Fake struct {
 	ImagesFn      func(ctx context.Context, repo string) ([]docker.Image, error)
 	RemoveImageFn func(ctx context.Context, ref string) error
 	ListByLabelFn func(ctx context.Context, key, value string) ([]docker.Container, error)
+
+	// ExecFn é usado por Exec (opcional: não faz parte de docker.Client).
+	ExecFn func(ctx context.Context, id string, cmd []string) (int, error)
 }
 
 var _ docker.Client = (*Fake)(nil)
@@ -157,4 +160,12 @@ func (f *Fake) ListByLabel(ctx context.Context, key, value string) ([]docker.Con
 		return nil, docker.ErrUnavailable
 	}
 	return f.ListByLabelFn(ctx, key, value)
+}
+
+// Exec chama ExecFn (como docker.Local.Exec).
+func (f *Fake) Exec(ctx context.Context, id string, cmd []string) (int, error) {
+	if f.ExecFn == nil {
+		return 0, docker.ErrUnavailable
+	}
+	return f.ExecFn(ctx, id, cmd)
 }

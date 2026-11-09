@@ -17,3 +17,6 @@ func PortOwner(port int) (string, bool) {
 	_ = l.Close()
 	return "", false
 }
+
+// descendsOf fora de Linux só reconhece o próprio PID.
+func descendsOf(pid, ancestor int) bool { return pid == ancestor }

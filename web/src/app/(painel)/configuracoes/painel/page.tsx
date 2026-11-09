@@ -7,6 +7,7 @@ import { PageHeader, PanelState } from "@/components/shell/page-header";
 import { Alert, Button, Dialog, Input, Label, Panel, Spinner } from "@/components/ui";
 import { focusRing } from "@/components/ui/focus";
 import { ApiError } from "@/lib/api";
+import { MIGRATING_TITLE, useMigrating } from "@/lib/domains";
 import { cn } from "@/lib/cn";
 import { usePanelSettings, useSetPanelDomain, useSetPublicPort, type PanelSettings } from "@/lib/settings";
 import { validHostname } from "@/lib/validate";
@@ -42,7 +43,10 @@ function DomainForm({ panel }: { panel: PanelSettings }) {
   const [fieldError, setFieldError] = useState("");
   const [notice, setNotice] = useState<{ kind: "ok" | "proxy" | "error"; text: string } | null>(null);
 
-  const locked = !panel.publicPort;
+  const portOff = !panel.publicPort;
+  // Troca de servidor em andamento: o domínio do painel também é um domínio do proxy.
+  const migrating = useMigrating();
+  const locked = portOff || migrating;
   const host = value.trim().toLowerCase();
   const unchanged = host === panel.domain.toLowerCase();
 
@@ -114,7 +118,9 @@ function DomainForm({ panel }: { panel: PanelSettings }) {
           </p>
         )}
         <p id={hintId} className="mt-1 text-xs text-fg-subtle">
-          {locked
+          {migrating
+            ? `${MIGRATING_TITLE}: o domínio do painel pode ser alterado quando ela terminar.`
+            : portOff
             ? "Reative a porta 8000 pública antes de alterar o domínio."
             : "Aponte um registro A para este servidor. O certificado é emitido automaticamente. Deixe vazio para remover."}
         </p>

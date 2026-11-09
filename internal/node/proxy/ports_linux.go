@@ -106,3 +106,37 @@ func socketPid(root string, inodes map[string]bool) (int, bool) {
 	}
 	return best, best != 0
 }
+
+// descendsOf diz se pid é ancestor ou descende dele, pela cadeia de PPID em /proc.
+func descendsOf(pid, ancestor int) bool { return descendsAt("/proc", pid, ancestor) }
+
+func descendsAt(root string, pid, ancestor int) bool {
+	if ancestor <= 0 {
+		return false
+	}
+	for i := 0; i < 64 && pid > 1; i++ {
+		if pid == ancestor {
+			return true
+		}
+		data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "stat"))
+		if err != nil {
+			return false
+		}
+		// "pid (comm) estado ppid ...": o comm pode ter espaços e parênteses.
+		str := string(data)
+		end := strings.LastIndex(str, ")")
+		if end < 0 {
+			return false
+		}
+		f := strings.Fields(str[end+1:])
+		if len(f) < 2 {
+			return false
+		}
+		ppid, err := strconv.Atoi(f[1])
+		if err != nil {
+			return false
+		}
+		pid = ppid
+	}
+	return pid == ancestor
+}

@@ -1,59 +1,211 @@
 {
   "admin": {
-    "listen": "127.0.0.1:2019"
+    "listen": "127.0.0.1:2019",
+    "config": {
+      "persist": false
+    }
   },
   "apps": {
     "http": {
       "servers": {
         "korego_https": {
-          "listen": [":443"],
+          "listen": [
+            ":443"
+          ],
           "automatic_https": {
             "disable_redirects": true
           },
           "routes": [
             {
-              "match": [{"host": ["api.exemplo.com"]}],
+              "match": [
+                {
+                  "host": [
+                    "api.exemplo.com"
+                  ]
+                }
+              ],
               "handle": [
                 {
-                  "handler": "reverse_proxy",
-                  "upstreams": [{"dial": "127.0.0.1:20002"}]
+                  "handler": "headers",
+                  "response": {
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "deferred": true
+                  }
+                },
+                {
+                  "handler": "subroute",
+                  "routes": [
+                    {
+                      "handle": [
+                        {
+                          "handler": "reverse_proxy",
+                          "upstreams": [
+                            {
+                              "dial": "127.0.0.1:20002"
+                            }
+                          ],
+                          "headers": {
+                            "request": {
+                              "set": {
+                                "X-Real-IP": [
+                                  "{http.request.remote.host}"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      "terminal": true
+                    }
+                  ]
                 }
               ],
               "terminal": true
             },
             {
-              "match": [{"host": ["app.exemplo.com"]}],
+              "match": [
+                {
+                  "host": [
+                    "app.exemplo.com"
+                  ]
+                }
+              ],
               "handle": [
                 {
-                  "handler": "reverse_proxy",
-                  "upstreams": [{"dial": "127.0.0.1:20001"}]
+                  "handler": "headers",
+                  "response": {
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "deferred": true
+                  }
+                },
+                {
+                  "handler": "subroute",
+                  "routes": [
+                    {
+                      "handle": [
+                        {
+                          "handler": "reverse_proxy",
+                          "upstreams": [
+                            {
+                              "dial": "127.0.0.1:20001"
+                            }
+                          ],
+                          "headers": {
+                            "request": {
+                              "set": {
+                                "X-Real-IP": [
+                                  "{http.request.remote.host}"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      "terminal": true
+                    }
+                  ]
                 }
               ],
               "terminal": true
             },
             {
-              "match": [{"host": ["exemplo.com"]}],
+              "match": [
+                {
+                  "host": [
+                    "exemplo.com"
+                  ]
+                }
+              ],
               "handle": [
                 {
-                  "handler": "reverse_proxy",
-                  "upstreams": [{"dial": "127.0.0.1:20003"}]
+                  "handler": "headers",
+                  "response": {
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "deferred": true
+                  }
+                },
+                {
+                  "handler": "subroute",
+                  "routes": [
+                    {
+                      "handle": [
+                        {
+                          "handler": "reverse_proxy",
+                          "upstreams": [
+                            {
+                              "dial": "127.0.0.1:20003"
+                            }
+                          ],
+                          "headers": {
+                            "request": {
+                              "set": {
+                                "X-Real-IP": [
+                                  "{http.request.remote.host}"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      "terminal": true
+                    }
+                  ]
                 }
               ],
               "terminal": true
             },
             {
-              "match": [{"host": ["www.exemplo.com"]}],
+              "match": [
+                {
+                  "host": [
+                    "www.exemplo.com"
+                  ]
+                }
+              ],
               "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "deferred": true
+                  }
+                },
                 {
                   "handler": "static_response",
                   "status_code": 308,
-                  "headers": {"Location": ["https://exemplo.com{http.request.uri}"]}
+                  "headers": {
+                    "Location": [
+                      "https://exemplo.com{http.request.uri}"
+                    ]
+                  }
                 }
               ],
               "terminal": true
             },
             {
               "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "deferred": true
+                  }
+                },
                 {
                   "handler": "static_response",
                   "status_code": 404,
@@ -62,56 +214,190 @@
               ],
               "terminal": true
             }
-          ]
+          ],
+          "errors": {
+            "routes": [
+              {
+                "handle": [
+                  {
+                    "handler": "headers",
+                    "response": {
+                      "delete": [
+                        "Server",
+                        "Via"
+                      ],
+                      "deferred": true
+                    }
+                  },
+                  {
+                    "handler": "static_response",
+                    "status_code": "{http.error.status_code}"
+                  }
+                ],
+                "terminal": true
+              }
+            ]
+          }
         },
         "korego_http": {
-          "listen": [":80"],
+          "listen": [
+            ":80"
+          ],
           "routes": [
             {
-              "match": [{"host": ["api.exemplo.com"]}],
+              "match": [
+                {
+                  "host": [
+                    "api.exemplo.com"
+                  ]
+                }
+              ],
               "handle": [
                 {
-                  "handler": "reverse_proxy",
-                  "upstreams": [{"dial": "127.0.0.1:20002"}]
+                  "handler": "headers",
+                  "response": {
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "deferred": true
+                  }
+                },
+                {
+                  "handler": "subroute",
+                  "routes": [
+                    {
+                      "handle": [
+                        {
+                          "handler": "reverse_proxy",
+                          "upstreams": [
+                            {
+                              "dial": "127.0.0.1:20002"
+                            }
+                          ],
+                          "headers": {
+                            "request": {
+                              "set": {
+                                "X-Real-IP": [
+                                  "{http.request.remote.host}"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      "terminal": true
+                    }
+                  ]
                 }
               ],
               "terminal": true
             },
             {
-              "match": [{"host": ["app.exemplo.com"]}],
+              "match": [
+                {
+                  "host": [
+                    "app.exemplo.com"
+                  ]
+                }
+              ],
               "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "deferred": true
+                  }
+                },
                 {
                   "handler": "static_response",
                   "status_code": 308,
-                  "headers": {"Location": ["https://{http.request.host}{http.request.uri}"]}
+                  "headers": {
+                    "Location": [
+                      "https://{http.request.host}{http.request.uri}"
+                    ]
+                  }
                 }
               ],
               "terminal": true
             },
             {
-              "match": [{"host": ["exemplo.com"]}],
+              "match": [
+                {
+                  "host": [
+                    "exemplo.com"
+                  ]
+                }
+              ],
               "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "deferred": true
+                  }
+                },
                 {
                   "handler": "static_response",
                   "status_code": 308,
-                  "headers": {"Location": ["https://{http.request.host}{http.request.uri}"]}
+                  "headers": {
+                    "Location": [
+                      "https://{http.request.host}{http.request.uri}"
+                    ]
+                  }
                 }
               ],
               "terminal": true
             },
             {
-              "match": [{"host": ["www.exemplo.com"]}],
+              "match": [
+                {
+                  "host": [
+                    "www.exemplo.com"
+                  ]
+                }
+              ],
               "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "deferred": true
+                  }
+                },
                 {
                   "handler": "static_response",
                   "status_code": 308,
-                  "headers": {"Location": ["https://exemplo.com{http.request.uri}"]}
+                  "headers": {
+                    "Location": [
+                      "https://exemplo.com{http.request.uri}"
+                    ]
+                  }
                 }
               ],
               "terminal": true
             },
             {
               "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "delete": [
+                      "Server",
+                      "Via"
+                    ],
+                    "deferred": true
+                  }
+                },
                 {
                   "handler": "static_response",
                   "status_code": 404,
@@ -120,7 +406,30 @@
               ],
               "terminal": true
             }
-          ]
+          ],
+          "errors": {
+            "routes": [
+              {
+                "handle": [
+                  {
+                    "handler": "headers",
+                    "response": {
+                      "delete": [
+                        "Server",
+                        "Via"
+                      ],
+                      "deferred": true
+                    }
+                  },
+                  {
+                    "handler": "static_response",
+                    "status_code": "{http.error.status_code}"
+                  }
+                ],
+                "terminal": true
+              }
+            ]
+          }
         }
       }
     },
@@ -128,7 +437,12 @@
       "automation": {
         "policies": [
           {
-            "subjects": ["api.exemplo.com", "app.exemplo.com", "exemplo.com", "www.exemplo.com"]
+            "subjects": [
+              "api.exemplo.com",
+              "app.exemplo.com",
+              "exemplo.com",
+              "www.exemplo.com"
+            ]
           }
         ]
       }

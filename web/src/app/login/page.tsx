@@ -6,8 +6,7 @@ import { FullScreenLoading, useAuthRedirect } from "@/components/shell/auth-redi
 import { Alert, Button, Input } from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-
-const CODE_RE = /^(\d{6}|[a-z0-9]{5}-?[a-z0-9]{5})$/i;
+import { cleanAuthCode, validAuthCode } from "@/lib/validate";
 
 function loginErrorMessage(err: unknown): string {
   if (err instanceof ApiError) {
@@ -45,8 +44,8 @@ export default function LoginPage() {
   async function submit(e: FormEvent) {
     e.preventDefault();
     setFormError(null);
-    const clean = code.trim().replace(/\s/g, "");
-    if (!CODE_RE.test(clean)) {
+    const clean = cleanAuthCode(code);
+    if (!validAuthCode(clean)) {
       setCodeError("Use os 6 dígitos do autenticador ou um código de recuperação.");
       document.getElementById(id("code"))?.focus();
       return;

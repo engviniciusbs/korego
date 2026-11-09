@@ -296,6 +296,7 @@ func applyLabels(c *Container, labels map[string]string) {
 	c.Project = labels[labelProject]
 	c.Service = labels[labelService]
 	c.Managed = labels[labelManaged] == "true"
+	c.Labels = labels
 }
 
 func healthString(s container.HealthStatus) string {
@@ -349,6 +350,7 @@ func toDetails(r container.InspectResponse) Details {
 		d.State = string(r.State.Status)
 		d.StartedAt = parseTime(r.State.StartedAt)
 		d.ExitCode = r.State.ExitCode
+		d.Pid = r.State.Pid
 		if r.State.Health != nil {
 			d.Health = healthString(r.State.Health.Status)
 		}
@@ -405,4 +407,38 @@ func toEvent(m events.Message) Event {
 		action = strings.TrimSpace(a)
 	}
 	return Event{Action: action, ID: m.Actor.ID, Name: m.Actor.Attributes["name"]}
+}
+
+// execPoll é o intervalo de consulta do fim de um Exec.
+const execPoll = 100 * time.Millisecond
+
+// Exec roda cmd no container (docker exec, sem anexar entrada nem saída),
+// espera terminar e devolve o código de saída. Não faz parte de Client:
+// quem precisa testa com uma asserção de interface.
+func (l *Local) Exec(ctx context.Context, id string, cmd []string) (int, error) {
+	cli, err := l.client()
+	if err != nil {
+		return 0, err
+	}
+	cr, err := cli.ExecCreate(ctx, id, client.ExecCreateOptions{Cmd: cmd})
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	if _, err := cli.ExecStart(ctx, cr.ID, client.ExecStartOptions{Detach: true}); err != nil {
+		return 0, mapErr(err)
+	}
+	for {
+		res, err := cli.ExecInspect(ctx, cr.ID, client.ExecInspectOptions{})
+		if err != nil {
+			return 0, mapErr(err)
+		}
+		if !res.Running {
+			return res.ExitCode, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(execPoll):
+		}
+	}
 }

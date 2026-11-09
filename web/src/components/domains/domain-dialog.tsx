@@ -1,16 +1,35 @@
 "use client";
 
-import { useId, useState, type FormEvent, type ReactNode } from "react";
+import { useId, useState, type FormEvent } from "react";
 import { Alert, Dialog, Input, Label, Tabs, tabId, tabPanelId } from "@/components/ui";
-import { focusRing } from "@/components/ui/focus";
 import { ApiError } from "@/lib/api";
 import { useApps } from "@/lib/apps";
 import { cn } from "@/lib/cn";
-import { useSaveDomain, type DnsCheck, type Domain, type DomainInput } from "@/lib/domains";
-import { validAddress, validHostname } from "@/lib/validate";
-
-type Field = "hostname" | "appId" | "address" | "wwwRedirect";
-type Target = DomainInput["targetType"];
+import {
+  domainRoutes,
+  MIGRATING_TITLE,
+  useMigrating,
+  useSaveDomain,
+  type DnsCheck,
+  type Domain,
+  type DomainInput,
+  type TLSMode,
+} from "@/lib/domains";
+import { validHostname } from "@/lib/validate";
+import { Checkbox, describedBy, FieldError, selectCls } from "./form-bits";
+import {
+  newRoute,
+  routeDraft,
+  routeFieldId,
+  routeInput,
+  RouteList,
+  sortRoutes,
+  validateRoutes,
+  type RouteDraft,
+  type RouteField,
+} from "./route-list";
+import { cfSwitchId, headerDraft, headerFieldId, SecurityTab, validateHeaders, type HeaderDraft, type HeaderField } from "./security-tab";
+import { certSelectId, TlsTab } from "./tls-tab";
 
 export const WWW_OPTIONS = [
   { value: "none", label: "Nenhum" },
@@ -18,10 +37,20 @@ export const WWW_OPTIONS = [
   { value: "apex_to_www", label: "principal → www" },
 ] as const;
 
-const TARGETS: { value: Target; label: string }[] = [
-  { value: "app", label: "Aplicação" },
-  { value: "address", label: "Endereço" },
+type EditorTab = "rotas" | "certificado" | "seguranca";
+
+const ALL_TABS: { value: EditorTab; label: string }[] = [
+  { value: "rotas", label: "Rotas" },
+  { value: "certificado", label: "Certificado" },
+  { value: "seguranca", label: "Segurança" },
 ];
+
+/**
+ * Chave de erro do editor:
+ * - `hostname`, `wwwRedirect`, `routes`, `tls`, `cloudflareOnly`, `headers` e `form`;
+ * - `r<chave>.<campo>` para uma rota e `h<chave>.<campo>` para um cabeçalho.
+ */
+type ErrorKey = string;
 
 /** Espelha internal/domains.wwwMismatch. */
 function wwwMismatch(hostname: string, www: string): string {
@@ -34,21 +63,52 @@ function wwwMismatch(hostname: string, www: string): string {
   return "";
 }
 
-/** Erro da API → campo (quando houver) e mensagem em português. */
-export function domainErrorMessage(err: unknown): { field?: Field; message: string } {
+/**
+ * Erro da API → chave do campo no editor e mensagem. `routeKeys` e
+ * `headerKeys` são as chaves das rotas e cabeçalhos na ordem em que foram
+ * enviados (o servidor aponta `routes[i]` e `headers[i]`).
+ */
+export function domainErrorMessage(
+  err: unknown,
+  routeKeys: number[] = [],
+  headerKeys: number[] = [],
+  defaultRouteKey?: number,
+): { key?: ErrorKey; message: string } {
   if (!(err instanceof ApiError)) return { message: err instanceof Error ? err.message : "Erro desconhecido." };
+  const f = err.field ?? "";
   switch (err.code) {
-    case "INVALID_DOMAIN": {
-      const f = err.field === "targetType" ? undefined : (err.field as Field | undefined);
-      return { field: f, message: err.message };
-    }
     case "DOMAIN_EXISTS":
-      return { field: "hostname", message: "Este domínio já está cadastrado." };
+      return { key: "hostname", message: "Este domínio já está cadastrado." };
     case "PANEL_DOMAIN_PROTECTED":
-      return { message: "Este é o domínio do painel; ele é gerenciado em Configurações → Painel." };
-    default:
-      return { message: err.message };
+      return { message: "O hostname do painel só muda em Configurações → Painel." };
+    case "PANEL_PORT_OFF":
+      return { key: "cloudflareOnly", message: err.message };
   }
+  const route = /^routes\[(\d+)\]\.(\w+)$/.exec(f);
+  if (route && routeKeys[Number(route[1])] !== undefined) {
+    return { key: `r${routeKeys[Number(route[1])]}.${route[2]}`, message: err.message };
+  }
+  const header = /^headers\[(\d+)\]\.(name|value)$/.exec(f);
+  if (header && headerKeys[Number(header[1])] !== undefined) {
+    return { key: `h${headerKeys[Number(header[1])]}.${header[2]}`, message: err.message };
+  }
+  if (f.startsWith("tls")) return { key: "tls", message: err.message };
+  // Formato antigo (sem rotas): o campo é da rota "/".
+  if ((f === "appId" || f === "address") && defaultRouteKey !== undefined) {
+    return { key: `r${defaultRouteKey}.${f}`, message: err.message };
+  }
+  if (["hostname", "wwwRedirect", "routes", "headers", "cloudflareOnly"].includes(f)) {
+    return { key: f, message: err.message };
+  }
+  return { message: err.message };
+}
+
+/** Aba onde fica o campo de cada chave de erro (hostname fica acima das abas). */
+function tabOf(key: ErrorKey): EditorTab | null {
+  if (key === "hostname") return null;
+  if (key === "tls") return "certificado";
+  if (key === "cloudflareOnly" || key === "headers" || key.startsWith("h")) return "seguranca";
+  return "rotas";
 }
 
 /** Hostnames servidos por um domínio: ele e, com redirecionamento www, o par. */
@@ -58,28 +118,13 @@ function hostsOf(hostname: string, www: string): string[] {
   return [hostname];
 }
 
-const selectCls = cn(
-  "block h-9 w-full min-w-0 border border-line-strong bg-surface px-3 text-[13px] text-fg",
-  "outline-hidden hover:border-fg-subtle focus-visible:border-accent-text focus-visible:bg-surface-2",
-  "focus-visible:shadow-[inset_2px_0_0_0_var(--color-accent-text)]",
-  "aria-invalid:border-danger disabled:cursor-not-allowed disabled:opacity-50",
-);
-
-function FieldError({ id, children }: { id: string; children?: string }) {
-  if (!children) return null;
-  return (
-    <p id={id} className="mt-1 text-xs text-danger [overflow-wrap:anywhere]">
-      {children}
-    </p>
-  );
-}
-
-function Hint({ id, children }: { id?: string; children: ReactNode }) {
-  return (
-    <p id={id} className="mt-1 text-xs text-fg-subtle">
-      {children}
-    </p>
-  );
+/** Erros com o prefixo dado, sem o prefixo (para as abas). */
+function scoped(errors: Record<ErrorKey, string | undefined>, prefix: string) {
+  const out: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(errors)) {
+    if (k.startsWith(prefix) && /^\d/.test(k.slice(prefix.length))) out[k.slice(prefix.length)] = v;
+  }
+  return out;
 }
 
 export interface DomainDialogProps {
@@ -89,70 +134,101 @@ export interface DomainDialogProps {
 }
 
 /**
- * Formulário de domínio em diálogo. Valida no cliente antes de enviar. Salvo com
- * DNS errado, o diálogo continua aberto mostrando o registro A esperado; o
- * domínio já está gravado.
+ * Editor de domínio em diálogo, com as abas Rotas, Certificado e Segurança.
+ * Valida no cliente antes de enviar e sempre manda o objeto inteiro (o que se
+ * vê é o que se grava). No domínio do painel só há Certificado e Segurança.
+ * Salvo com DNS errado, o diálogo continua aberto mostrando o registro A
+ * esperado; o domínio já está gravado.
  */
 export function DomainDialog({ domain, onClose }: DomainDialogProps) {
   const uid = useId();
   const id = (f: string) => `${uid}-${f}`;
-  const errId = (f: Field) => `${uid}-${f}-error`;
   const formId = id("form");
+  const tabsId = id("tabs");
+  const isPanel = Boolean(domain?.isPanel);
 
   const apps = useApps();
   const save = useSaveDomain();
+  // Troca de servidor em andamento: o diálogo aberto continua visível, mas não grava.
+  const migrating = useMigrating();
 
+  const [tab, setTab] = useState<EditorTab>(isPanel ? "certificado" : "rotas");
   const [hostname, setHostname] = useState(domain?.hostname ?? "");
-  const [target, setTarget] = useState<Target>(domain?.targetType ?? "app");
-  const [appId, setAppId] = useState<string>(domain?.appId ? String(domain.appId) : "");
-  const [address, setAddress] = useState(domain?.address ?? "");
+  const [routes, setRoutes] = useState<RouteDraft[]>(() =>
+    sortRoutes(domain ? domainRoutes(domain).map(routeDraft) : [newRoute("/")]),
+  );
   const [www, setWww] = useState(domain?.wwwRedirect || "none");
   const [forceHttps, setForceHttps] = useState(domain?.forceHttps ?? true);
-  const [errors, setErrors] = useState<Partial<Record<Field, string>>>({});
+  const [tlsMode, setTlsMode] = useState<TLSMode>(domain?.tls?.mode ?? "auto");
+  const [certId, setCertId] = useState<number | null>(domain?.tls?.certId ?? null);
+  const [cloudflareOnly, setCloudflareOnly] = useState(domain?.cloudflareOnly ?? false);
+  const [headers, setHeaders] = useState<HeaderDraft[]>(() => (domain?.headers ?? []).map(headerDraft));
+  const [compression, setCompression] = useState(domain?.compression ?? true);
+  const [errors, setErrors] = useState<Record<ErrorKey, string | undefined>>({});
   const [formError, setFormError] = useState("");
   const [warning, setWarning] = useState<{ hosts: string[]; dns: DnsCheck } | null>(null);
 
-  const clear = (f: Field) => setErrors((e) => (e[f] ? { ...e, [f]: undefined } : e));
+  const clear = (k: ErrorKey) => setErrors((e) => (e[k] ? { ...e, [k]: undefined } : e));
 
-  const focusField = (f: Field) => {
-    if (f === "appId" || f === "address") {
-      const t: Target = f === "appId" ? "app" : "address";
-      setTarget(t);
-    }
-    // Espera o painel da aba renderizar.
-    requestAnimationFrame(() => document.getElementById(id(f))?.focus());
+  const focusKey = (k: ErrorKey, list: RouteDraft[] = routes) => {
+    const t = tabOf(k);
+    if (t) setTab(t);
+    let el = "";
+    const route = /^r(\d+)\.(\w+)$/.exec(k);
+    const header = /^h(\d+)\.(name|value)$/.exec(k);
+    if (k === "hostname") el = id("hostname");
+    else if (k === "wwwRedirect") el = id("wwwRedirect");
+    else if (k === "tls") el = certSelectId(uid);
+    else if (k === "cloudflareOnly") el = cfSwitchId(uid);
+    else if (k === "headers") el = `${uid}-add-header`;
+    else if (k === "routes") el = list.length > 1 ? routeFieldId(uid, list[0].key, "path") : `${uid}-add-route`;
+    else if (route) el = routeFieldId(uid, Number(route[1]), route[2] as RouteField);
+    else if (header) el = headerFieldId(uid, Number(header[1]), header[2] as HeaderField);
+    // Espera a aba renderizar.
+    requestAnimationFrame(() => document.getElementById(el)?.focus());
   };
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (save.isPending) return;
+    if (save.isPending || migrating) return;
     const host = hostname.trim().toLowerCase();
-    const next: Partial<Record<Field, string>> = {};
-    if (!validHostname(host)) {
-      next.hostname = "Hostname inválido. Use letras minúsculas, números e hífens, como loja.exemplo.com.";
+    const sorted = sortRoutes(routes);
+    const next: Record<ErrorKey, string> = {};
+    if (!isPanel) {
+      if (!validHostname(host)) {
+        next.hostname = "Hostname inválido. Use letras minúsculas, números e hífens, como loja.exemplo.com.";
+      }
+      for (const r of validateRoutes(sorted)) next[`r${r.key}.${r.field}`] ??= r.message;
+      const mismatch = !next.hostname ? wwwMismatch(host, www) : "";
+      if (mismatch) next.wwwRedirect = mismatch;
     }
-    if (target === "app" && !appId) next.appId = "Escolha a aplicação.";
-    if (target === "address" && !validAddress(address.trim())) {
-      next.address = "Endereço inválido. Use host:porta, como 127.0.0.1:5000.";
-    }
-    const mismatch = !next.hostname ? wwwMismatch(host, www) : "";
-    if (mismatch) next.wwwRedirect = mismatch;
+    if (tlsMode === "custom" && certId === null) next.tls = "Escolha o certificado próprio ou adicione um.";
+    for (const h of validateHeaders(headers)) next[`h${h.key}.${h.field}`] ??= h.message;
+
+    setRoutes(sorted);
     setErrors(next);
     setFormError("");
-    const first = (["hostname", "appId", "address", "wwwRedirect"] as Field[]).find((f) => next[f]);
-    if (first) {
-      focusField(first);
+    const keys = Object.keys(next);
+    if (keys.length > 0) {
+      // O primeiro erro na ordem da tela: o da aba aberta, se houver; senão o primeiro.
+      const here = keys.find((k) => tabOf(k) === tab || tabOf(k) === null);
+      focusKey(here ?? keys[0], sorted);
       return;
     }
 
-    const input: DomainInput = {
-      hostname: host,
-      targetType: target,
-      appId: target === "app" ? Number(appId) : null,
-      address: target === "address" ? address.trim() : "",
-      wwwRedirect: www,
-      forceHttps,
+    const common = {
+      tls: { mode: tlsMode, certId: tlsMode === "custom" ? certId : null },
+      cloudflareOnly,
+      headers: headers.map((h) => ({ name: h.name.trim(), value: h.value })),
+      compression,
     };
+    const input: DomainInput = isPanel
+      ? { hostname: domain!.hostname, ...common }
+      : { hostname: host, wwwRedirect: www, forceHttps, routes: sorted.map(routeInput), ...common };
+    const routeKeys = sorted.map((r) => r.key);
+    const headerKeys = headers.map((h) => h.key);
+    const defaultKey = sorted.find((r) => r.isDefault)?.key;
+
     save.mutate(
       { id: domain?.id, input },
       {
@@ -161,10 +237,10 @@ export function DomainDialog({ domain, onClose }: DomainDialogProps) {
           else setWarning({ hosts: hostsOf(r.domain.hostname, r.domain.wwwRedirect), dns: r.dns });
         },
         onError: (err) => {
-          const m = domainErrorMessage(err);
-          if (m.field) {
-            setErrors({ [m.field]: m.message });
-            focusField(m.field);
+          const m = domainErrorMessage(err, routeKeys, headerKeys, defaultKey);
+          if (m.key) {
+            setErrors({ [m.key]: m.message });
+            focusKey(m.key, sorted);
           } else {
             setFormError(m.message);
           }
@@ -173,7 +249,7 @@ export function DomainDialog({ domain, onClose }: DomainDialogProps) {
     );
   };
 
-  const title = domain ? "Editar domínio" : "Adicionar domínio";
+  const title = isPanel ? "Editar domínio do painel" : domain ? "Editar domínio" : "Adicionar domínio";
 
   if (warning) {
     return (
@@ -192,169 +268,150 @@ export function DomainDialog({ domain, onClose }: DomainDialogProps) {
     );
   }
 
-  const describe = (f: Field, hint?: string) => [errors[f] ? errId(f) : "", hint ?? ""].filter(Boolean).join(" ") || undefined;
-  const appList = apps.data ?? [];
+  const tabs = isPanel ? ALL_TABS.filter((t) => t.value !== "rotas") : ALL_TABS;
+  const routeErrors = scoped(errors, "r");
+  const headerErrors = { ...scoped(errors, "h"), cloudflareOnly: errors.cloudflareOnly, headers: errors.headers };
 
   return (
     <Dialog
       open
       size="lg"
-      eyebrow={domain ? "Domínio" : "Novo domínio"}
+      eyebrow={isPanel ? "Painel KoreGO" : domain ? "Domínio" : "Novo domínio"}
       title={title}
       confirmLabel="Salvar"
       formId={formId}
       loading={save.isPending}
+      confirmDisabled={migrating}
       onCancel={onClose}
     >
       <form id={formId} noValidate onSubmit={submit} className="space-y-4 text-fg">
+        {migrating && (
+          <Alert variant="info" title={MIGRATING_TITLE}>
+            Salvar fica bloqueado até a troca terminar; as alterações continuam aqui.
+          </Alert>
+        )}
         {formError && <Alert variant="danger">{formError}</Alert>}
 
-        <div>
-          <Label htmlFor={id("hostname")} required>
-            Hostname
-          </Label>
-          <Input
-            id={id("hostname")}
-            mono
-            className="mt-1.5"
-            value={hostname}
-            placeholder="loja.exemplo.com…"
-            autoComplete="off"
-            spellCheck={false}
-            autoCapitalize="none"
-            inputMode="url"
-            invalid={Boolean(errors.hostname)}
-            aria-describedby={describe("hostname")}
-            onChange={(e) => {
-              setHostname(e.target.value);
-              clear("hostname");
-              clear("wwwRedirect");
-            }}
-          />
-          <FieldError id={errId("hostname")}>{errors.hostname}</FieldError>
-        </div>
+        {isPanel ? (
+          <div>
+            <p className="font-mono text-[13px] text-fg [overflow-wrap:anywhere]" translate="no">
+              {domain!.hostname}
+            </p>
+            <p className="mt-1 text-xs text-fg-subtle">
+              A rota é fixa. O hostname muda em Configurações → Painel.
+            </p>
+          </div>
+        ) : (
+          <div>
+            <Label htmlFor={id("hostname")} required>
+              Hostname
+            </Label>
+            <Input
+              id={id("hostname")}
+              mono
+              className="mt-1.5"
+              value={hostname}
+              placeholder="loja.exemplo.com…"
+              autoComplete="off"
+              spellCheck={false}
+              autoCapitalize="none"
+              inputMode="url"
+              invalid={Boolean(errors.hostname)}
+              aria-describedby={describedBy(errors.hostname && id("hostname-error"))}
+              onChange={(e) => {
+                setHostname(e.target.value);
+                clear("hostname");
+                clear("wwwRedirect");
+              }}
+            />
+            <FieldError id={id("hostname-error")}>{errors.hostname}</FieldError>
+          </div>
+        )}
 
-        <fieldset>
-          <legend className="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-fg-muted">
-            Destino
-          </legend>
+        <div>
           <Tabs
-            id={id("target")}
-            label="Tipo de destino"
-            items={TARGETS}
-            value={target}
-            onChange={setTarget}
-            className="mt-1.5"
+            id={tabsId}
+            label="Seções do domínio"
+            items={tabs}
+            value={tab}
+            onChange={setTab}
+            className="flex w-full [&>button]:flex-1"
           />
           <div
             role="tabpanel"
-            id={tabPanelId(id("target"))}
-            aria-labelledby={tabId(id("target"), target)}
-            className="mt-3"
+            id={tabPanelId(tabsId)}
+            aria-labelledby={tabId(tabsId, tab)}
+            className="mt-4"
           >
-            {target === "app" ? (
-              <div>
-                <Label htmlFor={id("appId")} required>
-                  Aplicação
-                </Label>
-                <select
-                  id={id("appId")}
-                  className={cn(selectCls, "mt-1.5 font-mono")}
-                  value={appId}
-                  disabled={apps.isPending}
-                  aria-invalid={errors.appId ? true : undefined}
-                  aria-describedby={describe("appId", appList.length === 0 ? id("app-hint") : undefined)}
-                  onChange={(e) => {
-                    setAppId(e.target.value);
-                    clear("appId");
+            {tab === "rotas" && (
+              <div className="space-y-4">
+                <RouteList
+                  base={uid}
+                  routes={routes}
+                  onChange={setRoutes}
+                  errors={routeErrors}
+                  listError={errors.routes}
+                  onClearError={(key, f) => {
+                    clear(`r${key}.${f}`);
+                    clear("routes");
                   }}
-                >
-                  <option value="">{apps.isPending ? "Carregando…" : "Selecione…"}</option>
-                  {appList.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.slug}
-                    </option>
-                  ))}
-                </select>
-                <FieldError id={errId("appId")}>{errors.appId}</FieldError>
-                {apps.isError && <Hint>Não foi possível listar as aplicações: {apps.error.message}</Hint>}
-                {apps.isSuccess && appList.length === 0 && (
-                  <Hint id={id("app-hint")}>Nenhuma aplicação cadastrada. Use um endereço host:porta.</Hint>
-                )}
-              </div>
-            ) : (
-              <div>
-                <Label htmlFor={id("address")} required>
-                  Endereço (host:porta)
-                </Label>
-                <Input
-                  id={id("address")}
-                  mono
-                  className="mt-1.5"
-                  value={address}
-                  placeholder="127.0.0.1:5000"
-                  autoComplete="off"
-                  spellCheck={false}
-                  autoCapitalize="none"
-                  invalid={Boolean(errors.address)}
-                  aria-describedby={describe("address", id("address-hint"))}
-                  onChange={(e) => {
-                    setAddress(e.target.value);
-                    clear("address");
-                  }}
+                  apps={apps}
                 />
-                <FieldError id={errId("address")}>{errors.address}</FieldError>
-                <Hint id={id("address-hint")}>Um serviço que já roda no servidor, fora do KoreGO.</Hint>
+                <div className="grid gap-4 border-t border-line pt-4 sm:grid-cols-2">
+                  <div>
+                    <Label htmlFor={id("wwwRedirect")}>Redirecionamento www</Label>
+                    <select
+                      id={id("wwwRedirect")}
+                      className={cn(selectCls, "mt-1.5")}
+                      value={www}
+                      aria-invalid={errors.wwwRedirect ? true : undefined}
+                      aria-describedby={describedBy(errors.wwwRedirect && id("wwwRedirect-error"))}
+                      onChange={(e) => {
+                        setWww(e.target.value);
+                        clear("wwwRedirect");
+                      }}
+                    >
+                      {WWW_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                    <FieldError id={id("wwwRedirect-error")}>{errors.wwwRedirect}</FieldError>
+                  </div>
+                  <div className="flex items-end">
+                    <Checkbox checked={forceHttps} onChange={setForceHttps}>
+                      Forçar HTTPS
+                    </Checkbox>
+                  </div>
+                </div>
               </div>
             )}
-          </div>
-        </fieldset>
-
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <Label htmlFor={id("wwwRedirect")}>Redirecionamento www</Label>
-            <select
-              id={id("wwwRedirect")}
-              className={cn(selectCls, "mt-1.5")}
-              value={www}
-              aria-invalid={errors.wwwRedirect ? true : undefined}
-              aria-describedby={describe("wwwRedirect")}
-              onChange={(e) => {
-                setWww(e.target.value);
-                clear("wwwRedirect");
-              }}
-            >
-              {WWW_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-            <FieldError id={errId("wwwRedirect")}>{errors.wwwRedirect}</FieldError>
-          </div>
-          <div className="flex items-end">
-            <label className="flex h-9 cursor-pointer items-center gap-2.5 text-[13px] text-fg">
-              <span className="relative inline-flex size-4 shrink-0">
-                <input
-                  type="checkbox"
-                  checked={forceHttps}
-                  onChange={(e) => setForceHttps(e.target.checked)}
-                  className={cn(
-                    "peer size-4 cursor-pointer appearance-none border border-line-strong bg-surface",
-                    "checked:border-accent checked:bg-accent",
-                    focusRing,
-                  )}
-                />
-                <svg
-                  aria-hidden="true"
-                  viewBox="0 0 16 16"
-                  className="pointer-events-none absolute inset-0 hidden size-4 text-accent-fg peer-checked:block"
-                >
-                  <path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
-                </svg>
-              </span>
-              Forçar HTTPS
-            </label>
+            {tab === "certificado" && (
+              <TlsTab
+                base={uid}
+                mode={tlsMode}
+                certId={certId}
+                onMode={setTlsMode}
+                onCertId={setCertId}
+                error={errors.tls}
+                onClearError={() => clear("tls")}
+                current={domain?.cert}
+              />
+            )}
+            {tab === "seguranca" && (
+              <SecurityTab
+                base={uid}
+                cloudflareOnly={cloudflareOnly}
+                onCloudflareOnly={setCloudflareOnly}
+                headers={headers}
+                onHeaders={setHeaders}
+                compression={compression}
+                onCompression={setCompression}
+                errors={headerErrors}
+                onClearError={(k) => clear(k === "cloudflareOnly" || k === "headers" ? k : `h${k}`)}
+              />
+            )}
           </div>
         </div>
       </form>

@@ -19,7 +19,7 @@ func TestClassify_Precedence(t *testing.T) {
 	idM := strings.Repeat("e", 64)
 	l := Lookup{
 		Containers: map[string]docker.Container{
-			idA: {ID: idA, Name: "mikos-web-1", Project: "mikos"},
+			idA: {ID: idA, Name: "blog-web-1", Project: "blog"},
 			idM: {ID: idM, Name: "shop-db-1", Project: "shop", Managed: true},
 			idN: {ID: idN, Name: "shop-web-1", Project: "shop"},
 			idB: {ID: idB, Name: "web-1"},
@@ -36,7 +36,7 @@ func TestClassify_Precedence(t *testing.T) {
 		want Ref
 	}{
 		{"v2 com projeto", procs.Proc{PID: 10, PPID: 1, Cmdline: []string{"x"}, Cgroup: "/system.slice/docker-" + idA + ".scope"},
-			Ref{Key: "project:mikos", Label: "mikos", Kind: KindContainer, Managed: &fls}},
+			Ref{Key: "project:blog", Label: "blog", Kind: KindContainer, Managed: &fls}},
 		{"projeto gerenciado se algum for", procs.Proc{PID: 10, Cgroup: "/system.slice/docker-" + idN + ".scope"},
 			Ref{Key: "project:shop", Label: "shop", Kind: KindContainer, Managed: &tru}},
 		{"v1 sem projeto", procs.Proc{PID: 11, Cgroup: "/docker/" + idB},

@@ -97,7 +97,7 @@ func TestPanelAPI_SetDomain(t *testing.T) {
 	assert.Equal(t, "painel.exemplo.com", decode(t, w)["domain"])
 
 	// Falha do proxy depois de gravar: 200 com saved/proxyError.
-	fake.ApplyFn = func(context.Context, []proxy.Route) error { return assert.AnError }
+	fake.ApplyFn = func(context.Context, []proxy.Site, proxy.Listen, []string) error { return assert.AnError }
 	w = e.do(t, http.MethodPut, "/api/settings/panel/domain", map[string]any{"hostname": "novo.exemplo.com"}, mut(c, csrf)...)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	b := decode(t, w)

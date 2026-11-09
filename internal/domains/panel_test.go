@@ -7,6 +7,7 @@ import (
 
 	"github.com/engviniciusbs/korego/internal/node/proxy"
 	"github.com/engviniciusbs/korego/internal/node/proxy/proxytest"
+	"github.com/engviniciusbs/korego/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -108,9 +109,9 @@ func TestPanel_SetDomainCreatesPanelRoute(t *testing.T) {
 	assert.Zero(t, p.DomainID)
 
 	require.NoError(t, s.SetPanelDomain(ctx, "painel.exemplo.com"))
-	want := []proxy.Route{{Host: "painel.exemplo.com", Upstream: "127.0.0.1:8000",
-		ForceHTTPS: true, WWWRedirect: proxy.WWWNone}}
-	routes, err := s.Routes(ctx)
+	want := []proxy.Site{{Host: "painel.exemplo.com",
+		ForceHTTPS: true, WWWRedirect: proxy.WWWNone, TLS: autoTLS, Compression: true, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:8000"}}}}
+	routes, err := s.Sites(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, want, routes)
 	assert.Equal(t, want, fake.LastApplied())
@@ -125,10 +126,10 @@ func TestPanel_SetDomainCreatesPanelRoute(t *testing.T) {
 
 	// Trocar o host substitui a linha (continua uma só).
 	require.NoError(t, s.SetPanelDomain(ctx, "admin.exemplo.com"))
-	routes, err = s.Routes(ctx)
+	routes, err = s.Sites(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, []proxy.Route{{Host: "admin.exemplo.com", Upstream: "127.0.0.1:8000",
-		ForceHTTPS: true, WWWRedirect: proxy.WWWNone}}, routes)
+	assert.Equal(t, []proxy.Site{{Host: "admin.exemplo.com",
+		ForceHTTPS: true, WWWRedirect: proxy.WWWNone, TLS: autoTLS, Compression: true, Routes: []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:8000"}}}}, routes)
 	list, err := s.DB.ListDomains(ctx)
 	require.NoError(t, err)
 	require.Len(t, list, 1)
@@ -144,7 +145,7 @@ func TestPanel_SetDomainCreatesPanelRoute(t *testing.T) {
 	require.ErrorAs(t, s.SetPanelDomain(ctx, "www.exemplo.com"), &ie)
 
 	// Proxy inativo não impede a gravação.
-	fake.ApplyFn = func(context.Context, []proxy.Route) error { return proxy.ErrInactive }
+	fake.ApplyFn = func(context.Context, []proxy.Site, proxy.Listen, []string) error { return proxy.ErrInactive }
 	require.NoError(t, s.SetPanelDomain(ctx, "painel.exemplo.com"))
 
 	// Vazio remove.
@@ -153,10 +154,10 @@ func TestPanel_SetDomainCreatesPanelRoute(t *testing.T) {
 	_, ok, err = s.DB.PanelDomain(ctx)
 	require.NoError(t, err)
 	assert.False(t, ok)
-	routes, err = s.Routes(ctx)
+	routes, err = s.Sites(ctx)
 	require.NoError(t, err)
 	for _, r := range routes {
-		assert.NotEqual(t, "127.0.0.1:8000", r.Upstream)
+		assert.NotEqual(t, "127.0.0.1:8000", r.Routes[0].Upstream)
 	}
 	// Remover sem domínio não é erro.
 	require.NoError(t, s.SetPanelDomain(ctx, ""))
@@ -223,4 +224,63 @@ func TestPanel_SetDomainBlockedWithPublicPortOff(t *testing.T) {
 	require.NoError(t, s.SetPublicPort(ctx, true, false))
 	require.NoError(t, s.SetPanelDomain(ctx, "painel.exemplo.com"))
 	require.NoError(t, s.SetPanelDomain(ctx, ""))
+}
+
+func TestPanel_UpdateOptionsKeepsRoutesAndSetDomainKeepsOptions(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newPanelService(t)
+	s.Ranges = fixedRanges{"203.0.113.0/24"}
+	fake := s.Proxy.(*proxytest.Fake)
+	cs := withCerts(t, s)
+	require.NoError(t, s.SetPanelDomain(ctx, "painel.exemplo.com"))
+	panel, _, err := s.DB.PanelDomain(ctx)
+	require.NoError(t, err)
+	c := addCert(t, cs, "painel.exemplo.com", "admin.exemplo.com")
+	off := false
+
+	// Opções aceitas; os campos de destino do corpo são ignorados.
+	in := DomainInput{Hostname: "painel.exemplo.com", TargetType: TargetAddress, Address: "127.0.0.1:1",
+		TLS: &TLSInput{Mode: proxy.TLSCustom, CertID: &c.ID}, CloudflareOnly: ptr(true), Compression: &off,
+		Headers: []store.Header{{Name: "X-Frame-Options", Value: "DENY"}}}
+	d, _, err := s.Update(ctx, panel.ID, in)
+	require.NoError(t, err)
+	assert.True(t, d.IsPanel)
+	assert.Equal(t, proxy.TLSCustom, d.TLSMode)
+	assert.True(t, d.CloudflareOnly)
+	assert.False(t, d.Compression)
+	site := fake.LastApplied()[0]
+	assert.Equal(t, []proxy.SiteRoute{{Path: "/", Upstream: "127.0.0.1:8000"}}, site.Routes)
+	assert.Equal(t, proxy.TLSCustom, site.TLS.Mode)
+	assert.True(t, site.CloudflareOnly)
+
+	// Rotas no corpo, outro hostname ou certificado que não cobre: recusados.
+	in.Routes = []RouteInput{{Path: "/", TargetType: TargetAddress, Address: "127.0.0.1:5000"}}
+	_, _, err = s.Update(ctx, panel.ID, in)
+	code, field := codeField(t, err)
+	assert.Equal(t, CodeInvalidRoute, code)
+	assert.Equal(t, "routes", field)
+	in.Routes = nil
+	in.Hostname = "outro.exemplo.com"
+	_, _, err = s.Update(ctx, panel.ID, in)
+	assert.ErrorIs(t, err, ErrPanelDomain)
+
+	// Trocar o host pelas configurações mantém as opções.
+	require.NoError(t, s.SetPanelDomain(ctx, "admin.exemplo.com"))
+	got, _, err := s.DB.PanelDomain(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "admin.exemplo.com", got.Hostname)
+	assert.Equal(t, proxy.TLSCustom, got.TLSMode)
+	assert.True(t, got.CloudflareOnly)
+	assert.False(t, got.Compression)
+	assert.Equal(t, []store.Header{{Name: "X-Frame-Options", Value: "DENY"}}, got.Headers)
+	// Host que o certificado próprio não cobre: recusado.
+	code, _ = codeField(t, s.SetPanelDomain(ctx, "loja.exemplo.com"))
+	assert.Equal(t, CodeCertMismatch, code)
+
+	// Porta pública desligada: só ligar o só Cloudflare é recusado.
+	require.NoError(t, s.DB.SetSetting(ctx, SettingPublicPort, "false"))
+	_, _, err = s.Update(ctx, panel.ID, DomainInput{CloudflareOnly: ptr(false)})
+	require.NoError(t, err)
+	_, _, err = s.Update(ctx, panel.ID, DomainInput{CloudflareOnly: ptr(true)})
+	assert.ErrorIs(t, err, ErrPanelPortOff)
 }

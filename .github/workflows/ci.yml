@@ -30,8 +30,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: docker pull busybox
-      - run: go test -tags integration ./internal/node/docker/... ./internal/node/proxy/... ./internal/deploy/... ./internal/usage/...
+      - run: docker pull busybox && docker pull caddy:2.11.9-alpine && docker pull nginx:1-alpine
+      - run: go test -tags integration ./internal/node/docker/... ./internal/deploy/... ./internal/usage/...
+      # Proxy e troca nginx → Caddy com Caddy e nginx reais em 80/443. Rodam
+      # como root (sudo só no binário de teste; a compilação fica com o
+      # usuário do runner): o dono das portas é resolvido por /proc/<pid>/fd
+      # e o site estático fica em /var/www. -p 1: os dois pacotes usam o
+      # mesmo korego-caddy e as mesmas portas, um pacote por vez.
+      # KOREGO_IT_STRICT=1 faz falhar o que fora do CI seria pulado.
+      - name: Integração do proxy e da troca (root, -p 1)
+        env:
+          KOREGO_IT_STRICT: "1"
+        run: go test -tags integration -p 1 -count=1 -v -exec "sudo -E" ./internal/node/proxy/... ./internal/migrate/...
 
   web:
     runs-on: ubuntu-latest
@@ -77,6 +87,9 @@ jobs:
       - run: google-chrome --version
       # Imagens do spec publicar (Caddy do proxy e app de teste) e do spec de containers.
       - run: docker pull caddy:2.11.9-alpine && docker pull nginx:1-alpine && docker pull busybox
+      # O runner traz nginx/apache2 instalados: ativados no boot, o KoreGO sem
+      # modo gravado começaria em ensaio (e o spec publicar espera 80/443).
+      - run: sudo systemctl disable --now nginx apache2 2>/dev/null || true
       - name: Teste ponta a ponta (fundacao, containers e publicar)
         working-directory: web
         run: pnpm test:e2e
