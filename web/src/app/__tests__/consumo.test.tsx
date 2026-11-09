@@ -138,11 +138,12 @@ function mockApi(over: Routes = {}) {
 
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const view = render(
     <QueryClientProvider client={client}>
       <ConsumoPage />
     </QueryClientProvider>,
   );
+  return { ...view, client };
 }
 
 /** Nomes dos donos na ordem da tabela (os botões de expandir). */
@@ -335,5 +336,54 @@ describe("Consumo", () => {
 
     act(() => ws.close());
     expect(await screen.findByText("Instantâneo")).toBeInTheDocument();
+  });
+  test("resposta REST atrasada não sobrescreve a mensagem mais nova do tópico", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const fetchFn = mockApi();
+    const sync = fetchFn.getMockImplementation()!;
+    fetchFn.mockImplementation(async (url: string) => {
+      if (url === "/api/usage") {
+        await gate;
+        return json(usage({ time: "2026-11-08T12:00:00Z" }));
+      }
+      return sync(url);
+    });
+    const { client } = renderPage();
+    await waitFor(() => expect(fetchFn).toHaveBeenCalledWith("/api/usage", expect.anything()));
+
+    const ws = FakeWS.instances[FakeWS.instances.length - 1];
+    act(() => ws.open());
+    act(() =>
+      ws.msg({
+        type: "event",
+        topic: "usage",
+        data: {
+          time: "2026-11-08T12:00:05Z",
+          dockerOk: true,
+          owners: [
+            { key: "project:loja", kind: "container", label: "loja", managed: true, cpuPercent: 55.5, memBytes: GiB, procCount: 3 },
+          ],
+        },
+      }),
+    );
+    const row = (await screen.findByRole("button", { name: "loja" })).closest("tr")!;
+    expect(within(row).getByText("55,5%")).toBeInTheDocument();
+
+    await act(async () => {
+      release();
+      await gate;
+    });
+    // Deixa a resposta atrasada ser aplicada e renderizada.
+    await waitFor(() => expect(fetchFn.mock.results.length).toBeGreaterThan(0));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    expect(within(screen.getByRole("button", { name: "loja" }).closest("tr")!).getByText("55,5%")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "PM2: api" })).toBeNull();
+    expect(client.getQueryData<{ time: string }>(["usage", "current"])?.time).toBe("2026-11-08T12:00:05Z");
   });
 });

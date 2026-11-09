@@ -156,7 +156,11 @@ export function useUsage() {
   });
   return useQuery({
     queryKey: USAGE_KEY,
-    queryFn: async () => keepNewerUsage(qc.getQueryData<UsageSnapshot>(USAGE_KEY), await fetchUsage()),
+    queryFn: async () => {
+      const fetched = await fetchUsage();
+      // Lê o cache só depois da resposta: uma mensagem do tópico pode ter chegado durante a busca.
+      return keepNewerUsage(qc.getQueryData<UsageSnapshot>(USAGE_KEY), fetched);
+    },
     retry: (n, e) => !isUsageNotReady(e) && n < 2,
     refetchInterval: notReadyInterval,
   });
