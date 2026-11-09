@@ -87,3 +87,42 @@ func TestMaskCmd_SoOValor(t *testing.T) {
 		}
 	}
 }
+
+func TestMaskCmd_SeparadoresNaSenhaDaURL(t *testing.T) {
+	cases := []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"x", "--db=postgres://u:X1&Y2;Z3|W4@db/x"}, "x --db=postgres://u:••••@db/x"},
+		{[]string{"x", "postgres://u:X1&Y2;Z3|W4@db/x"}, "x postgres://u:••••@db/x"},
+		{[]string{"x", "DATABASE_URL=mysql://u:X1;Y2&Z3|W4@db/x"}, "x DATABASE_URL=mysql://u:••••@db/x"},
+		{[]string{"sh", "-c", "psql postgres://u:X1&Y2;Z3|W4@db/x && echo ok"}, "sh -c psql postgres://u:••••@db/x && echo ok"},
+		{[]string{"sh", "-c", "curl https://u:X1|Y2;Z3&W4@h/a | jq ."}, "sh -c curl https://u:••••@h/a | jq ."},
+	}
+	for _, c := range cases {
+		got := MaskCmd(c.argv)
+		assert.Equal(t, c.want, got)
+		for _, s := range []string{"X1", "Y2", "Z3", "W4"} {
+			assert.NotContains(t, got, s)
+		}
+	}
+}
+
+func TestMaskCmd_ValorInteiroDoElemento(t *testing.T) {
+	cases := []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"x", "--password=X1 Y2"}, "x --password=••••"},
+		{[]string{"x", "API_TOKEN=X1 Y2 Z3", "run"}, "x API_TOKEN=•••• run"},
+		{[]string{"x", "--password=X1&Y2;Z3|W4"}, "x --password=••••"},
+		{[]string{"x", "--secret=X1 && Y2", "ok"}, "x --secret=•••• ok"},
+	}
+	for _, c := range cases {
+		got := MaskCmd(c.argv)
+		assert.Equal(t, c.want, got)
+		for _, s := range []string{"X1", "Y2", "Z3", "W4"} {
+			assert.NotContains(t, got, s)
+		}
+	}
+}

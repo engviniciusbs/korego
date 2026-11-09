@@ -24,6 +24,17 @@ var sensitiveSuffixes = []string{"apikey", "secretkey", "accesskey", "privatekey
 // scheme://usuario:senha@host → scheme://usuario:••••@host
 var reUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.\-]*://[^/\s:@]*):[^@/\s]*@`)
 
+// reAssignName é o nome de um elemento nome=valor (com ou sem - / --).
+var reAssignName = regexp.MustCompile(`^-{0,2}[A-Za-z_][A-Za-z0-9_.:\-]*$`)
+
+// reNextAssign reconhece, no valor de um elemento sensível, um separador de
+// shell seguido de outra atribuição (ex.: "a;--token=b"): só aí o valor acaba.
+var reNextAssign = regexp.MustCompile(`^\s*[;&|]+\s*-{0,2}[A-Za-z_][A-Za-z0-9_.:\-]*=`)
+
+func scrubUserinfo(s string) string {
+	return reUserinfo.ReplaceAllString(s, "${1}:"+maskStr+"@")
+}
+
 func sensitiveName(name string) bool {
 	name = strings.ToLower(strings.TrimLeft(name, "-"))
 	words := strings.FieldsFunc(name, func(r rune) bool {
@@ -133,7 +144,7 @@ func (m *masker) word(a string) string {
 	if isQuote(a[0]) {
 		return m.wrapped(a)
 	}
-	a = reUserinfo.ReplaceAllString(a, "${1}:"+maskStr+"@")
+	a = scrubUserinfo(a)
 	if i := strings.Index(a, "="); i > 0 {
 		name, v := a[:i+1], a[i+1:]
 		if sensitiveName(a[:i]) {
@@ -152,9 +163,36 @@ func (m *masker) word(a string) string {
 	return a
 }
 
+// assign trata um elemento do argv que é ele mesmo nome=valor com nome
+// sensível (ex.: "--password=duas palavras", "API_TOKEN=a&b"): o valor inteiro
+// é trocado, com espaços e separadores, porque no argv eles são parte do
+// valor. Só um separador seguido de outra atribuição encerra o valor; o resto
+// volta a ser analisado como texto de shell. Valor entre aspas fica com
+// maskText, que já mantém as aspas e o que vem depois delas.
+func (m *masker) assign(a string) (string, bool) {
+	i := strings.Index(a, "=")
+	if i <= 0 || !reAssignName.MatchString(a[:i]) || !sensitiveName(a[:i]) {
+		return "", false
+	}
+	v := a[i+1:]
+	if v != "" && isQuote(v[0]) {
+		return "", false
+	}
+	m.maskNext = false
+	for j := 0; j < len(v); j++ {
+		if (isSep(v[j]) || isSpaceByte(v[j])) && reNextAssign.MatchString(v[j:]) {
+			return a[:i+1] + maskStr + m.maskText(v[j:]), true
+		}
+	}
+	return a[:i+1] + maskStr, true
+}
+
 // MaskCmd esconde valores sensíveis do argv e limita o texto a 160 caracteres.
-// Elementos com espaço (ex.: sh -c "...") são analisados como texto de shell;
-// só o valor secreto é trocado, nada mais é descartado além do corte final.
+// Cada elemento passa primeiro pela troca da senha em URLs (scheme://u:senha@),
+// antes de qualquer divisão, para que & ; | na senha não a partam. Um elemento
+// nome=valor sensível tem o valor inteiro trocado; os demais com espaço (ex.:
+// sh -c "...") são analisados como texto de shell, e só o valor secreto é
+// trocado, nada mais é descartado além do corte final.
 func MaskCmd(argv []string) string {
 	var m masker
 	out := make([]string, 0, len(argv))
@@ -162,6 +200,11 @@ func MaskCmd(argv []string) string {
 		if m.maskNext && !strings.HasPrefix(a, "-") {
 			m.maskNext = false
 			out = append(out, secret(a))
+			continue
+		}
+		a = scrubUserinfo(a)
+		if s, ok := m.assign(a); ok {
+			out = append(out, s)
 			continue
 		}
 		out = append(out, m.maskText(a))
