@@ -49,3 +49,19 @@ func TestCertificates_CRUDAndInUse(t *testing.T) {
 	require.NoError(t, db.DeleteCertificate(ctx, id))
 	require.ErrorIs(t, db.DeleteCertificate(ctx, id), ErrNotFound)
 }
+
+func TestIsForeignKey(t *testing.T) {
+	db := OpenMemory(t)
+	ctx := context.Background()
+	id, err := db.CreateCertificate(ctx, Certificate{Name: "c", Fingerprint: "AA", PEMEnc: "x"})
+	require.NoError(t, err)
+	d := &Domain{Hostname: "exemplo.com", TargetType: "address", Address: "127.0.0.1:5000",
+		WWWRedirect: "none", TLSMode: "custom", CertID: &id}
+	require.NoError(t, db.InsertDomain(ctx, d))
+	// Apagar direto, sem a checagem de DeleteCertificate, dispara a FK crua.
+	_, err = db.sql.ExecContext(ctx, `DELETE FROM certificates WHERE id = ?`, id)
+	require.Error(t, err)
+	require.True(t, isForeignKey(err), err.Error())
+	require.False(t, isForeignKey(nil))
+	require.False(t, isUnique(err))
+}

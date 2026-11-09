@@ -137,6 +137,10 @@ func (d *DB) DeleteCertificate(ctx context.Context, id int64) error {
 		return ErrCertInUse
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM certificates WHERE id = ?`, id)
+	if isForeignKey(err) {
+		// Um domínio passou a usar o certificado entre a checagem e o DELETE.
+		return ErrCertInUse
+	}
 	if err != nil {
 		return fmt.Errorf("apagar certificado: %w", err)
 	}

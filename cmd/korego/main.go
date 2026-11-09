@@ -19,6 +19,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/api"
 	"github.com/engviniciusbs/korego/internal/audit"
 	"github.com/engviniciusbs/korego/internal/auth"
+	"github.com/engviniciusbs/korego/internal/certs"
 	"github.com/engviniciusbs/korego/internal/cloudflare"
 	"github.com/engviniciusbs/korego/internal/config"
 	"github.com/engviniciusbs/korego/internal/deploy"
@@ -172,6 +173,8 @@ func runServe(args []string) error {
 		OnListenChange: listener.Switch,
 	}
 
+	certSvc := &certs.Service{DB: db, Box: box}
+
 	queue := jobs.NewQueue(cfg.MaxBuilds)
 	// Declarado depois do defer db.Close, roda antes dele: cancela os deploys
 	// em andamento e espera terminarem. Os que esperavam ficam queued e voltam
@@ -193,7 +196,7 @@ func runServe(args []string) error {
 	handler := api.NewRouter(api.Deps{
 		Auth: svc, Node: nd, Hub: hub, Web: web, Metrics: collector, Usage: usageCollector, DB: db,
 		Updater: &update.System{ExePath: exe, ConfigPath: *cfgPath},
-		Domains: domSvc, Deploys: deploySvc, DataDir: cfg.DataDir, Runner: deploy.ExecRunner{}, Box: box,
+		Domains: domSvc, Certs: certSvc, Deploys: deploySvc, DataDir: cfg.DataDir, Runner: deploy.ExecRunner{}, Box: box,
 		GitHub:          ghSvc,
 		GitHubConnected: ghSvc.Ready,
 	})

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/engviniciusbs/korego/internal/auth"
+	"github.com/engviniciusbs/korego/internal/certs"
 	"github.com/engviniciusbs/korego/internal/deploy"
 	"github.com/engviniciusbs/korego/internal/domains"
 	"github.com/engviniciusbs/korego/internal/events"
@@ -40,6 +41,8 @@ type Deps struct {
 	Usage LatestUsage
 	// Domains atende /api/proxy, /api/domains e /api/settings/panel (nil as desativa).
 	Domains *domains.Service
+	// Certs atende /api/certificates (nil a desativa).
+	Certs *certs.Service
 	// Deploys executa e consulta os deploys das aplicações.
 	Deploys *deploy.Service
 	// DataDir guarda logs e diretórios das aplicações (apagados com a app).
@@ -144,6 +147,12 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/settings/panel", settingsH.panel)
 				r.Put("/settings/panel/domain", settingsH.setDomain)
 				r.Put("/settings/panel/public-port", settingsH.setPublicPort)
+			}
+			if d.Certs != nil {
+				certsH := certHandlers{svc: d.Auth, certs: d.Certs}
+				r.Get("/certificates", certsH.list)
+				r.Post("/certificates", certsH.create)
+				r.Delete("/certificates/{id}", certsH.remove)
 			}
 			if d.DB != nil && d.Deploys != nil {
 				box := d.Box
