@@ -38,7 +38,9 @@ Anote, para cada `server_name`:
 | `add_header Content-Security-Policy "...";` | cabeçalho na aba **Segurança** |
 | `ssl_certificate` de origem da Cloudflare ou curinga | certificado **Próprio** |
 
-Pastas fora de `/var/www` precisam ser movidas (ou ganhar um symlink) para dentro de `/var/www`: é a única pasta que o Caddy enxerga.
+Pastas fora de `/var/www` precisam ser movidas (ou copiadas) para dentro de `/var/www`: é a única pasta que o Caddy enxerga. Não crie symlinks em `/var/www` apontando para fora dela; symlinks entre pastas dentro de `/var/www` (como `current` → `releases/2`) valem.
+
+**Pasta fora de `/` funciona como `alias`, não como `root`.** Numa rota estática que não é `/`, o KoreGO tira o prefixo da rota antes de procurar o arquivo: em `/app/`, o pedido `/app/x.js` sai de `<pasta>/x.js`. No nginx, `location /app/ { root /var/www/site; }` procura em `/var/www/site/app/x.js`; no KoreGO, essa rota vira a pasta `/var/www/site/app`. Já `location /app/ { alias /var/www/site/app/; }` vira a mesma pasta, sem mudança. O cache imutável e o fallback da SPA também são relativos à rota (`/app/assets/` é o prefixo `/assets/`, e o fallback é `<pasta>/index.html`).
 
 ## 3. Cadastrar os sites
 
@@ -70,8 +72,8 @@ O status, os cabeçalhos (sem `Date`, `Server` e os que a Cloudflare acrescenta)
 
 Num horário de pouco tráfego, clique em **Assumir as portas** no banner e confirme com o código do 2FA (ou um código de recuperação). O progresso aparece ao vivo, e a edição de domínios fica bloqueada até o fim. O KoreGO:
 
-1. confere o ensaio de novo e recusa se algum domínio falhar (nada é alterado);
-2. roda `systemctl stop nginx` e sobe o Caddy em 80/443, tentando por até 5 s enquanto o nginx solta as portas;
+1. recusa se algum domínio cadastrado ficaria fora do Caddy (certificado próprio ilegível, app ainda sem deploy, host já usado por outro domínio), listando cada um com o motivo, e confere o ensaio de novo, recusando se algum domínio falhar (nada é alterado);
+2. roda `systemctl stop nginx` (se as portas já estiverem livres, pula este passo) e sobe o Caddy em 80/443, tentando por até 5 s enquanto o nginx solta as portas;
 3. confere cada domínio em `127.0.0.1:443`; certificados automáticos têm até 60 s para sair;
 4. se o passo 2 ou 3 falhar, volta sozinho: Caddy de novo no ensaio, `systemctl start nginx` e a mensagem "voltou para o nginx: <motivo>";
 5. com tudo certo, roda `systemctl disable nginx` e o banner passa a mostrar "Migrado do nginx em <data>".
@@ -86,7 +88,7 @@ Apagar o nginx e o certbot depois que tudo estiver estável fica a seu critério
 
 ## Outro processo nas portas
 
-Se as portas estão com um processo que não é o `nginx.service` ou o `apache2.service` do systemd, **Assumir as portas** recusa e diz qual processo é. Pare esse processo você mesmo; com as portas livres, o KoreGO sobe o Caddy em 80/443 na próxima verificação automática (até 30 segundos). Nesse caso não há o botão de voltar: para devolver as portas, pare o KoreGO e o Caddy antes de iniciar o outro servidor (`sudo systemctl stop korego && sudo docker stop korego-caddy`).
+Se as portas estão com um processo que não é o `nginx.service` ou o `apache2.service` do systemd, **Assumir as portas** recusa e diz qual processo é. Pare esse processo você mesmo. O Caddy continua no ensaio (ele nunca sai do ensaio sozinho, nem quando as portas ficam livres) e o banner avisa que as portas estão livres; clique em **Assumir as portas** para o Caddy subir em 80/443, com a mesma verificação e volta automática. Nesse caso não há o botão de voltar: para devolver as portas, pare o KoreGO e o Caddy antes de iniciar o outro servidor (`sudo systemctl stop korego && sudo docker stop korego-caddy`).
 
 ## Painel em HTTPS e porta 8000
 

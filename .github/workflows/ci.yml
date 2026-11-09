@@ -30,7 +30,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: docker pull busybox && docker pull caddy:2.11.9-alpine && docker pull nginx:alpine
+      - run: docker pull busybox && docker pull caddy:2.11.9-alpine && docker pull nginx:1-alpine
       - run: go test -tags integration ./internal/node/docker/... ./internal/deploy/... ./internal/usage/...
       # Proxy e troca nginx → Caddy com Caddy e nginx reais em 80/443. Rodam
       # como root (sudo só no binário de teste; a compilação fica com o

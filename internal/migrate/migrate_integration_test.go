@@ -459,7 +459,9 @@ func TestTakeoverRollback_Integration(t *testing.T) {
 
 		res := e.Takeover(ctx)
 		require.Equal(t, OutcomeRolledBack, res.Outcome, "resultado: %+v", res)
-		assert.Contains(t, res.Message, "voltou para o nginx")
+		// O motivo vem na mensagem: o bind em :443 falhou porque a porta estava em uso.
+		assert.Contains(t, res.Message, "voltou para o nginx: o Caddy não conseguiu escutar em 80/443: ")
+		assert.Contains(t, res.Message, "address already in use")
 
 		active, err := sd.Active(ctx, "nginx")
 		require.NoError(t, err)

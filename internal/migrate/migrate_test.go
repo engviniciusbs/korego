@@ -90,7 +90,7 @@ func TestTakeover_BindFailsRollsBack(t *testing.T) {
 	h.portsTaken = true // outro processo pegou a 443 depois do stop
 	res := h.e.Takeover(context.Background())
 	require.Equal(t, OutcomeRolledBack, res.Outcome, res.Message)
-	assert.Contains(t, res.Message, "voltou para o nginx")
+	assert.Contains(t, res.Message, "voltou para o nginx: o Caddy não conseguiu escutar em 80/443: ")
 	assert.Contains(t, res.Message, "address already in use")
 
 	log := h.c.list()

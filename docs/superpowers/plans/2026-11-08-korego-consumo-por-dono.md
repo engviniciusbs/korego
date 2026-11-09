@@ -175,7 +175,7 @@ func TestLocal_Real(t *testing.T)                       // any OS: Snapshot twic
 - [ ] **Step 1: Tests**
 
 ```go
-func TestClassify_Precedence(t *testing.T) // table: v2 container with project → project:mikos (managed false); v1 container without project → container:web-1 "Avulso: web-1"; unknown id → other;
+func TestClassify_Precedence(t *testing.T) // table: v2 container with project → project:blog (managed false); v1 container without project → container:web-1 "Avulso: web-1"; unknown id → other;
                                            // node child of a PM2 app pid inside pm2-root.service → pm2:bot-discord; the pm2 daemon itself → service:pm2-daemon;
                                            // nginx.service → service:nginx; user.slice/session-3.scope → session; kthread (ppid 2, empty cmdline) → kernel; "" cgroup → other
 func TestMaskCmd(t *testing.T)             // ["app","--password=s3cr3t"] → "app --password=••••"; ["app","--db-password","s3cr3t"] → "app --db-password ••••";
