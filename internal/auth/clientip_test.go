@@ -35,3 +35,12 @@ func TestClientIP_Fallbacks(t *testing.T) {
 func TestClientIP_IgnoresSpoofedLeftmost(t *testing.T) {
 	require.Equal(t, "198.51.100.7", ClientIP(reqWith("127.0.0.1:5000", "6.6.6.6, 198.51.100.7")))
 }
+
+// Domínio só Cloudflare: o Caddy (par loopback) troca o X-Forwarded-For por
+// {http.vars.client_ip}, o visitante tirado de CF-Connecting-IP. O painel vê o
+// visitante, não o IP da Cloudflare; de um par remoto o cabeçalho segue ignorado.
+func TestClientIP_CloudflareOnlyClientIPFromLoopback(t *testing.T) {
+	require.Equal(t, "203.0.113.10", ClientIP(reqWith("127.0.0.1:41234", "203.0.113.10")))
+	require.Equal(t, "2001:db8::7", ClientIP(reqWith("127.0.0.1:41234", "2001:db8::7")))
+	require.Equal(t, "198.51.100.20", ClientIP(reqWith("198.51.100.20:443", "203.0.113.10")))
+}

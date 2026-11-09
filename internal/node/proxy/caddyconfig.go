@@ -223,7 +223,15 @@ type caddyConfig struct {
 }
 
 type caddyAdmin struct {
-	Listen string `json:"listen"`
+	Listen string           `json:"listen"`
+	Config caddyAdminConfig `json:"config"`
+}
+
+// caddyAdminConfig.Persist false: o Caddy não grava a config carregada em
+// /config/caddy/autosave.json (ela leva as chaves dos certificados próprios
+// em load_pem). https://caddyserver.com/docs/json/admin/config/persist/
+type caddyAdminConfig struct {
+	Persist bool `json:"persist"`
 }
 
 type caddyApps struct {
@@ -468,7 +476,7 @@ func BuildConfig(sites []Site, mode Listen, cf []string) ([]byte, error) {
 	}
 	app.Servers = map[string]caddyServer{httpsServerName: httpsSrv, httpServerName: httpSrv}
 
-	cfg := caddyConfig{Admin: caddyAdmin{Listen: AdminListen}, Apps: caddyApps{HTTP: app}}
+	cfg := caddyConfig{Admin: caddyAdmin{Listen: AdminListen, Config: caddyAdminConfig{Persist: false}}, Apps: caddyApps{HTTP: app}}
 	if len(subjects) > 0 || len(certs) > 0 {
 		cfg.Apps.TLS = &caddyTLSApp{}
 		if len(certs) > 0 {
@@ -826,9 +834,14 @@ func pathHandlers(r SiteRoute, cfOnly bool) []caddyHandler {
 	if r.Static != nil {
 		return []caddyHandler{staticHandler(r.Path, r.Static)}
 	}
-	realIP := realIPValue
+	set := map[string][]string{"X-Real-IP": {realIPValue}}
 	if cfOnly {
-		realIP = clientIPValue
+		// Só Cloudflare: o par é sempre a Cloudflare. O X-Forwarded-For padrão
+		// do Caddy terminaria no IP dela, e quem lê a última entrada (o painel,
+		// auth.ClientIP) veria a Cloudflare; client_ip é o visitante
+		// (CF-Connecting-IP vindo das faixas confiáveis). header_up roda
+		// depois dos cabeçalhos X-Forwarded-* do reverse_proxy e os substitui.
+		set = map[string][]string{"X-Real-IP": {clientIPValue}, "X-Forwarded-For": {clientIPValue}}
 	}
 	var out []caddyHandler
 	if r.MaxBodyBytes > 0 {
@@ -837,9 +850,7 @@ func pathHandlers(r SiteRoute, cfOnly bool) []caddyHandler {
 	rp := caddyHandler{
 		Handler:   "reverse_proxy",
 		Upstreams: []caddyUpstream{{Dial: strings.TrimSpace(r.Upstream)}},
-		Headers: &caddyProxyHeaders{Request: &caddyHeaderOps{
-			Set: map[string][]string{"X-Real-IP": {realIP}},
-		}},
+		Headers:   &caddyProxyHeaders{Request: &caddyHeaderOps{Set: set}},
 	}
 	if r.NoBuffering {
 		v := -1

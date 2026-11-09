@@ -1,6 +1,9 @@
 {
   "admin": {
-    "listen": "127.0.0.1:2019"
+    "listen": "127.0.0.1:2019",
+    "config": {
+      "persist": false
+    }
   },
   "apps": {
     "http": {

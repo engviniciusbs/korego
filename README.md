@@ -118,12 +118,13 @@ A Etapa 3 amplia o editor de domínio (**Domínios → Adicionar domínio** ou *
   - **Endereço** `host:porta`, com **Limite do corpo** (acima dele a resposta é `413`; 0 = sem limite) e **Sem buffer** (para streaming e eventos);
   - **Pasta** estática (veja abaixo).
 - **Pastas estáticas**: a pasta precisa estar dentro de `/var/www`, que o Caddy enxerga só para leitura. Symlinks valem, então um deploy pode trocar `/var/www/loja/current` de `releases/1` para `releases/2` sem recarregar nada: a requisição seguinte já sai da pasta nova.
+  - **Não crie symlinks em `/var/www` que apontem para fora dela.** O Caddy segue symlinks, e só `/var/www` está montada no container: um link para fora ou não abre, ou, se o alvo também estiver montado por outro caminho, expõe o que não devia. Mantenha releases e links dentro de `/var/www`.
   - **SPA**: um caminho desconhecido recebe o `/index.html`. O `index.html`, inclusive no fallback, sai com `Cache-Control: no-cache`.
   - **Cache imutável** (opcional, como `/assets/`): o que estiver sob esse prefixo sai com `Cache-Control: public, max-age=31536000, immutable`; arquivo ausente é `404`.
   - Fora de `/`, a rota funciona como alias: em `/app/`, o pedido `/app/x` sai de `<pasta>/x`.
   - `.git` e arquivos `.env*` nunca são servidos.
 - **Certificados próprios** (aba **Certificado** → **Próprio**): cole o PEM (cadeia + chave) ou informe o caminho do arquivo no servidor. O KoreGO recusa cadeia inválida, chave que não bate com o certificado, certificado vencido ou que não cobre o hostname (e o `www`, quando há redirecionamento). O PEM fica cifrado no banco, a chave nunca volta pela API nem aparece no painel, e um certificado (um curinga `*.exemplo.com`, por exemplo) pode ser usado por vários domínios. A seção **Certificados** lista onde cada um é usado e quando vence; o painel avisa 30 dias antes. É o caminho para certificados de origem da Cloudflare ou para domínios cujo DNS ainda não aponta para o servidor.
-- **Só Cloudflare** (aba **Segurança**): conexões que não vêm das faixas de IP da Cloudflare recebem `403`, em HTTP e HTTPS, e o IP do cliente passa a ser lido do `CF-Connecting-IP`. As faixas vêm embutidas no binário e são atualizadas uma vez por dia (uma lista truncada ou com erro é ignorada e a anterior continua valendo). Duas ressalvas:
+- **Só Cloudflare** (aba **Segurança**): conexões que não vêm das faixas de IP da Cloudflare recebem `403`, em HTTP e HTTPS, e o IP do cliente passa a ser lido do `CF-Connecting-IP`. O upstream recebe esse IP em `X-Real-IP` e em `X-Forwarded-For` (que o Caddy reescreve com só o visitante), então o painel e as aplicações veem o visitante, não o IP da Cloudflare. As faixas vêm embutidas no binário e são atualizadas uma vez por dia (uma lista truncada ou com erro é ignorada e a anterior continua valendo). Duas ressalvas:
   - O filtro confere o IP, não quem é o cliente: as faixas da Cloudflare são compartilhadas por todas as contas, e qualquer pessoa pode apontar uma zona dela para o seu IP e passar pelo filtro. Para garantir que só a **sua** zona chega à origem, ative também o **Authenticated Origin Pulls** (mTLS) na Cloudflare; o KoreGO não configura isso.
   - A confiança nas faixas (`trusted_proxies`) vale por servidor do Caddy, não por domínio: com qualquer domínio em Só Cloudflare, os servidores HTTP e HTTPS inteiros passam a aceitar o `CF-Connecting-IP` vindo das faixas da Cloudflare, inclusive para os outros domínios que estiverem atrás dela.
 - **Cabeçalhos de resposta**: até 30 por domínio, enviados em todas as rotas. **Modelo segurança** acrescenta `Strict-Transport-Security`, `X-Content-Type-Options`, `Referrer-Policy` e `Permissions-Policy`. Sempre, em todo domínio, o cabeçalho `Server` é removido e o upstream recebe `X-Real-IP`.
@@ -131,7 +132,7 @@ A Etapa 3 amplia o editor de domínio (**Domínios → Adicionar domínio** ou *
 
 ## Migrar do nginx
 
-Quando outro servidor (nginx ou apache2) segura as portas 80/443, o KoreGO não briga por elas: o Caddy roda em **modo ensaio**, em `127.0.0.1:18080` e `127.0.0.1:18443`, e o painel mostra "Ensaio: o Caddy roda em portas de teste enquanto nginx (pid …) ocupa 80/443". Você cadastra e confere tudo com o nginx ainda no ar e só então troca. O KoreGO nunca para o nginx por conta própria, só quando você pede, e não lê os arquivos do nginx: os sites são cadastrados no painel.
+Quando outro servidor (nginx ou apache2) segura as portas 80/443, o KoreGO não briga por elas: o Caddy roda em **modo ensaio**, em `127.0.0.1:18080` e `127.0.0.1:18443`, e o painel mostra "Ensaio: o Caddy roda em portas de teste enquanto nginx (pid …) ocupa 80/443". Você cadastra e confere tudo com o nginx ainda no ar e só então troca. O KoreGO nunca para o nginx por conta própria, só quando você pede, e não lê os arquivos do nginx: os sites são cadastrados no painel. O ensaio também não termina sozinho: se o nginx sair do ar por um instante (um reload, ou o KoreGO subindo antes dele no boot), o Caddy continua no ensaio e o painel avisa que as portas estão livres; só **Assumir as portas** põe o Caddy em 80/443.
 
 Os exemplos usam nomes fictícios: `loja.exemplo.net` (uma SPA em `/var/www/loja/current` com a API em `127.0.0.1:4000`), `exemplo.com` (uma aplicação em `127.0.0.1:3000`) e o servidor `203.0.113.10`.
 
@@ -156,7 +157,7 @@ Os exemplos usam nomes fictícios: `loja.exemplo.net` (uma SPA em `/var/www/loja
 
    Status, cabeçalhos (sem `Date`, `Server` e os que a Cloudflare acrescenta) e o hash do corpo devem bater. Teste também o login e a API da aplicação.
 4. **Assumir as portas.** Num horário de pouco tráfego, clique em **Assumir as portas** no banner e confirme com o código do 2FA (ou um código de recuperação). Só `nginx.service` e `apache2.service` do systemd são aceitos. Domínios com certificado automático precisam ter o DNS apontando para o servidor (ou para a Cloudflare) antes. O KoreGO então:
-   - para o nginx (`systemctl stop nginx`) e sobe o Caddy em 80/443, tentando por até 5 s enquanto o nginx solta as portas;
+   - para o nginx (`systemctl stop nginx`; se as portas já estiverem livres, pula este passo) e sobe o Caddy em 80/443, tentando por até 5 s enquanto o nginx solta as portas;
    - confere cada domínio em `127.0.0.1:443` (certificados automáticos têm até 60 s para sair);
    - se algo falhar, volta sozinho: Caddy de novo no ensaio, `systemctl start nginx` e a mensagem "voltou para o nginx: <motivo>";
    - com tudo certo, desativa o nginx no boot (`systemctl disable nginx`) e mostra "Migrado do nginx em <data>".
@@ -228,6 +229,7 @@ O teste ponta a ponta sobe o binário em `:18000` com dados temporários e perco
 - O setup inicial exige o token gravado em `/etc/korego/setup-token`, legível apenas por root, para que ninguém na rede reivindique o servidor antes de você.
 - Bloqueio de login após 5 falhas por minuto por IP.
 - A autoatualização valida o checksum da release e restaura o binário anterior se algo falhar.
+- A config do Caddy leva as chaves dos certificados próprios e é carregada com `persist` desligado, então o Caddy não a grava em `/config/caddy/autosave.json`. Se uma versão anterior deixou esse arquivo no volume `korego-caddy-config`, o KoreGO o apaga na subida (via `docker exec` no `korego-caddy`).
 
 ## Licença
 

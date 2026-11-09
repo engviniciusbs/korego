@@ -249,3 +249,18 @@ func TestLocal_PullError(t *testing.T) {
 	err := NewLocal().Pull(ctx, "korego-inexistente.invalid/x/y:1", func(string) {})
 	assert.Error(t, err)
 }
+
+func TestLocal_Exec(t *testing.T) {
+	id := runBusybox(t, "sleep", "300")
+	l := NewLocal()
+	defer l.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	code, err := l.Exec(ctx, id, []string{"sh", "-c", "touch /tmp/x && [ -e /tmp/x ] || exit 3; rm -f /tmp/x"})
+	require.NoError(t, err)
+	assert.Equal(t, 0, code)
+	code, err = l.Exec(ctx, id, []string{"sh", "-c", "[ -e /tmp/x ] || exit 3; rm -f /tmp/x"})
+	require.NoError(t, err)
+	assert.Equal(t, 3, code)
+}

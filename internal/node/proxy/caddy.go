@@ -60,6 +60,7 @@ type Caddy struct {
 	mu         sync.Mutex
 	last       Status
 	pendingKey string // estado em que a recriação pendente já foi logada
+	scrubbed   string // container cujo autosave.json já foi tratado
 
 	modeMu     sync.Mutex
 	mode       Listen // modo gravado ("" = ainda não decidido)
@@ -183,7 +184,48 @@ func (c *Caddy) use(ctx context.Context, ct docker.Container, running bool) (Sta
 			return failure("iniciar "+ContainerName, err), unknown
 		}
 	}
+	c.scrubAutosave(ctx, ct.ID)
 	return c.probe(ctx, ct)
+}
+
+// Execer é a parte opcional do cliente Docker que roda um comando num
+// container (docker.Local.Exec).
+type Execer interface {
+	Exec(ctx context.Context, id string, cmd []string) (int, error)
+}
+
+// autosavePath é onde o Caddy grava a config carregada com persist ligado.
+const autosavePath = "/config/caddy/autosave.json"
+
+// scrubAutosaveCmd apaga o autosave; sai com 3 se ele não existe.
+var scrubAutosaveCmd = []string{"sh", "-c", "[ -e " + autosavePath + " ] || exit 3; rm -f " + autosavePath}
+
+// scrubAutosave apaga o autosave.json do volume de config, gravado por
+// versões que carregavam a config com persist ligado (ele leva as chaves dos
+// certificados próprios, em load_pem). Uma tentativa por container a cada
+// subida do KoreGO; falha só vai para o log.
+func (c *Caddy) scrubAutosave(ctx context.Context, id string) {
+	c.mu.Lock()
+	done := id == "" || c.scrubbed == id
+	c.scrubbed = id
+	c.mu.Unlock()
+	if done {
+		return
+	}
+	ex, ok := c.docker.(Execer)
+	if !ok {
+		log.Printf("proxy: sem docker exec; apague %s do volume korego-caddy-config se ele existir", autosavePath)
+		return
+	}
+	code, err := ex.Exec(ctx, id, scrubAutosaveCmd)
+	switch {
+	case err != nil:
+		log.Printf("proxy: apagar %s no %s: %v", autosavePath, ContainerName, err)
+	case code == 0:
+		log.Printf("proxy: %s apagado (guardava a config com as chaves dos certificados)", autosavePath)
+	case code != 3:
+		log.Printf("proxy: apagar %s no %s: saída %d", autosavePath, ContainerName, code)
+	}
 }
 
 func (c *Caddy) create(ctx context.Context, ensureWWW bool) (Status, verdict) {
@@ -218,6 +260,8 @@ func (c *Caddy) create(ctx context.Context, ensureWWW bool) (Status, verdict) {
 	if list, lerr := c.docker.List(ctx); lerr == nil {
 		for _, ct := range list {
 			if ct.Name == ContainerName && ct.Managed {
+				// O volume de config sobrevive à recriação.
+				c.scrubAutosave(ctx, ct.ID)
 				return c.probe(ctx, ct)
 			}
 		}

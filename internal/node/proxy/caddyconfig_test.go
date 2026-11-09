@@ -832,15 +832,22 @@ func TestBuildConfig_CloudflareOnly(t *testing.T) {
 	realIP := func(r parsedRoute) any {
 		return last(r)["headers"].(map[string]any)["request"].(map[string]any)["set"].(map[string]any)["X-Real-IP"]
 	}
+	xff := func(r parsedRoute) any {
+		return last(r)["headers"].(map[string]any)["request"].(map[string]any)["set"].(map[string]any)["X-Forwarded-For"]
+	}
 	n := 0
 	for _, sub := range subroutes(t, parsedRoute{Handle: https[2].Handle}) {
 		if last(sub)["handler"] == "reverse_proxy" {
 			assert.Equal(t, []any{"{http.vars.client_ip}"}, realIP(sub))
+			// O upstream (o painel, uma app) vê o visitante, não a Cloudflare.
+			assert.Equal(t, []any{"{http.vars.client_ip}"}, xff(sub))
 			n++
 		}
 	}
 	assert.Equal(t, 2, n)
 	assert.Equal(t, []any{"{http.request.remote.host}"}, realIP(subroutes(t, parsedRoute{Handle: https[0].Handle})[0]))
+	assert.Nil(t, xff(subroutes(t, parsedRoute{Handle: https[0].Handle})[0]), "fora do só Cloudflare, o X-Forwarded-For padrão do Caddy")
+	assertGolden(t, "cloudflare-only.json", got)
 
 	// sem site CF, as faixas não mudam nada
 	plain, err := BuildConfig([]Site{other}, ListenNormal, cfRanges)
@@ -1011,4 +1018,26 @@ func TestBuildConfig_StaticPrefixGolden(t *testing.T) {
 		{"handle":[{"handler":"file_server","root":"/var/www/app/current","hide":[".git",".env*"]}],"terminal":true}
 	]}`
 	assert.JSONEq(t, want, mustJSON(t, app.Handle[0]))
+}
+
+// A config carrega chaves privadas (load_pem): o Caddy não pode gravá-la em
+// /config/caddy/autosave.json.
+func TestBuildConfig_AdminDoesNotPersist(t *testing.T) {
+	for _, mode := range []Listen{ListenNormal, ListenTrial} {
+		got, err := BuildConfig([]Site{multiSite()}, mode, nil)
+		require.NoError(t, err)
+		var cfg struct {
+			Admin struct {
+				Listen string `json:"listen"`
+				Config *struct {
+					Persist *bool `json:"persist"`
+				} `json:"config"`
+			} `json:"admin"`
+		}
+		require.NoError(t, json.Unmarshal(got, &cfg))
+		assert.Equal(t, AdminListen, cfg.Admin.Listen)
+		require.NotNil(t, cfg.Admin.Config, mode)
+		require.NotNil(t, cfg.Admin.Config.Persist, mode)
+		assert.False(t, *cfg.Admin.Config.Persist, mode)
+	}
 }
