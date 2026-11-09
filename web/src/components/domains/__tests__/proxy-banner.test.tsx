@@ -63,7 +63,7 @@ const site = (host: string, over: Record<string, unknown> = {}) => ({
 const okSite = site("loja.exemplo.com");
 const pendingSite = site("exemplo.com", {
   auto: true,
-  ok: false,
+  ok: true, // como o backend: auto sem certificado no ensaio passa como pending
   pending: true,
   tlsOk: false,
   leafOk: false,

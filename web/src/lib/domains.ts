@@ -70,9 +70,10 @@ export interface TrialSiteCheck {
 
 export type TrialResult = "ok" | "pending" | "failed";
 
+/** Falha vence; passou com o certificado automático ainda a emitir é pending. */
 export function trialResult(s: TrialSiteCheck): TrialResult {
-  if (s.ok) return "ok";
-  return s.pending ? "pending" : "failed";
+  if (!s.ok) return "failed";
+  return s.pending ? "pending" : "ok";
 }
 
 /** Motivo da falha de um domínio no ensaio. */
