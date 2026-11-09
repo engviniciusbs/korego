@@ -3,7 +3,6 @@ package usage
 import (
 	"regexp"
 	"strings"
-	"unicode"
 )
 
 const (
@@ -43,52 +42,105 @@ func sensitiveName(name string) bool {
 	return false
 }
 
-// splitKeep divide s em pedaços alternando espaço e não-espaço, respeitando
-// aspas simples e duplas; concatenar os pedaços devolve s.
-func splitKeep(s string) []string {
-	var parts []string
-	var cur strings.Builder
-	var quote rune
-	space := false
-	flush := func() {
-		if cur.Len() > 0 {
-			parts = append(parts, cur.String())
-			cur.Reset()
-		}
-	}
-	for i, r := range s {
-		isSp := quote == 0 && unicode.IsSpace(r)
-		if i > 0 && isSp != space {
-			flush()
-		}
-		space = isSp
-		cur.WriteRune(r)
-		switch {
-		case quote != 0 && r == quote:
-			quote = 0
-		case quote == 0 && (r == '"' || r == '\''):
-			quote = r
-		}
-	}
-	flush()
-	return parts
-}
-
 // masker mantém o estado "nome seguido de valor" entre os tokens.
 type masker struct{ maskNext bool }
 
-// token mascara um token sem espaços (fora de aspas).
-func (m *masker) token(a string) string {
+func isQuote(r byte) bool { return r == '"' || r == '\'' }
+
+func isSep(r byte) bool { return r == ';' || r == '&' || r == '|' }
+
+func isSpaceByte(r byte) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' }
+
+// maskText percorre um texto de shell: espaços e separadores (; & |) são
+// copiados como estão e cada palavra passa por word. Concatenar o resultado
+// só difere do original nos valores secretos.
+func (m *masker) maskText(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		switch {
+		case isSpaceByte(s[i]):
+			j := i
+			for j < len(s) && isSpaceByte(s[j]) {
+				j++
+			}
+			b.WriteString(s[i:j])
+			i = j
+		case isSep(s[i]):
+			j := i
+			for j < len(s) && isSep(s[j]) {
+				j++
+			}
+			m.maskNext = false
+			b.WriteString(s[i:j])
+			i = j
+		default:
+			j := i
+			var q byte
+			for j < len(s) {
+				c := s[j]
+				if q != 0 {
+					if c == q {
+						q = 0
+					}
+				} else if isQuote(c) {
+					q = c
+				} else if isSpaceByte(c) || isSep(c) {
+					break
+				}
+				j++
+			}
+			b.WriteString(m.word(s[i:j]))
+			i = j
+		}
+	}
+	return b.String()
+}
+
+// wrapped trata um texto que começa com aspas: o conteúdo é mascarado
+// recursivamente e as aspas originais são mantidas.
+func (m *masker) wrapped(w string) string {
+	q := w[0]
+	inner, closed := w[1:], false
+	if len(w) >= 2 && w[len(w)-1] == q {
+		inner, closed = w[1:len(w)-1], true
+	}
+	out := string(q) + m.maskText(inner)
+	if closed {
+		out += string(q)
+	}
+	return out
+}
+
+// secret substitui um valor secreto, mantendo as aspas que o cercam.
+func secret(v string) string {
+	if len(v) >= 2 && isQuote(v[0]) && v[len(v)-1] == v[0] {
+		return v[:1] + maskStr + v[len(v)-1:]
+	}
+	return maskStr
+}
+
+// word mascara uma palavra (sem espaços fora de aspas).
+func (m *masker) word(a string) string {
 	if m.maskNext {
 		m.maskNext = false
 		if !strings.HasPrefix(a, "-") {
-			return maskStr
+			return secret(a)
 		}
+	}
+	if a == "" {
+		return a
+	}
+	if isQuote(a[0]) {
+		return m.wrapped(a)
 	}
 	a = reUserinfo.ReplaceAllString(a, "${1}:"+maskStr+"@")
 	if i := strings.Index(a, "="); i > 0 {
+		name, v := a[:i+1], a[i+1:]
 		if sensitiveName(a[:i]) {
-			return a[:i+1] + maskStr
+			return name + secret(v)
+		}
+		if v != "" && isQuote(v[0]) {
+			return name + m.wrapped(v)
 		}
 		return a
 	}
@@ -101,30 +153,18 @@ func (m *masker) token(a string) string {
 }
 
 // MaskCmd esconde valores sensíveis do argv e limita o texto a 160 caracteres.
-// Elementos com espaço (ex.: sh -c "...") são divididos em tokens, mantendo o
-// texto original; nada é descartado além do corte final.
+// Elementos com espaço (ex.: sh -c "...") são analisados como texto de shell;
+// só o valor secreto é trocado, nada mais é descartado além do corte final.
 func MaskCmd(argv []string) string {
 	var m masker
 	out := make([]string, 0, len(argv))
 	for _, a := range argv {
-		if strings.IndexFunc(a, unicode.IsSpace) < 0 {
-			out = append(out, m.token(a))
-			continue
-		}
 		if m.maskNext && !strings.HasPrefix(a, "-") {
 			m.maskNext = false
-			out = append(out, maskStr)
+			out = append(out, secret(a))
 			continue
 		}
-		var b strings.Builder
-		for _, p := range splitKeep(a) {
-			if r := []rune(p)[0]; unicode.IsSpace(r) {
-				b.WriteString(p)
-			} else {
-				b.WriteString(m.token(p))
-			}
-		}
-		out = append(out, b.String())
+		out = append(out, m.maskText(a))
 	}
 	s := strings.Join(out, " ")
 	if r := []rune(s); len(r) > maxCmd {

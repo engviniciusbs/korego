@@ -39,7 +39,7 @@ func TestMaskCmd_ShC(t *testing.T) {
 		{[]string{"sh", "-c", "FOO=1 API_TOKEN=abc run"}, "sh -c FOO=1 API_TOKEN=•••• run"},
 		{[]string{"sh", "-c", "mysql --password hunter2"}, "sh -c mysql --password ••••"},
 		{[]string{"sh", "-c", "mysql --password=hunter2 -h db"}, "sh -c mysql --password=•••• -h db"},
-		{[]string{"sh", "-c", "x --password 'a b' y"}, "sh -c x --password •••• y"},
+		{[]string{"sh", "-c", "x --password 'a b' y"}, "sh -c x --password '••••' y"},
 	}
 	for _, c := range cases {
 		got := MaskCmd(c.argv)
@@ -64,5 +64,26 @@ func TestMaskCmd_NomesExtrasEUserinfo(t *testing.T) {
 	}
 	for _, c := range cases {
 		assert.Equal(t, c.want, MaskCmd(c.argv))
+	}
+}
+
+func TestMaskCmd_SoOValor(t *testing.T) {
+	cases := []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"bash", "-c", `"mysql --password=hunter2 -h db" && echo ok`}, `bash -c "mysql --password=•••• -h db" && echo ok`},
+		{[]string{"x", `"--password=hunter2"`, "-h", "db"}, `x "--password=••••" -h db`},
+		{[]string{"x", `--password=a;--token=b`}, `x --password=••••;--token=••••`},
+		{[]string{"x", `--password='a b' -h db`}, `x --password='••••' -h db`},
+		{[]string{"x", `--cmd="run --token=zz" ok`}, `x --cmd="run --token=••••" ok`},
+		{[]string{"sh", "-c", `a --password=p1 && b --token=p2 | c`}, `sh -c a --password=•••• && b --token=•••• | c`},
+	}
+	for _, c := range cases {
+		got := MaskCmd(c.argv)
+		assert.Equal(t, c.want, got)
+		for _, s := range []string{"hunter2", "p1", "p2", "zz"} {
+			assert.NotContains(t, got, s)
+		}
 	}
 }
