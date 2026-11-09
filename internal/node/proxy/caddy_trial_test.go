@@ -70,11 +70,12 @@ func TestEnsure_TrialConfigStillForeign(t *testing.T) {
 	assert.Equal(t, StateTrial, st.State)
 	assert.Equal(t, "caddy (pid 5)", st.Process)
 
-	// Portas livres com config de ensaio: pronto para o modo normal.
+	// Portas livres com config de ensaio: segue em ensaio (só a troca sai).
 	c.PortOwner = freePorts
 	st = c.Ensure(context.Background())
-	assert.Equal(t, StateActive, st.State)
-	assert.Equal(t, ListenNormal, st.Mode)
+	assert.Equal(t, StateTrial, st.State)
+	assert.Equal(t, ListenTrial, st.Mode)
+	assert.Equal(t, PortsFreeMessage, st.Message)
 }
 
 func TestEnsure_NormalConfigWithForeignOwnerIsTrial(t *testing.T) {

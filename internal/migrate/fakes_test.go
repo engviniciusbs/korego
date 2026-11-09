@@ -271,7 +271,8 @@ func newHarness(t *testing.T) *harness {
 		if h.mode == proxy.ListenNormal {
 			return proxy.Status{State: proxy.StateActive, Mode: proxy.ListenNormal}
 		}
-		return proxy.Status{State: proxy.StateActive, Mode: proxy.ListenNormal} // portas livres
+		// Portas livres em ensaio: o Caddy segue em ensaio (só Switch sai).
+		return proxy.Status{State: proxy.StateTrial, Mode: proxy.ListenTrial, Message: proxy.PortsFreeMessage}
 	}
 	h.px.SwitchFn = func(_ context.Context, _ []proxy.Site, mode proxy.Listen, _ []string) error {
 		h.c.add("switch " + string(mode))

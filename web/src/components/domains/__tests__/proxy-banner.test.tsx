@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DominiosPage from "@/app/(painel)/dominios/page";
-import { ProxyBanner } from "../proxy-banner";
+import { ProxyBanner, proxyBannerTitle } from "../proxy-banner";
 
 class FakeWS {
   static instances: FakeWS[] = [];
@@ -392,5 +392,15 @@ describe("Domínios durante a troca de servidor", () => {
     const row = (await screen.findByRole("link", { name: /^loja\.exemplo\.com/ })).closest("tr") as HTMLElement;
     expect(within(row).getByRole("button", { name: /Editar/ })).toBeDisabled();
     expect(within(row).getByRole("button", { name: /Remover/ })).toBeDisabled();
+  });
+});
+
+describe("proxyBannerTitle — ensaio com as portas livres", () => {
+  it("não diz que outro processo ocupa 80/443", () => {
+    const title = proxyBannerTitle({ state: "trial", mode: "trial", message: "As portas 80/443 estão livres.", guideUrl: GUIDE });
+    expect(title).toBe("Ensaio: o Caddy roda em portas de teste e as portas 80/443 estão livres");
+    expect(proxyBannerTitle({ state: "trial", mode: "trial", process: "nginx (pid 7)", guideUrl: GUIDE })).toBe(
+      "Ensaio: o Caddy roda em portas de teste enquanto nginx (pid 7) ocupa 80/443",
+    );
   });
 });

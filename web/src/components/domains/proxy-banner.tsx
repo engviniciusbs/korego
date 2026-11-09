@@ -31,7 +31,9 @@ export function proxyBannerTitle(s: ProxyStatus): string {
     case "starting":
       return "Proxy iniciando…";
     case "trial":
-      return `Ensaio: o Caddy roda em portas de teste enquanto ${s.process || "outro processo"} ocupa 80/443`;
+      // Sem processo: portas livres (o ensaio só sai pela troca).
+      if (!s.process) return "Ensaio: o Caddy roda em portas de teste e as portas 80/443 estão livres";
+      return `Ensaio: o Caddy roda em portas de teste enquanto ${s.process} ocupa 80/443`;
     default:
       return "Proxy com erro";
   }
@@ -112,10 +114,14 @@ function TrialPanel({ data, onTakeover }: { data: ProxyStatus; onTakeover: () =>
 
   return (
     <div className="mt-1 space-y-2">
-      <p>
-        Os sites continuam no <span translate="no">{processUnit(data.process)}</span>. Confira cada domínio antes de
-        assumir as portas.
-      </p>
+      {data.process ? (
+        <p>
+          Os sites continuam no <span translate="no">{processUnit(data.process)}</span>. Confira cada domínio antes de
+          assumir as portas.
+        </p>
+      ) : (
+        <p>{data.message || "As portas 80/443 estão livres."} Confira cada domínio antes de assumir as portas.</p>
+      )}
       {check.isPending ? (
         <p className="flex items-center gap-2 text-xs">
           <Spinner size="sm" decorative />

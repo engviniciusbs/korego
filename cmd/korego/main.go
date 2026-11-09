@@ -173,6 +173,13 @@ func runServe(args []string) error {
 	// atualiza a cada 24 h, mais abaixo.
 	cfRanges := cloudflare.New(db, nil)
 
+	// Modo do proxy gravado no banco: o ensaio sobrevive a reinícios e a
+	// quedas breves do nginx; só a troca sai dele.
+	if c, ok := nd.Proxy().(*proxy.Caddy); ok {
+		c.Settings = db
+		c.UnitFor = migrate.UnitForProcess
+	}
+
 	domSvc := &domains.Service{
 		DB: db, Proxy: nd.Proxy(), Hub: hub, PublicIP: cfg.PublicIP,
 		PanelPort: panelPort, ListenAddr: cfg.ListenAddr,

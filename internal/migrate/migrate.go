@@ -517,7 +517,7 @@ func (e *Engine) mark(ctx context.Context, op, unit string) error {
 // run executa fn em segundo plano. Ao fim relê o estado do proxy, grava o
 // resultado (e apaga a marca), retoma os domínios, libera a vaga, publica o
 // evento final e chama onDone. Um pânico em fn vira resultado failed: os domínios são retomados,
-// uma reconciliação roda na hora (portas livres → Caddy em 80/443) e o
+// uma reconciliação roda na hora, a unit é religada se ninguém atende 80/443 e o
 // estado final vai na mensagem.
 func (e *Engine) run(ctx context.Context, ss *session, op, unit string, fn func(context.Context, *job) Result, onDone func(Result)) {
 	jctx := context.WithoutCancel(ctx)
@@ -532,7 +532,7 @@ func (e *Engine) run(ctx context.Context, ss *session, op, unit string, fn func(
 			rctx, cancel := context.WithTimeout(jctx, ensureTimeout)
 			st := e.Domains.Reconcile(rctx)
 			cancel()
-			res.Message += e.settle(jctx, unit, st)
+			res.Message += e.restartIfBothDown(jctx, unit, st) + e.settle(jctx, unit, st)
 		}
 		j.record(jctx, res)
 		// Solta domínios e vaga antes do done; o defer publica mesmo se a
@@ -581,8 +581,9 @@ func (e *Engine) settle(ctx context.Context, unit string, st proxy.Status) strin
 }
 
 // RecoverInterrupted roda na subida: com a marca de troca em andamento
-// presente (o KoreGO caiu ou reiniciou no meio), reconcilia o proxy (portas
-// livres → Caddy em 80/443), grava o resultado failed com
+// presente (o KoreGO caiu ou reiniciou no meio), reconcilia o proxy (o modo
+// gravado decide: ensaio segue ensaio), religa a unit se ninguém atende
+// 80/443 (restartIfBothDown), grava o resultado failed com
 // InterruptedMessage, apaga a marca e, com o Caddy servindo e a unit parada,
 // registra a migração para oferecer Voltar.
 func (e *Engine) RecoverInterrupted(ctx context.Context) error {
@@ -607,9 +608,39 @@ func (e *Engine) RecoverInterrupted(ctx context.Context) error {
 	}()
 	defer e.release()
 	st := e.Domains.Reconcile(ctx)
-	res = Result{Outcome: OutcomeFailed, Message: InterruptedMessage + "." + e.settle(ctx, m.Unit, st)}
+	note := e.restartIfBothDown(ctx, m.Unit, st)
+	res = Result{Outcome: OutcomeFailed, Message: InterruptedMessage + "." + note + e.settle(ctx, m.Unit, st)}
 	j.record(ctx, res)
 	return nil
+}
+
+// restartIfBothDown roda na subida depois de uma troca interrompida: o Caddy
+// ficou em ensaio (o modo gravado não sai sozinho) com as portas livres e a
+// unit parada, então nenhum servidor atende 80/443. Religa a unit; se ela não
+// subir, o Caddy reassume 80/443 (último recurso, como em revert). Devolve
+// uma nota para a mensagem ("" se não fez nada).
+func (e *Engine) restartIfBothDown(ctx context.Context, unit string, st proxy.Status) string {
+	if _, ok := supportedUnits[unit]; !ok || e.Systemd == nil {
+		return ""
+	}
+	if st.State != proxy.StateTrial || st.Process != "" || !e.Systemd.Exists(ctx, unit) {
+		return ""
+	}
+	if active, err := e.Systemd.Active(ctx, unit); err != nil || active {
+		return ""
+	}
+	serr := e.startUnit(ctx, unit)
+	if serr == nil {
+		return " O " + unit + " foi religado."
+	}
+	sites, err := e.Domains.Sites(ctx)
+	if err == nil {
+		err = e.bindNormal(ctx, sites, e.Domains.CFRanges())
+	}
+	if err != nil {
+		return fmt.Sprintf(" ATENÇÃO: o %s não subiu (%v) e o Caddy não conseguiu assumir 80/443 (%v).", unit, serr, err)
+	}
+	return fmt.Sprintf(" O %s não subiu (%v); o Caddy assumiu 80/443.", unit, serr)
 }
 
 // PrecheckTakeover são as recusas de assumir que não mexem em nada nem
@@ -625,7 +656,8 @@ func (e *Engine) PrecheckTakeover(ctx context.Context) error {
 	if st.State != proxy.StateTrial {
 		return &Refusal{Code: CodeNotTrial, Message: notTrialMsg(st)}
 	}
-	if _, ok := e.Systemd.UnitForProcess(st.Process); !ok {
+	// Process vazio: portas livres (ninguém para parar).
+	if _, ok := e.Systemd.UnitForProcess(st.Process); st.Process != "" && !ok {
 		return unsupportedOwner(st)
 	}
 	sites, err := e.Domains.Sites(ctx)
@@ -664,7 +696,7 @@ func (e *Engine) StartTakeover(ctx context.Context, onDone func(Result)) error {
 	}
 	started := false
 	defer ss.guard(&started)
-	unit, err := e.takeoverUnit(ctx, ss.st)
+	unit, stop, err := e.takeoverUnit(ctx, ss.st)
 	if err != nil {
 		ss.end(ss.st)
 		return err
@@ -679,7 +711,7 @@ func (e *Engine) StartTakeover(ctx context.Context, onDone func(Result)) error {
 		return err
 	}
 	e.run(ctx, ss, OpTakeover, unit, func(ctx context.Context, j *job) Result {
-		return e.takeover(ctx, j, unit, sites)
+		return e.takeover(ctx, j, unit, stop, sites)
 	}, onDone)
 	started = true
 	return nil
@@ -714,29 +746,58 @@ func (e *Engine) dnsProblems(ctx context.Context, sites []proxy.Site) []string {
 	return bad
 }
 
-func (e *Engine) takeoverUnit(ctx context.Context, st proxy.Status) (string, error) {
+// takeoverUnit decide a unit da troca e se ela precisa ser parada.
+//
+// Com dono nas portas: a unit dele (nginx/apache2 do systemd, existente e
+// ativa), parada na troca. Com as portas livres (Process vazio): a unit
+// lembrada do ensaio (proxy.trial_unit), se suportada e existente — parada só
+// se estiver ativa (subindo de novo) — ou "" (sem unit: sem Voltar).
+func (e *Engine) takeoverUnit(ctx context.Context, st proxy.Status) (unit string, stop bool, err error) {
 	if st.State != proxy.StateTrial {
-		return "", &Refusal{Code: CodeNotTrial, Message: notTrialMsg(st)}
+		return "", false, &Refusal{Code: CodeNotTrial, Message: notTrialMsg(st)}
+	}
+	if st.Process == "" {
+		unit := e.trialUnit(ctx)
+		if unit == "" {
+			return "", false, nil
+		}
+		active, aerr := e.Systemd.Active(ctx, unit)
+		return unit, aerr != nil || active, nil
 	}
 	unit, ok := e.Systemd.UnitForProcess(st.Process)
 	if !ok {
-		return "", unsupportedOwner(st)
+		return "", false, unsupportedOwner(st)
 	}
 	if !e.Systemd.Exists(ctx, unit) {
-		return "", &Refusal{Code: CodeUnsupportedOwner, Message: fmt.Sprintf(
+		return "", false, &Refusal{Code: CodeUnsupportedOwner, Message: fmt.Sprintf(
 			"As portas 80/443 estão com %s, mas a unit %s.service não existe: pare esse processo manualmente.", st.Process, unit)}
 	}
 	active, err := e.Systemd.Active(ctx, unit)
 	if err != nil || !active {
-		return "", &Refusal{Code: CodeUnsupportedOwner, Message: fmt.Sprintf(
+		return "", false, &Refusal{Code: CodeUnsupportedOwner, Message: fmt.Sprintf(
 			"As portas 80/443 estão com %s, mas a unit %s.service não está ativa (o processo não roda pelo systemd): pare esse processo manualmente.",
 			st.Process, unit)}
 	}
-	return unit, nil
+	return unit, true, nil
 }
 
-// takeover são os passos 2–5 do §4.2, com o Caddy em ensaio e o unit ativo.
-func (e *Engine) takeover(ctx context.Context, j *job, unit string, sites []proxy.Site) Result {
+// trialUnit lê a unit lembrada do ensaio (proxy.trial_unit); "" se não houver,
+// não for suportada ou o arquivo dela não existir.
+func (e *Engine) trialUnit(ctx context.Context) string {
+	unit, ok, err := e.DB.GetSetting(ctx, proxy.SettingTrialUnit)
+	if err != nil || !ok {
+		return ""
+	}
+	if _, valid := supportedUnits[unit]; !valid || !e.Systemd.Exists(ctx, unit) {
+		return ""
+	}
+	return unit
+}
+
+// takeover são os passos 2–5 do §4.2, com o Caddy em ensaio. unit "" (portas
+// livres, sem unit lembrada): sem stop, disable nem registro. stop=false: a
+// unit já está parada.
+func (e *Engine) takeover(ctx context.Context, j *job, unit string, stop bool, sites []proxy.Site) Result {
 	cf := e.Domains.CFRanges()
 
 	j.step(StepTrialCheck, StatusRunning, "ensaio de todos os domínios em "+TrialAddr)
@@ -747,12 +808,16 @@ func (e *Engine) takeover(ctx context.Context, j *job, unit string, sites []prox
 	}
 	j.step(StepTrialCheck, StatusOK, fmt.Sprintf("%d domínio(s) ok no ensaio", len(sites)))
 
-	j.step(StepStop, StatusRunning, "parando o "+unit)
-	if err := e.Systemd.Stop(ctx, unit); err != nil {
-		j.step(StepStop, StatusFailed, err.Error())
-		return e.revert(ctx, j, unit, sites, cf, "parar o "+unit+": "+err.Error())
+	if stop {
+		j.step(StepStop, StatusRunning, "parando o "+unit)
+		if err := e.Systemd.Stop(ctx, unit); err != nil {
+			j.step(StepStop, StatusFailed, err.Error())
+			return e.revert(ctx, j, unit, sites, cf, "parar o "+unit+": "+err.Error())
+		}
+		j.step(StepStop, StatusOK, unit+" parado")
+	} else {
+		j.step(StepStop, StatusOK, "portas 80/443 já livres; nada a parar")
 	}
-	j.step(StepStop, StatusOK, unit+" parado")
 
 	j.step(StepBind, StatusRunning, "Caddy assumindo as portas 80/443")
 	if err := e.bindNormal(ctx, sites, cf); err != nil {
@@ -767,6 +832,10 @@ func (e *Engine) takeover(ctx context.Context, j *job, unit string, sites []prox
 		return e.revert(ctx, j, unit, sites, cf, "a verificação falhou: "+err.Error())
 	}
 	j.step(StepVerify, StatusOK, fmt.Sprintf("%d domínio(s) ok", len(sites)))
+
+	if unit == "" {
+		return Result{Outcome: OutcomeOK, Message: "O Caddy assumiu as portas 80/443 (estavam livres; não há servidor anterior para Voltar)."}
+	}
 
 	var warns []string
 	j.step(StepDisable, StatusRunning, "desativando o "+unit+" no boot")
@@ -786,6 +855,9 @@ func (e *Engine) takeover(ctx context.Context, j *job, unit string, sites []prox
 	}
 
 	msg := "O Caddy assumiu as portas 80/443; o " + unit + " foi parado."
+	if !stop {
+		msg = "O Caddy assumiu as portas 80/443 (estavam livres); o " + unit + " fica desativado no boot."
+	}
 	if len(warns) > 0 {
 		msg += " Aviso: " + strings.Join(warns, "; ") + "."
 	}
@@ -879,6 +951,16 @@ func (e *Engine) revert(ctx context.Context, j *job, unit string, sites []proxy.
 		j.step(StepRevertTrial, StatusFailed, terr.Error())
 	} else {
 		j.step(StepRevertTrial, StatusOK, "Caddy em modo ensaio")
+	}
+
+	if unit == "" {
+		// Portas livres e nenhuma unit conhecida: não há servidor para religar.
+		if terr != nil {
+			return Result{Outcome: OutcomeFailed, Message: fmt.Sprintf(
+				"A troca falhou (%s) e o Caddy não voltou ao modo ensaio (%v); confira os domínios.", reason, terr)}
+		}
+		return Result{Outcome: OutcomeRolledBack, Message: fmt.Sprintf(
+			"voltou para o modo ensaio: %s. As portas 80/443 seguem livres (sem servidor anterior para religar).", reason)}
 	}
 
 	j.step(StepRevertStart, StatusRunning, "iniciando o "+unit)

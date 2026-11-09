@@ -50,11 +50,41 @@ type Caddy struct {
 	EnsureWWW func() error
 	// Descends diz se pid descende de ancestor (padrão: cadeia de PPID em /proc).
 	Descends func(pid, ancestor int) bool
+	// Settings guarda o modo (SettingMode) e a unit do dono das portas
+	// (SettingTrialUnit) entre subidas. nil = só em memória.
+	Settings Settings
+	// UnitFor mapeia o dono das portas ("nginx (pid N)") para a unit do
+	// systemd gravada em SettingTrialUnit; nil = não grava unit.
+	UnitFor func(process string) (string, bool)
 
 	mu         sync.Mutex
 	last       Status
 	pendingKey string // estado em que a recriação pendente já foi logada
+
+	modeMu     sync.Mutex
+	mode       Listen // modo gravado ("" = ainda não decidido)
+	modeLoaded bool
+	trialUnit  string
 }
+
+// Settings é o pedaço do banco de configurações que o Caddy usa.
+type Settings interface {
+	GetSetting(ctx context.Context, key string) (string, bool, error)
+	SetSetting(ctx context.Context, key, value string) error
+}
+
+// Configurações gravadas pelo proxy.
+const (
+	// SettingMode é o modo do proxy: "normal" ou "trial". Só Switch (a troca)
+	// tira o proxy do ensaio; Ensure nunca sai do ensaio sozinho.
+	SettingMode = "proxy.mode"
+	// SettingTrialUnit é a unit do systemd que segurava 80/443 no ensaio
+	// (ex.: "nginx").
+	SettingTrialUnit = "proxy.trial_unit"
+)
+
+// PortsFreeMessage é a mensagem do ensaio com as portas 80/443 livres.
+const PortsFreeMessage = "As portas 80/443 estão livres. Use Assumir as portas para o Caddy atendê-las."
 
 var _ Proxy = (*Caddy)(nil)
 
@@ -75,20 +105,22 @@ func NewCaddy(d docker.Client, admin *AdminClient) *Caddy {
 // segura 80/443: o Caddy só escuta o que a config carregada manda, então com
 // config vazia ou de ensaio ele não ocupa essas portas. Portas alheias dão o
 // estado trial (Mode=trial, Process preenchido); livres, ou do próprio Caddy,
-// dão active (Mode=normal). Só usa um korego-caddy com o label
-// korego.managed=true.
+// dão active (Mode=normal), exceto com o modo gravado em ensaio (applyMode):
+// aí segue trial, sem Process, até a troca. Só usa um korego-caddy com o
+// label korego.managed=true.
 func (c *Caddy) Ensure(ctx context.Context) Status {
-	st := c.ensure(ctx)
+	st, v := c.ensure(ctx)
+	st = c.applyMode(ctx, st, v)
 	c.mu.Lock()
 	c.last = st
 	c.mu.Unlock()
 	return st
 }
 
-func (c *Caddy) ensure(ctx context.Context) Status {
+func (c *Caddy) ensure(ctx context.Context) (Status, verdict) {
 	list, err := c.docker.List(ctx)
 	if err != nil {
-		return failure("listar containers", err)
+		return failure("listar containers", err), unknown
 	}
 	for _, ct := range list {
 		if ct.Name != ContainerName {
@@ -96,7 +128,7 @@ func (c *Caddy) ensure(ctx context.Context) Status {
 		}
 		if !ct.Managed {
 			// Mesmo nome, mas não é nosso: não usa, não inicia, não para.
-			return Status{State: StateError, Message: "Já existe um container korego-caddy que não foi criado pelo KoreGO."}
+			return Status{State: StateError, Message: "Já existe um container korego-caddy que não foi criado pelo KoreGO."}, unknown
 		}
 		running := ct.State == "running" || ct.State == "restarting"
 		if specVersion(ct.Labels) >= CaddySpec {
@@ -108,17 +140,17 @@ func (c *Caddy) ensure(ctx context.Context) Status {
 		if running {
 			if st, v := c.probe(ctx, ct); v != notServing {
 				c.notePending(string(st.State))
-				return st
+				return st, v
 			}
 		}
 		c.notePending("")
 		// /var/www precisa existir antes de derrubar o container antigo.
 		if err := c.ensureWWW(); err != nil {
-			return failure("criar "+wwwDir, err)
+			return failure("criar "+wwwDir, err), unknown
 		}
 		_ = c.docker.Stop(ctx, ct.ID) // pode já estar parado
 		if err := c.docker.RemoveForce(ctx, ct.ID); err != nil {
-			return failure("remover "+ContainerName, err)
+			return failure("remover "+ContainerName, err), unknown
 		}
 		return c.create(ctx, false)
 	}
@@ -145,23 +177,22 @@ func (c *Caddy) notePending(key string) {
 }
 
 // use usa o container existente, iniciando-o se estiver parado.
-func (c *Caddy) use(ctx context.Context, ct docker.Container, running bool) Status {
+func (c *Caddy) use(ctx context.Context, ct docker.Container, running bool) (Status, verdict) {
 	if !running {
 		if err := c.docker.Start(ctx, ct.ID); err != nil {
-			return failure("iniciar "+ContainerName, err)
+			return failure("iniciar "+ContainerName, err), unknown
 		}
 	}
-	st, _ := c.probe(ctx, ct)
-	return st
+	return c.probe(ctx, ct)
 }
 
-func (c *Caddy) create(ctx context.Context, ensureWWW bool) Status {
+func (c *Caddy) create(ctx context.Context, ensureWWW bool) (Status, verdict) {
 	if err := c.ensureImage(ctx); err != nil {
-		return failure("baixar "+CaddyImage, err)
+		return failure("baixar "+CaddyImage, err), unknown
 	}
 	if ensureWWW {
 		if err := c.ensureWWW(); err != nil {
-			return failure("criar "+wwwDir, err)
+			return failure("criar "+wwwDir, err), unknown
 		}
 	}
 	_, err := c.docker.Run(ctx, docker.RunSpec{
@@ -182,18 +213,113 @@ func (c *Caddy) create(ctx context.Context, ensureWWW bool) Status {
 	})
 	// ErrConflict: outro Ensure criou o container ao mesmo tempo.
 	if err != nil && !errors.Is(err, docker.ErrConflict) {
-		return failure("criar "+ContainerName, err)
+		return failure("criar "+ContainerName, err), unknown
 	}
 	if list, lerr := c.docker.List(ctx); lerr == nil {
 		for _, ct := range list {
 			if ct.Name == ContainerName && ct.Managed {
-				st, _ := c.probe(ctx, ct)
-				return st
+				return c.probe(ctx, ct)
 			}
 		}
 	}
-	st, _ := c.probe(ctx, docker.Container{})
+	return c.probe(ctx, docker.Container{})
+}
+
+// applyMode aplica o modo gravado ao resultado de probe:
+//   - Caddy servindo 80/443 (config em :443, portas nossas): grava normal
+//     (instalação antiga que já servia, ou Switch cuja gravação falhou);
+//   - modo gravado trial e probe "active" sem servir (portas livres): segue
+//     em ensaio, com PortsFreeMessage; só a troca (Switch) sai do ensaio;
+//   - nada gravado: portas alheias gravam trial, portas livres gravam normal
+//     (instalação nova);
+//   - em ensaio por portas alheias, a unit do dono é lembrada.
+//
+// Estados sem resposta clara (starting, error, ...) passam direto.
+func (c *Caddy) applyMode(ctx context.Context, st Status, v verdict) Status {
+	if st.State != StateActive && st.State != StateTrial {
+		return st
+	}
+	c.modeMu.Lock()
+	defer c.modeMu.Unlock()
+	if !c.loadModeLocked(ctx) {
+		// Sem saber o modo gravado, nunca sai do ensaio: livre e sem servir
+		// vira ensaio até a leitura voltar.
+		if st.State == StateActive && v != serving {
+			return Status{State: StateTrial, Mode: ListenTrial, Message: PortsFreeMessage}
+		}
+		return st
+	}
+	switch {
+	case v == serving:
+		c.saveModeLocked(ctx, ListenNormal)
+	case st.State == StateTrial:
+		if c.mode == "" {
+			c.saveModeLocked(ctx, ListenTrial)
+		}
+		if c.mode == ListenTrial {
+			c.rememberUnitLocked(ctx, st.Process)
+		}
+	case c.mode == ListenTrial:
+		// Portas livres (nginx parado, reload, ordem do boot): segue em ensaio.
+		return Status{State: StateTrial, Mode: ListenTrial, Message: PortsFreeMessage}
+	case c.mode == "":
+		c.saveModeLocked(ctx, ListenNormal)
+	}
 	return st
+}
+
+// loadModeLocked lê o modo gravado uma vez (modeMu preso); false se a
+// leitura falhou.
+func (c *Caddy) loadModeLocked(ctx context.Context) bool {
+	if c.modeLoaded || c.Settings == nil {
+		return true
+	}
+	v, ok, err := c.Settings.GetSetting(ctx, SettingMode)
+	if err != nil {
+		log.Printf("proxy: ler %s: %v", SettingMode, err)
+		return false
+	}
+	if ok && (v == string(ListenNormal) || v == string(ListenTrial)) {
+		c.mode = Listen(v)
+	}
+	if u, ok, err := c.Settings.GetSetting(ctx, SettingTrialUnit); err == nil && ok {
+		c.trialUnit = u
+	}
+	c.modeLoaded = true
+	return true
+}
+
+// saveModeLocked grava o modo (modeMu preso). Falha na gravação fica no log;
+// o modo em memória vale até o próximo reinício.
+func (c *Caddy) saveModeLocked(ctx context.Context, m Listen) {
+	if c.mode == m {
+		return
+	}
+	c.mode = m
+	if c.Settings == nil {
+		return
+	}
+	if err := c.Settings.SetSetting(ctx, SettingMode, string(m)); err != nil {
+		log.Printf("proxy: gravar %s=%s: %v", SettingMode, m, err)
+	}
+}
+
+// rememberUnitLocked grava a unit do dono das portas (modeMu preso).
+func (c *Caddy) rememberUnitLocked(ctx context.Context, process string) {
+	if c.UnitFor == nil || process == "" {
+		return
+	}
+	unit, ok := c.UnitFor(process)
+	if !ok || unit == c.trialUnit {
+		return
+	}
+	if c.Settings != nil {
+		if err := c.Settings.SetSetting(ctx, SettingTrialUnit, unit); err != nil {
+			log.Printf("proxy: gravar %s=%s: %v", SettingTrialUnit, unit, err)
+			return
+		}
+	}
+	c.trialUnit = unit
 }
 
 // specVersion lê o label da versão do spec; ausente ou inválido = 0.
@@ -391,6 +517,10 @@ func (c *Caddy) Switch(ctx context.Context, sites []Site, mode Listen, cf []stri
 	if err := c.admin.Load(ctx, cfg); err != nil {
 		return err
 	}
+	c.modeMu.Lock()
+	c.loadModeLocked(ctx)
+	c.saveModeLocked(ctx, mode)
+	c.modeMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if mode == ListenTrial {

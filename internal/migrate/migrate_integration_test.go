@@ -3,7 +3,7 @@
 package migrate
 
 // Integração da troca nginx → Caddy com processos reais: o korego-caddy do
-// pacote proxy e um nginx:alpine (container korego-it-nginx) em rede host
+// pacote proxy e um nginx:1-alpine (container korego-it-nginx) em rede host
 // segurando 80/443. O ServiceManager do teste mapeia a unit "nginx" para
 // docker stop/start desse container.
 //
@@ -49,7 +49,7 @@ import (
 
 const (
 	itNginx      = "korego-it-nginx"
-	itNginxImage = "nginx:alpine"
+	itNginxImage = "nginx:1-alpine"
 	itNginxBody  = "nginx-it"
 	itWWW        = "/var/www/korego-it"
 	itProxyHost  = "site-it.korego.localhost"
@@ -124,8 +124,10 @@ func leafFingerprint(t *testing.T, addr, host string) string {
 func httpsGet(t *testing.T, addr, host, path string) (int, http.Header, string) {
 	t.Helper()
 	tr := &http.Transport{
-		TLSClientConfig:   &tls.Config{ServerName: host, InsecureSkipVerify: true}, //nolint:gosec // teste
-		DialContext:       func(ctx context.Context, network, _ string) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, network, addr) },
+		TLSClientConfig: &tls.Config{ServerName: host, InsecureSkipVerify: true}, //nolint:gosec // teste
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		},
 		DisableKeepAlives: true,
 	}
 	defer tr.CloseIdleConnections()
@@ -387,6 +389,9 @@ func TestTakeoverRollback_Integration(t *testing.T) {
 
 	// 1. Com o nginx em 80/443, Ensure dá trial (o nginx é alheio pelo PID).
 	c := proxy.NewCaddy(d, &proxy.AdminClient{BaseURL: proxy.DefaultAdminURL})
+	db := store.OpenMemory(t)
+	c.Settings = db // modo gravado, como na produção
+	c.UnitFor = UnitForProcess
 	var st proxy.Status
 	waitFor(t, "o Caddy ficar em trial", 3*time.Minute, func() bool { // inclui o pull da imagem
 		st = c.Ensure(ctx)
@@ -395,6 +400,12 @@ func TestTakeoverRollback_Integration(t *testing.T) {
 	})
 	require.Equal(t, proxy.ListenTrial, st.Mode)
 	require.True(t, strings.HasPrefix(st.Process, "nginx (pid "), "processo: %q", st.Process)
+	mode, _, err := db.GetSetting(ctx, proxy.SettingMode)
+	require.NoError(t, err)
+	require.Equal(t, "trial", mode, "ensaio gravado")
+	unitSaved, _, err := db.GetSetting(ctx, proxy.SettingTrialUnit)
+	require.NoError(t, err)
+	require.Equal(t, "nginx", unitSaved)
 
 	// 2. Sites aplicados em ensaio; o nginx continua em 80.
 	require.NoError(t, c.Apply(ctx, sites, proxy.ListenTrial, nil))
@@ -414,7 +425,7 @@ func TestTakeoverRollback_Integration(t *testing.T) {
 
 	sd := &containerUnit{enabled: true}
 	dom := &fakeDomains{sites: sites, status: st}
-	e := &Engine{Domains: dom, Proxy: c, Systemd: sd, DB: store.OpenMemory(t)}
+	e := &Engine{Domains: dom, Proxy: c, Systemd: sd, DB: db}
 	require.NoError(t, e.PrecheckTakeover(ctx))
 
 	// 4a. Falha de bind (Review Focus #2): o nginx para, mas outro processo
@@ -488,6 +499,9 @@ func TestTakeoverRollback_Integration(t *testing.T) {
 	st = c.Ensure(ctx)
 	assert.Equal(t, proxy.StateActive, st.State, "Ensure depois da troca: %+v", st)
 	assert.Equal(t, proxy.ListenNormal, st.Mode)
+	mode, _, err = db.GetSetting(ctx, proxy.SettingMode)
+	require.NoError(t, err)
+	assert.Equal(t, "normal", mode, "a troca grava o modo normal")
 	owner, busy = proxy.PortOwner(443)
 	require.True(t, busy)
 	assert.False(t, strings.HasPrefix(owner, "nginx "), "a 443 é do Caddy agora: %q", owner)
