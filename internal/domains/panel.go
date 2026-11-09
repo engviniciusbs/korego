@@ -77,7 +77,7 @@ func (s *Service) Panel(ctx context.Context) (PanelSettings, error) {
 	}
 	if ok {
 		p.Domain, p.DomainID = d.Hostname, d.ID
-		p.Cert = s.Proxy.Cert(ctx, d.Hostname)
+		p.Cert = s.domainCert(ctx, d)
 	}
 	if p.PublicPort, err = PublicPort(ctx, s.DB); err != nil {
 		return p, err
@@ -223,7 +223,7 @@ func (s *Service) SetPublicPort(ctx context.Context, enabled bool, viaPanelHTTPS
 		if err != nil {
 			return err
 		}
-		if !ok || !viaPanelHTTPS || s.Proxy.Cert(ctx, d.Hostname).State != proxy.CertActive {
+		if !ok || !viaPanelHTTPS || s.domainCert(ctx, d).State != proxy.CertActive {
 			return ErrPanelNotHTTPS
 		}
 	}

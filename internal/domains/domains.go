@@ -497,7 +497,7 @@ func (s *Service) List(ctx context.Context) ([]DomainView, error) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			out[i].Cert = s.Proxy.Cert(ctx, d.Hostname)
+			out[i].Cert = s.servedCert(ctx, d, certsByID)
 		}()
 	}
 	wg.Wait()
@@ -522,8 +522,31 @@ func (s *Service) View(ctx context.Context, d store.Domain) (DomainView, error) 
 		}
 	}
 	v := s.viewOf(d, apps, certsByID)
-	v.Cert = s.Proxy.Cert(ctx, d.Hostname)
+	v.Cert = s.servedCert(ctx, d, certsByID)
 	return v, nil
+}
+
+// servedCert consulta o certificado servido para o domínio. Com certificado
+// próprio, compara com o fingerprint guardado em vez de usar as raízes do
+// sistema (o de origem da Cloudflare só é confiável para a Cloudflare).
+func (s *Service) servedCert(ctx context.Context, d store.Domain, certsByID map[int64]store.Certificate) proxy.CertInfo {
+	if d.TLSMode == proxy.TLSCustom && d.CertID != nil {
+		if c, ok := certsByID[*d.CertID]; ok && c.Fingerprint != "" {
+			return s.Proxy.CertPinned(ctx, d.Hostname, c.Fingerprint)
+		}
+	}
+	return s.Proxy.Cert(ctx, d.Hostname)
+}
+
+// domainCert é o servedCert de um domínio só (busca o certificado guardado).
+func (s *Service) domainCert(ctx context.Context, d store.Domain) proxy.CertInfo {
+	certsByID := map[int64]store.Certificate{}
+	if d.TLSMode == proxy.TLSCustom && d.CertID != nil {
+		if c, err := s.DB.CertificateByID(ctx, *d.CertID); err == nil {
+			certsByID[c.ID] = c
+		}
+	}
+	return s.servedCert(ctx, d, certsByID)
 }
 
 // viewOf monta a DomainView, sem o estado do certificado servido.

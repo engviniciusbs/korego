@@ -139,6 +139,9 @@ type Proxy interface {
 	MarkTrial(ctx context.Context, unit string) error
 	// Cert consulta o certificado servido em :443 para host.
 	Cert(ctx context.Context, host string) CertInfo
+	// CertPinned consulta o certificado servido para host e o compara com o
+	// fingerprint de um certificado próprio (sem usar as raízes do sistema).
+	CertPinned(ctx context.Context, host, fingerprint string) CertInfo
 }
 
 // ErrInactive indica que o proxy não está ativo.
