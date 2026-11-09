@@ -190,3 +190,15 @@ export function validStaticRoot(root: string): boolean {
 export function validHeaderName(n: string): boolean {
   return headerNameRe.test(n);
 }
+
+const CODE_RE = /^(\d{6}|[a-z0-9]{5}-?[a-z0-9]{5})$/i;
+
+/** Código 2FA: 6 dígitos do autenticador ou de recuperação (xxxxx-xxxxx). Espera o código já sem espaços. */
+export function validAuthCode(code: string): boolean {
+  return CODE_RE.test(code);
+}
+
+/** Remove espaços de um código digitado ("123 456" → "123456"). */
+export function cleanAuthCode(code: string): string {
+  return code.trim().replace(/\s/g, "");
+}

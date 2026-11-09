@@ -5,12 +5,12 @@ import { useState } from "react";
 import { CertStatus } from "@/components/domains/cert-status";
 import { CertificatesPanel, formatCertDate } from "@/components/domains/certificates-panel";
 import { DomainDialog, WWW_OPTIONS } from "@/components/domains/domain-dialog";
-import { ProxyBanner } from "@/components/domains/proxy-banner";
+import { MIGRATING_TITLE, ProxyBanner } from "@/components/domains/proxy-banner";
 import { PageHeader, PanelState } from "@/components/shell/page-header";
 import { Alert, Badge, Button, Dialog, Panel, Spinner } from "@/components/ui";
 import { focusRing } from "@/components/ui/focus";
 import { cn } from "@/lib/cn";
-import { domainRoutes, useDeleteDomain, useDomains, type Domain } from "@/lib/domains";
+import { domainRoutes, useDeleteDomain, useDomains, useMigrating, type Domain } from "@/lib/domains";
 
 const th = "px-3 py-2 text-left font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-fg-subtle";
 const td = "px-3 py-2.5 align-middle";
@@ -96,7 +96,18 @@ function Options({ d }: { d: Domain }) {
   );
 }
 
-function Row({ d, onEdit, onRemove }: { d: Domain; onEdit: () => void; onRemove: () => void }) {
+function Row({
+  d,
+  locked,
+  onEdit,
+  onRemove,
+}: {
+  d: Domain;
+  /** Troca de servidor em andamento: editar e remover ficam bloqueados. */
+  locked: boolean;
+  onEdit: () => void;
+  onRemove: () => void;
+}) {
   return (
     <tr className="border-t border-line motion-safe:transition-colors hover:bg-surface-2/60">
       <td className={cn(td, "min-w-48")}>
@@ -133,7 +144,7 @@ function Row({ d, onEdit, onRemove }: { d: Domain; onEdit: () => void; onRemove:
       <td className={cn(td, "text-right")}>
         {d.isPanel ? (
           <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1.5">
-            <Button size="sm" onClick={onEdit}>
+            <Button size="sm" disabled={locked} onClick={onEdit}>
               Editar<span className="sr-only"> {d.hostname}</span>
             </Button>
             <Link href="/configuracoes/painel/" className={cn("whitespace-nowrap text-xs", link)}>
@@ -142,13 +153,14 @@ function Row({ d, onEdit, onRemove }: { d: Domain; onEdit: () => void; onRemove:
           </div>
         ) : (
           <div className="flex items-center justify-end gap-1.5">
-            <Button size="sm" onClick={onEdit}>
+            <Button size="sm" disabled={locked} onClick={onEdit}>
               Editar<span className="sr-only"> {d.hostname}</span>
             </Button>
             <Button
               size="sm"
               variant="ghost"
               className="enabled:hover:bg-danger-bg enabled:hover:text-danger"
+              disabled={locked}
               onClick={onRemove}
             >
               Remover<span className="sr-only"> {d.hostname}</span>
@@ -165,6 +177,7 @@ type Editing = { mode: "new" } | { mode: "edit"; domain: Domain } | null;
 export default function DominiosPage() {
   const domains = useDomains();
   const remove = useDeleteDomain();
+  const migrating = useMigrating();
   const [editing, setEditing] = useState<Editing>(null);
   const [removing, setRemoving] = useState<Domain | null>(null);
 
@@ -185,14 +198,21 @@ export default function DominiosPage() {
         title="Domínios"
         description="Domínios servidos pelo proxy do KoreGO, com HTTPS automático."
         actions={
-          <Button variant="primary" onClick={() => setEditing({ mode: "new" })}>
-            Adicionar domínio
-          </Button>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            {migrating && (
+              <span role="status" className="text-xs text-fg-subtle">
+                {MIGRATING_TITLE}
+              </span>
+            )}
+            <Button variant="primary" disabled={migrating} onClick={() => setEditing({ mode: "new" })}>
+              Adicionar domínio
+            </Button>
+          </div>
         }
       />
 
       <div className="space-y-4">
-        <ProxyBanner />
+        <ProxyBanner detailed />
 
         <Panel
           title="Domínios"
@@ -238,6 +258,7 @@ export default function DominiosPage() {
                     <Row
                       key={d.id}
                       d={d}
+                      locked={migrating}
                       onEdit={() => setEditing({ mode: "edit", domain: d })}
                       onRemove={() => {
                         remove.reset();

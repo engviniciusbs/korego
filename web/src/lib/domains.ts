@@ -7,12 +7,92 @@ import { getLiveSocket } from "./ws";
 
 export type ProxyState = "active" | "starting" | "blocked" | "trial" | "docker_unavailable" | "error";
 
-/** GET /api/proxy; o tópico `proxy` publica o Status sem `guideUrl`. */
+export type MigrationOutcome = "ok" | "rolled_back" | "failed";
+
+/** Último resultado de assumir/voltar (proxy.last_migration). */
+export interface LastMigration {
+  op: "takeover" | "rollback";
+  outcome: MigrationOutcome;
+  message: string;
+  at: string;
+}
+
+/**
+ * GET /api/proxy. O tópico `proxy` publica só o Status do Caddy (state, mode,
+ * process, message); os campos de migração vêm apenas do GET.
+ */
 export interface ProxyStatus {
   state: ProxyState;
+  /** normal | trial, quando o proxy roda. */
+  mode?: "normal" | "trial";
   process?: string;
   message?: string;
   guideUrl: string;
+  /** Servidor anterior ("nginx", "apache2") depois de assumir as portas. */
+  migratedFrom?: string | null;
+  migratedAt?: string | null;
+  lastMigration?: LastMigration | null;
+  /** Troca de servidor em andamento: edição de domínios bloqueada. */
+  migrating?: boolean;
+  rollbackAvailable?: boolean;
+}
+
+/** Nome do servidor que ocupa as portas: "nginx (pid 1402)" → "nginx". */
+export function processUnit(process?: string): string {
+  const name = (process ?? "").trim().split(/\s+/)[0];
+  return name || "servidor atual";
+}
+
+/** Resultado do ensaio de um caminho (GET /api/proxy/trial-check). */
+export interface TrialPathCheck {
+  path: string;
+  static: boolean;
+  ok: boolean;
+  status?: number;
+  index: boolean;
+  error?: string;
+}
+
+/** Ensaio de um domínio em 127.0.0.1:18443. */
+export interface TrialSiteCheck {
+  host: string;
+  /** Certificado automático (Let's Encrypt). */
+  auto: boolean;
+  ok: boolean;
+  /** Automático ainda sem certificado: emitido depois de assumir. */
+  pending: boolean;
+  tlsOk: boolean;
+  leafOk: boolean;
+  paths: TrialPathCheck[] | null;
+  leaf: { names: string[] | null; notAfter?: string; issuer?: string };
+  message?: string;
+}
+
+export type TrialResult = "ok" | "pending" | "failed";
+
+export function trialResult(s: TrialSiteCheck): TrialResult {
+  if (s.ok) return "ok";
+  return s.pending ? "pending" : "failed";
+}
+
+/** Motivo da falha de um domínio no ensaio. */
+export function trialFailure(s: TrialSiteCheck): string {
+  if (s.message) return s.message;
+  const p = (s.paths ?? []).find((x) => !x.ok);
+  if (p) return `${p.path}: ${p.error || (p.status ? `resposta ${p.status}` : "sem resposta")}`;
+  return s.tlsOk ? "falhou" : "falha no TLS";
+}
+
+export const TOPIC_MIGRATION = "proxy-migration";
+
+/** Evento do tópico `proxy-migration`; o último tem `done` e `result`. */
+export interface MigrationEvent {
+  op?: "takeover" | "rollback";
+  step?: string;
+  status?: "running" | "ok" | "failed";
+  message: string;
+  done?: boolean;
+  result?: MigrationOutcome;
 }
 
 export type CertState = "pending" | "active" | "error";
@@ -161,26 +241,75 @@ export interface SaveDomainResult {
   dns: DnsCheck;
 }
 
-/** Consulta o estado do proxy e aplica os eventos do tópico `proxy` direto nos dados. */
+/** Intervalo da releitura de /api/proxy durante uma troca (se o WS cair). */
+export const MIGRATING_POLL_MS = 5000;
+
+/**
+ * Consulta o estado do proxy e aplica os eventos do tópico `proxy` direto nos
+ * dados (mantendo os campos de migração). O fim de uma troca (`proxy-migration`
+ * com `done`) relê tudo; durante a troca, relê a cada 5 s.
+ */
 export function useProxyStatus() {
   const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["proxy"],
     queryFn: () => api<ProxyStatus>("/api/proxy"),
+    refetchInterval: (query) => (query.state.data?.migrating ? MIGRATING_POLL_MS : false),
   });
   useEffect(() => {
-    return getLiveSocket().subscribe("proxy", (d) => {
+    const live = getLiveSocket();
+    const offProxy = live.subscribe("proxy", (d) => {
       const s = d as Partial<ProxyStatus> | null;
       if (!s || !s.state) return;
       qc.setQueryData<ProxyStatus>(["proxy"], (old) => ({
+        ...old,
         guideUrl: old?.guideUrl ?? "",
         state: s.state!,
+        mode: s.mode,
         process: s.process,
         message: s.message,
       }));
     });
+    const offMigration = live.subscribe(TOPIC_MIGRATION, (d) => {
+      const e = d as MigrationEvent | null;
+      if (!e?.done) return;
+      void qc.invalidateQueries({ queryKey: ["proxy"] });
+      void qc.invalidateQueries({ queryKey: ["domains"] });
+    });
+    return () => {
+      offProxy();
+      offMigration();
+    };
   }, [qc]);
   return q;
+}
+
+/** Edição de domínios bloqueada durante a troca de servidor. */
+export function useMigrating(): boolean {
+  return Boolean(useProxyStatus().data?.migrating);
+}
+
+/** GET /api/proxy/trial-check; o servidor guarda o resultado por até 10 s. */
+export function useTrialCheck(enabled: boolean) {
+  return useQuery({
+    queryKey: ["proxy", "trial-check"],
+    queryFn: () => api<{ sites: TrialSiteCheck[] | null }>("/api/proxy/trial-check").then((r) => r.sites ?? []),
+    enabled,
+    staleTime: 10_000,
+  });
+}
+
+/** POST /api/proxy/takeover ou /rollback com o código 2FA → 202. */
+export function useStartMigration(op: "takeover" | "rollback") {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (code: string) =>
+      api<{ status: string; topic: string }>(`/api/proxy/${op}`, { method: "POST", body: { code } }),
+    onSuccess: () => {
+      qc.setQueryData<ProxyStatus>(["proxy"], (old) => (old ? { ...old, migrating: true } : old));
+      void qc.invalidateQueries({ queryKey: ["proxy"], exact: true });
+    },
+  });
 }
 
 export function useRetryProxy() {
