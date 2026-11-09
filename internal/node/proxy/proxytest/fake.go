@@ -26,6 +26,7 @@ type Fake struct {
 	cf       []string
 	applies  int
 	switches int
+	marks    []string
 }
 
 var _ proxy.Proxy = (*Fake)(nil)
@@ -120,4 +121,19 @@ func (f *Fake) Applies() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.applies
+}
+
+// MarkTrial registra a unit (veja Marks).
+func (f *Fake) MarkTrial(_ context.Context, unit string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.marks = append(f.marks, unit)
+	return nil
+}
+
+// Marks devolve as units passadas a MarkTrial, em ordem.
+func (f *Fake) Marks() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.marks...)
 }

@@ -47,6 +47,8 @@ type fakeSystemd struct {
 	// PanicExists: Exists entra em pânico.
 	PanicExists bool
 	existsCalls int
+	// onChange roda depois que Stop/Start mudam o estado (com o lock do fake: não chame o fake).
+	onChange func(unit string, active bool)
 }
 
 func newFakeSystemd(c *calls) *fakeSystemd {
@@ -65,6 +67,9 @@ func (f *fakeSystemd) Stop(_ context.Context, unit string) error {
 		return f.StopErr
 	}
 	f.active[unit] = false
+	if f.onChange != nil {
+		defer f.onChange(unit, false)
+	}
 	return nil
 }
 
@@ -77,6 +82,9 @@ func (f *fakeSystemd) Start(_ context.Context, unit string) error {
 	}
 	if !f.StartNoop {
 		f.active[unit] = true
+		if f.onChange != nil {
+			defer f.onChange(unit, true)
+		}
 	}
 	return nil
 }

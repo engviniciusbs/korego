@@ -134,6 +134,9 @@ type Proxy interface {
 	// Switch carrega a config no modo pedido ignorando os guardas de Apply e
 	// alinha o último estado ao modo. Uso exclusivo do motor de migração.
 	Switch(ctx context.Context, sites []Site, mode Listen, cf []string) error
+	// MarkTrial grava o modo ensaio (e a unit do servidor anterior) sem
+	// carregar config. Uso exclusivo do motor de migração.
+	MarkTrial(ctx context.Context, unit string) error
 	// Cert consulta o certificado servido em :443 para host.
 	Cert(ctx context.Context, host string) CertInfo
 }

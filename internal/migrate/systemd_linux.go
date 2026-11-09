@@ -87,3 +87,30 @@ func (s Systemd) Exists(ctx context.Context, unit string) bool {
 
 // UnitForProcess usa o mapa do pacote.
 func (Systemd) UnitForProcess(process string) (string, bool) { return UnitForProcess(process) }
+
+// Enabled roda systemctl is-enabled: "enabled" e "enabled-runtime" são true;
+// os demais estados (disabled, masked, static...) saem com código diferente
+// de zero e são false sem erro.
+func (s Systemd) Enabled(ctx context.Context, unit string) (bool, error) {
+	out, err := s.run(ctx, "is-enabled", service(unit))
+	if err == nil {
+		return out == "enabled" || out == "enabled-runtime", nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return false, nil
+	}
+	return false, err
+}
+
+// EnabledUnit devolve a primeira unit suportada (nginx, depois apache2)
+// ativada no boot, ou "" (erro conta como não ativada). É o
+// proxy.Caddy.EnabledUnit da produção.
+func (s Systemd) EnabledUnit(ctx context.Context) string {
+	for _, unit := range []string{"nginx", "apache2"} {
+		if ok, err := s.Enabled(ctx, unit); err == nil && ok {
+			return unit
+		}
+	}
+	return ""
+}

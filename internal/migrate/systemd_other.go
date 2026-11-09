@@ -35,3 +35,9 @@ func (Systemd) Exists(context.Context, string) bool { return false }
 
 // UnitForProcess usa o mapa do pacote.
 func (Systemd) UnitForProcess(process string) (string, bool) { return UnitForProcess(process) }
+
+// Enabled falha fora do Linux.
+func (Systemd) Enabled(context.Context, string) (bool, error) { return false, errNoSystemd }
+
+// EnabledUnit é sempre "" fora do Linux.
+func (Systemd) EnabledUnit(context.Context) string { return "" }

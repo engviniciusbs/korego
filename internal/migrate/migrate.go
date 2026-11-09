@@ -572,6 +572,9 @@ func (e *Engine) settle(ctx context.Context, unit string, st proxy.Status) strin
 	case err != nil:
 		return fmt.Sprintf(" Estado do proxy: %s; não foi possível conferir o %s (%v).", st.State, unit, err)
 	case active:
+		// O servidor anterior está nas portas (ex.: o host reiniciou no meio da
+		// verificação e ele subiu no boot): o modo gravado volta a ensaio.
+		e.markTrial(ctx, unit)
 		return fmt.Sprintf(" O %s está ativo; estado do proxy: %s.", unit, st.State)
 	case st.State == proxy.StateActive && st.Mode == proxy.ListenNormal:
 		if rerr := e.record(ctx, unit); rerr != nil {
@@ -997,6 +1000,9 @@ func (e *Engine) revert(ctx context.Context, j *job, unit string, sites []proxy.
 	}
 
 	if serr == nil {
+		// A unit voltou: o modo gravado é ensaio mesmo se Switch(trial) falhou
+		// (Switch(normal) tinha gravado normal).
+		e.markTrial(ctx, unit)
 		if terr != nil {
 			// O unit só sobe com as portas livres: o Caddy não está nelas.
 			return Result{Outcome: OutcomeFailed, Message: fmt.Sprintf(
@@ -1143,6 +1149,7 @@ func (e *Engine) rollback(ctx context.Context, j *job, unit string) Result {
 	j.step(StepStart, StatusRunning, "iniciando o "+unit)
 	serr := e.startUnit(ctx, unit)
 	if serr == nil {
+		e.markTrial(ctx, unit)
 		j.step(StepStart, StatusOK, unit+" ativo")
 		j.step(StepClear, StatusRunning, "apagando o registro da migração")
 		if err := e.clear(ctx); err != nil {
@@ -1176,6 +1183,14 @@ func (e *Engine) rollback(ctx context.Context, j *job, unit string) Result {
 	}
 	return Result{Outcome: OutcomeFailed, Message: fmt.Sprintf(
 		"O %s não subiu (%v). O Caddy voltou a servir 80/443; nada mais mudou.", unit, serr)}
+}
+
+// markTrial grava o modo ensaio no proxy (com a unit), para o Caddy não
+// tomar as portas sozinho no próximo restart da unit. Falha vai para o log.
+func (e *Engine) markTrial(ctx context.Context, unit string) {
+	if err := e.Proxy.MarkTrial(ctx, unit); err != nil {
+		log.Printf("proxy: gravar o modo ensaio: %v", err)
+	}
 }
 
 func (e *Engine) clear(ctx context.Context) error {

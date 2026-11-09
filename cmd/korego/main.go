@@ -178,6 +178,9 @@ func runServe(args []string) error {
 	if c, ok := nd.Proxy().(*proxy.Caddy); ok {
 		c.Settings = db
 		c.UnitFor = migrate.UnitForProcess
+		// Sem modo gravado, um nginx/apache2 ativado no boot começa em ensaio
+		// mesmo que ainda não tenha subido.
+		c.EnabledUnit = migrate.Systemd{}.EnabledUnit
 	}
 
 	domSvc := &domains.Service{

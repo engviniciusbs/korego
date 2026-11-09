@@ -87,6 +87,9 @@ jobs:
       - run: google-chrome --version
       # Imagens do spec publicar (Caddy do proxy e app de teste) e do spec de containers.
       - run: docker pull caddy:2.11.9-alpine && docker pull nginx:1-alpine && docker pull busybox
+      # O runner traz nginx/apache2 instalados: ativados no boot, o KoreGO sem
+      # modo gravado começaria em ensaio (e o spec publicar espera 80/443).
+      - run: sudo systemctl disable --now nginx apache2 2>/dev/null || true
       - name: Teste ponta a ponta (fundacao, containers e publicar)
         working-directory: web
         run: pnpm test:e2e

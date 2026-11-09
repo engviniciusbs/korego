@@ -159,3 +159,37 @@ func TestEnsure_NoSettingsKeepsTrialInMemory(t *testing.T) {
 	c.PortOwner = freePorts
 	assert.Equal(t, StateTrial, c.Ensure(context.Background()).State)
 }
+
+func TestMarkTrial_StoresModeAndUnitAndStaysTrial(t *testing.T) {
+	set := newMemSettings(SettingMode, "normal")
+	c, _ := modeCaddy(t, set)
+	ctx := context.Background()
+	require.NoError(t, c.MarkTrial(ctx, "nginx"))
+	assert.Equal(t, "trial", set.get(SettingMode))
+	assert.Equal(t, "nginx", set.get(SettingTrialUnit))
+	c.PortOwner = freePorts // nginx reiniciando: o Caddy não toma as portas
+	st := c.Ensure(ctx)
+	assert.Equal(t, StateTrial, st.State)
+	assert.Equal(t, PortsFreeMessage, st.Message)
+}
+
+func TestEnsure_BootstrapWithEnabledUnitIsTrial(t *testing.T) {
+	set := newMemSettings()
+	c, _ := modeCaddy(t, set)
+	c.EnabledUnit = func(context.Context) string { return "nginx" }
+	c.PortOwner = freePorts // o nginx ainda não subiu no boot
+	st := c.Ensure(context.Background())
+	assert.Equal(t, StateTrial, st.State)
+	assert.Equal(t, ListenTrial, st.Mode)
+	assert.Equal(t, "trial", set.get(SettingMode))
+	assert.Equal(t, "nginx", set.get(SettingTrialUnit))
+}
+
+func TestEnsure_BootstrapWithoutUnitIsNormal(t *testing.T) {
+	set := newMemSettings()
+	c, _ := modeCaddy(t, set)
+	c.EnabledUnit = func(context.Context) string { return "" }
+	c.PortOwner = freePorts
+	assert.Equal(t, StateActive, c.Ensure(context.Background()).State)
+	assert.Equal(t, "normal", set.get(SettingMode))
+}

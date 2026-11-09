@@ -56,6 +56,10 @@ type Caddy struct {
 	// UnitFor mapeia o dono das portas ("nginx (pid N)") para a unit do
 	// systemd gravada em SettingTrialUnit; nil = não grava unit.
 	UnitFor func(process string) (string, bool)
+	// EnabledUnit devolve a unit suportada (nginx, apache2) ativada no boot
+	// do host, ou "". Sem modo gravado e com as portas livres, uma unit
+	// ativada grava ensaio (ela vai pegar as portas). nil = nenhuma.
+	EnabledUnit func(ctx context.Context) string
 
 	mu         sync.Mutex
 	last       Status
@@ -307,9 +311,42 @@ func (c *Caddy) applyMode(ctx context.Context, st Status, v verdict) Status {
 		// Portas livres (nginx parado, reload, ordem do boot): segue em ensaio.
 		return Status{State: StateTrial, Mode: ListenTrial, Message: PortsFreeMessage}
 	case c.mode == "":
+		if unit := c.enabledUnit(ctx); unit != "" {
+			// O nginx ainda não subiu (boot), mas vai: começa em ensaio.
+			c.saveModeLocked(ctx, ListenTrial)
+			c.saveUnitLocked(ctx, unit)
+			return Status{State: StateTrial, Mode: ListenTrial, Message: PortsFreeMessage}
+		}
 		c.saveModeLocked(ctx, ListenNormal)
 	}
 	return st
+}
+
+func (c *Caddy) enabledUnit(ctx context.Context) string {
+	if c.EnabledUnit == nil {
+		return ""
+	}
+	return c.EnabledUnit(ctx)
+}
+
+// MarkTrial grava o modo ensaio (e a unit, se dada) sem carregar config: a
+// troca usa quando o servidor anterior voltou a ficar ativo mas o Switch
+// para o ensaio falhou ou nem rodou (reinício no meio). A próxima volta de
+// Ensure vê o dono nas portas, ou portas livres em ensaio, e aplica trial.
+func (c *Caddy) MarkTrial(ctx context.Context, unit string) error {
+	c.modeMu.Lock()
+	defer c.modeMu.Unlock()
+	c.loadModeLocked(ctx)
+	c.mode = ListenTrial
+	if c.Settings != nil {
+		if err := c.Settings.SetSetting(ctx, SettingMode, string(ListenTrial)); err != nil {
+			return fmt.Errorf("gravar %s: %w", SettingMode, err)
+		}
+	}
+	if unit != "" {
+		c.saveUnitLocked(ctx, unit)
+	}
+	return nil
 }
 
 // loadModeLocked lê o modo gravado uma vez (modeMu preso); false se a
@@ -353,8 +390,14 @@ func (c *Caddy) rememberUnitLocked(ctx context.Context, process string) {
 	if c.UnitFor == nil || process == "" {
 		return
 	}
-	unit, ok := c.UnitFor(process)
-	if !ok || unit == c.trialUnit {
+	if unit, ok := c.UnitFor(process); ok {
+		c.saveUnitLocked(ctx, unit)
+	}
+}
+
+// saveUnitLocked grava SettingTrialUnit se mudou (modeMu preso).
+func (c *Caddy) saveUnitLocked(ctx context.Context, unit string) {
+	if unit == c.trialUnit {
 		return
 	}
 	if c.Settings != nil {
@@ -430,8 +473,12 @@ func (c *Caddy) probe(ctx context.Context, ct docker.Container) (Status, verdict
 		return Status{State: StateStarting, Message: "aguardando a Admin API do Caddy"}, unknown
 	}
 	listens := listensOn443(cfg)
+	// Servindo exige as portas presas (pelo nosso container): config com :443
+	// sem ninguém escutando não serve nada (o modo gravado decide).
+	held := true
 	for _, port := range []int{80, 443} {
 		owner, busy := c.PortOwner(port)
+		held = held && busy
 		if busy && (!listens || c.foreign(owner, pid)) {
 			return Status{
 				State:   StateTrial,
@@ -441,7 +488,7 @@ func (c *Caddy) probe(ctx context.Context, ct docker.Container) (Status, verdict
 			}, notServing
 		}
 	}
-	if listens {
+	if listens && held {
 		return Status{State: StateActive, Mode: ListenNormal}, serving
 	}
 	return Status{State: StateActive, Mode: ListenNormal}, notServing

@@ -42,3 +42,12 @@ func TestSystemd_TimeoutIsErrorNotInactive(t *testing.T) {
 	assert.Contains(t, err.Error(), "tempo esgotado")
 	assert.Error(t, Systemd{}.Stop(context.Background(), "nginx"))
 }
+
+func TestSystemd_EnabledUnit(t *testing.T) {
+	fakeSystemctl(t, `if [ "$1" = "is-enabled" ] && [ "$2" = "apache2.service" ]; then echo enabled; exit 0; fi; echo disabled; exit 1`)
+	assert.Equal(t, "apache2", Systemd{}.EnabledUnit(context.Background()))
+	fakeSystemctl(t, `echo disabled; exit 1`)
+	assert.Equal(t, "", Systemd{}.EnabledUnit(context.Background()))
+	fakeSystemctl(t, `if [ "$2" = "nginx.service" ]; then echo enabled; exit 0; fi; echo enabled; exit 0`)
+	assert.Equal(t, "nginx", Systemd{}.EnabledUnit(context.Background()), "nginx primeiro")
+}
