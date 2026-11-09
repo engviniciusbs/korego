@@ -48,7 +48,7 @@ var other = Ref{Key: "other", Label: "Outros", Kind: KindOther}
 // Classify devolve o dono de um processo, pela ordem da spec §2.
 func Classify(p procs.Proc, l Lookup) Ref {
 	// 1. container
-	if id := containerID(p.Cgroup); id != "" {
+	if id := ContainerID(p.Cgroup); id != "" {
 		c, ok := l.Containers[id]
 		if !ok {
 			return other
@@ -92,7 +92,9 @@ func Classify(p procs.Proc, l Lookup) Ref {
 	return other
 }
 
-func containerID(cg string) string {
+// ContainerID extrai o id completo (64 hex) do container de um caminho de
+// cgroup (v2 "docker-<id>.scope" ou v1 "/docker/<id>"); "" quando não há.
+func ContainerID(cg string) string {
 	if m := reScope.FindStringSubmatch(cg); m != nil {
 		return m[1]
 	}

@@ -158,3 +158,26 @@ func TestCollector_CleansOldRows(t *testing.T) {
 		return err == nil && len(pts) == 0
 	}, 2*time.Second, 5*time.Millisecond)
 }
+
+func TestCollector_CleansOldUsageRows(t *testing.T) {
+	db := store.OpenMemory(t)
+	old := base.Add(-8 * 24 * time.Hour)
+	recent := base.Add(-6 * 24 * time.Hour)
+	require.NoError(t, db.InsertUsageMinute(context.Background(), []store.UsageRow{
+		{TS: old.Unix(), Key: "service:a", Kind: "service", Label: "a", CPUPercent: 1},
+		{TS: recent.Unix(), Key: "service:a", Kind: "service", Label: "a", CPUPercent: 2},
+	}))
+	c := &monitor.Collector{
+		Source: &seqSource{steps: []step{{err: errors.New("sem dados")}}},
+		Hub:    events.NewHub(), DB: db, Interval: time.Millisecond, Now: fixedNow,
+	}
+	run(t, c)
+
+	count := func(at time.Time) int {
+		rows, err := db.UsageAt(context.Background(), at, at.Add(time.Minute), time.Minute, "cpu", 10)
+		require.NoError(t, err)
+		return len(rows)
+	}
+	require.Eventually(t, func() bool { return count(old) == 0 }, 2*time.Second, 5*time.Millisecond)
+	assert.Equal(t, 1, count(recent), "linhas com menos de 7 dias ficam")
+}

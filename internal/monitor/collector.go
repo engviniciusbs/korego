@@ -19,7 +19,8 @@ const (
 )
 
 // Collector lê amostras da fonte, publica no hub (tópico "metrics") e grava a
-// média por minuto no banco.
+// média por minuto no banco. Sua limpeza diária também apaga o consumo por
+// dono (usage_minute) antigo.
 type Collector struct {
 	Source    metrics.Source
 	Hub       *events.Hub
@@ -154,8 +155,14 @@ func (c *Collector) Run(ctx context.Context) {
 	}
 }
 
+// cleanup apaga as métricas e o consumo por dono mais antigos que retention
+// (os dois históricos têm a mesma retenção e o mesmo job diário).
 func (c *Collector) cleanup(ctx context.Context, retention time.Duration) {
-	if _, err := c.DB.DeleteMetricsBefore(ctx, c.now().Add(-retention)); err != nil && ctx.Err() == nil {
+	before := c.now().Add(-retention)
+	if _, err := c.DB.DeleteMetricsBefore(ctx, before); err != nil && ctx.Err() == nil {
 		log.Printf("limpar métricas antigas: %v", err)
+	}
+	if _, err := c.DB.DeleteUsageBefore(ctx, before); err != nil && ctx.Err() == nil {
+		log.Printf("limpar consumo antigo: %v", err)
 	}
 }

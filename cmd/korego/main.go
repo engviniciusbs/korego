@@ -32,6 +32,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/serve"
 	"github.com/engviniciusbs/korego/internal/store"
 	"github.com/engviniciusbs/korego/internal/update"
+	"github.com/engviniciusbs/korego/internal/usage"
 	"github.com/engviniciusbs/korego/internal/version"
 	"github.com/engviniciusbs/korego/internal/webui"
 )
@@ -128,6 +129,7 @@ func runServe(args []string) error {
 	hub.RegisterSource("container-stats", monitor.ContainerStatsSource(nd.Docker(), 2*time.Second))
 
 	collector := &monitor.Collector{Source: nd.Metrics(), Hub: hub, DB: db}
+	usageCollector := &usage.Collector{Procs: nd.Procs(), Docker: nd.Docker(), PM2: nd.PM2(), Hub: hub, DB: db}
 
 	var web http.Handler
 	if cfg.DevProxy != "" {
@@ -237,6 +239,14 @@ func runServe(args []string) error {
 	// Declarado depois do defer anterior, roda antes: espera o minuto parcial
 	// ser gravado antes de db.Close.
 	defer func() { stop(); <-collectorDone }()
+
+	usageDone := make(chan struct{})
+	go func() {
+		defer close(usageDone)
+		usageCollector.Run(ctx)
+	}()
+	// Idem para o consumo por dono: o minuto parcial vai ao banco antes de db.Close.
+	defer func() { stop(); <-usageDone }()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(listener) }()
