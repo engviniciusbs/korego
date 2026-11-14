@@ -78,3 +78,17 @@ func OAuthRouterForTest(d Deps, maxUnauthorized int) http.Handler {
 	}
 	return newRouter(rt)
 }
+
+// PendingStoreForTest expõe o armazém de pedidos pendentes com tempo explícito.
+type PendingStoreForTest struct{ p *pendingStore }
+
+func NewPendingStoreForTest() PendingStoreForTest { return PendingStoreForTest{newPendingStore()} }
+
+func (s PendingStoreForTest) Add(id string, now time.Time) {
+	s.p.add(pendingAuth{ID: id, CreatedAt: now}, now)
+}
+
+func (s PendingStoreForTest) Has(id string, now time.Time) bool {
+	_, ok := s.p.get(id, now)
+	return ok
+}

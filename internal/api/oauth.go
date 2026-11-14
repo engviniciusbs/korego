@@ -35,6 +35,9 @@ type oauthServer struct {
 	maxUnauthorized int
 	// regMu serializa limpeza, despejo e inserção, para o teto valer sob concorrência.
 	regMu sync.Mutex
+
+	pending *pendingStore // pedidos de autorização aguardando consentimento
+	codes   *codeStore    // códigos de autorização emitidos
 }
 
 // newOAuthServer monta o servidor; origin diz a origem canônica (ou que não há).
@@ -49,6 +52,8 @@ func newOAuthServer(d Deps, origin originFunc) *oauthServer {
 		authzLim:        auth.NewLimiter(30, time.Minute, 5*time.Minute),
 		tokenLim:        auth.NewLimiter(10, time.Minute, 15*time.Minute),
 		maxUnauthorized: maxUnauthorizedClients,
+		pending:         newPendingStore(),
+		codes:           newCodeStore(),
 	}
 }
 
@@ -86,12 +91,9 @@ func (s *oauthServer) mountPublic(r chi.Router) {
 		r.Get("/.well-known/oauth-protected-resource/mcp", s.protectedResource)
 		r.Get("/.well-known/oauth-authorization-server", s.serverMetadata)
 		r.Post("/oauth/register", s.register)
+		r.Get("/oauth/authorize", s.authorize)
 	})
 }
-
-// mountSession monta as rotas que exigem sessão (Task 6: pedidos e aprovação).
-// Chamado de dentro de mountSessionOnly, nunca de mountCore.
-func (s *oauthServer) mountSession(r chi.Router) {}
 
 // writeOAuthError escreve o erro no formato do RFC 6749 §5.2.
 func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
