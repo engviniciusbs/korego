@@ -1,81 +1,124 @@
 import { describe, expect, it } from "vitest";
-import { mcpAddCommand, mcpClients, mcpOAuthClients } from "../mcp-clients";
+import { mcpAddCommand, oauthAgentClients, tokenAgentClients, type AgentClient } from "../mcp-clients";
 
 const O = "https://painel.exemplo.com";
+const U = `${O}/mcp`;
 const T = "kg_abc-_123";
 
-describe("mcpClients", () => {
-  const byId = Object.fromEntries(mcpClients(O, T).map((c) => [c.id, c]));
+const byId = (list: AgentClient[]) => Object.fromEntries(list.map((c) => [c.id, c]));
 
-  it("Claude Code usa o comando claude mcp add", () => {
-    expect(byId["claude-code"].snippet).toBe(mcpAddCommand(O, T));
-    expect(mcpAddCommand(O, T)).toBe(
-      `claude mcp add --transport http korego ${O}/mcp --header "Authorization: Bearer ${T}"`,
-    );
+/** Todo texto de um cliente: ação e configuração manual. */
+function texts(c: AgentClient): string[] {
+  const a = c.action;
+  const out = [a.type === "link" ? a.href : a.text];
+  if (c.manual) out.push(c.manual.text);
+  return out;
+}
+
+function cursorConfig(href: string): unknown {
+  const p = new URL(href).searchParams;
+  expect(p.get("name")).toBe("korego");
+  return JSON.parse(atob(p.get("config")!));
+}
+
+function vscodeConfig(href: string): unknown {
+  expect(href.startsWith("vscode:mcp/install?")).toBe(true);
+  return JSON.parse(decodeURIComponent(href.slice("vscode:mcp/install?".length)));
+}
+
+describe("oauthAgentClients", () => {
+  const list = oauthAgentClients(O);
+  const c = byId(list);
+
+  it("lista os seis clientes na ordem dos cartões", () => {
+    expect(list.map((x) => x.id)).toEqual(["cursor", "vscode", "claude-code", "codex", "gemini", "windsurf"]);
+    expect(list.map((x) => x.kind)).toEqual(["Editor", "Editor", "Terminal", "Terminal", "Terminal", "Editor"]);
   });
 
-  it("os arquivos JSON são válidos e usam a chave de URL de cada cliente", () => {
-    const h = { Authorization: `Bearer ${T}` };
-    expect(JSON.parse(byId.cursor.snippet)).toEqual({ mcpServers: { korego: { url: `${O}/mcp`, headers: h } } });
-    expect(JSON.parse(byId.gemini.snippet)).toEqual({ mcpServers: { korego: { httpUrl: `${O}/mcp`, headers: h } } });
-    expect(JSON.parse(byId.windsurf.snippet)).toEqual({ mcpServers: { korego: { serverUrl: `${O}/mcp`, headers: h } } });
+  it("nenhum texto ou link leva token", () => {
+    for (const x of list) for (const t of texts(x)) expect(t).not.toMatch(/Authorization|Bearer/);
   });
 
-  it("o link do VS Code carrega a configuração http", () => {
-    const href = byId.vscode.installLink!.href;
-    expect(href.startsWith("vscode:mcp/install?")).toBe(true);
-    expect(JSON.parse(decodeURIComponent(href.slice("vscode:mcp/install?".length)))).toEqual({
-      name: "korego",
-      type: "http",
-      url: `${O}/mcp`,
-      headers: { Authorization: `Bearer ${T}` },
-    });
+  it("Cursor e VS Code instalam por link só com a URL", () => {
+    expect(c.cursor.action.type).toBe("link");
+    if (c.cursor.action.type !== "link") return;
+    expect(c.cursor.action.label).toBe("Adicionar ao Cursor");
+    expect(cursorConfig(c.cursor.action.href)).toEqual({ url: U });
+    expect(JSON.parse(c.cursor.manual!.text)).toEqual({ mcpServers: { korego: { url: U } } });
+
+    expect(c.vscode.action.type).toBe("link");
+    if (c.vscode.action.type !== "link") return;
+    expect(c.vscode.action.label).toBe("Adicionar ao VS Code");
+    expect(vscodeConfig(c.vscode.action.href)).toEqual({ name: "korego", type: "http", url: U });
+    expect(c.vscode.manual!.text).toBe(`code --add-mcp '{"name":"korego","type":"http","url":"${U}"}'`);
   });
 
-  it("Codex gera TOML com url e http_headers", () => {
-    expect(byId.codex.snippet).toBe(
-      `[mcp_servers.korego]\nurl = "${O}/mcp"\nhttp_headers = { "Authorization" = "Bearer ${T}" }\n`,
-    );
+  it("os CLIs recebem o comando exato", () => {
+    expect(c["claude-code"].action).toEqual({ type: "command", text: `claude mcp add --transport http -s user korego ${U}` });
+    expect(c.codex.action).toEqual({ type: "command", text: `codex mcp add korego --url ${U}\ncodex mcp login korego` });
+    expect(c.gemini.action).toEqual({ type: "command", text: `gemini mcp add --scope user --transport http korego ${U}` });
+  });
+
+  it("Windsurf copia a configuração com serverUrl", () => {
+    expect(c.windsurf.action.type).toBe("config");
+    if (c.windsurf.action.type !== "config") return;
+    expect(c.windsurf.action.label).toBe("Copiar configuração");
+    expect(JSON.parse(c.windsurf.action.text)).toEqual({ mcpServers: { korego: { serverUrl: U } } });
   });
 });
 
-describe("mcpOAuthClients", () => {
-  const P = "https://p.exemplo.com";
-  const list = mcpOAuthClients(P);
-  const byId = Object.fromEntries(list.map((c) => [c.id, c]));
+describe("tokenAgentClients", () => {
+  const list = tokenAgentClients(O, T);
+  const c = byId(list);
+  const h = { Authorization: `Bearer ${T}` };
 
-  it("mantém os mesmos ids de mcpClients", () => {
-    expect(list.map((c) => c.id)).toEqual(mcpClients(P, "x").map((c) => c.id));
-  });
-
-  it("nenhum trecho nem link carrega cabeçalho de autorização", () => {
-    for (const c of list) {
-      expect(c.snippet).not.toMatch(/Authorization|Bearer/);
-      expect(c.installLink?.href ?? "").not.toMatch(/Authorization|Bearer/);
-      if (c.installLink) expect(decodeURIComponent(c.installLink.href)).not.toMatch(/Authorization|Bearer/);
+  it("o token está em toda ação e configuração manual", () => {
+    expect(list).toHaveLength(6);
+    for (const x of list) {
+      const a = x.action;
+      const all = a.type === "link" ? decodeURIComponent(a.href) + atobConfig(a.href) : a.text;
+      expect(all).toContain(T);
+      if (x.manual) expect(x.manual.text).toContain(T);
     }
   });
 
-  it("Claude Code usa só a URL", () => {
-    expect(byId["claude-code"].snippet).toBe("claude mcp add --transport http korego https://p.exemplo.com/mcp");
+  it("Cursor e VS Code recebem os cabeçalhos no link", () => {
+    if (c.cursor.action.type !== "link" || c.vscode.action.type !== "link") throw new Error("esperava link");
+    expect(cursorConfig(c.cursor.action.href)).toEqual({ url: U, headers: h });
+    expect(vscodeConfig(c.vscode.action.href)).toEqual({ name: "korego", type: "http", url: U, headers: h });
   });
 
-  it("trechos de cada cliente", () => {
-    const url = `${P}/mcp`;
-    expect(JSON.parse(byId.cursor.snippet)).toEqual({ mcpServers: { korego: { url } } });
-    expect(byId.cursor.hint).toBe("O Cursor ainda não autoriza por este fluxo; se falhar, use um token abaixo.");
-    expect(byId.vscode.snippet).toBe(`code --add-mcp '${JSON.stringify({ name: "korego", type: "http", url })}'`);
-    expect(byId.codex.snippet).toBe(`[mcp_servers.korego]\nurl = "${url}"\n`);
-    expect(byId.codex.hint).toBe("Depois rode `codex mcp login korego`.");
-    expect(JSON.parse(byId.gemini.snippet)).toEqual({ mcpServers: { korego: { httpUrl: url } } });
-    expect(JSON.parse(byId.windsurf.snippet)).toEqual({ mcpServers: { korego: { serverUrl: url } } });
-    expect(byId.outro.snippet).toBe(`URL: ${url}`);
-  });
-
-  it("Cursor sem link de instalação; dicas de Windsurf e VS Code", () => {
-    expect(byId.cursor.installLink).toBeUndefined();
-    expect(byId.windsurf.hint).toBe("Ainda não verificado com OAuth; se falhar, use um token abaixo.");
-    expect(byId.vscode.hint).toMatch(/loopback/);
-    expect(byId.vscode.installLink?.href.startsWith("vscode:mcp/install?")).toBe(true);
+  it("Claude Code usa mcpAddCommand; Codex e Gemini copiam a configuração", () => {
+    expect(c["claude-code"].action).toEqual({ type: "command", text: mcpAddCommand(O, T) });
+    expect(mcpAddCommand(O, T)).toBe(
+      `claude mcp add --transport http -s user korego ${U} --header "Authorization: Bearer ${T}"`,
+    );
+    expect(c.codex.action).toEqual({
+      type: "config",
+      label: "Copiar configuração",
+      text: `[mcp_servers.korego]\nurl = "${U}"\nhttp_headers = { "Authorization" = "Bearer ${T}" }\n`,
+    });
+    if (c.gemini.action.type !== "config" || c.windsurf.action.type !== "config") throw new Error("esperava config");
+    expect(JSON.parse(c.gemini.action.text)).toEqual({ mcpServers: { korego: { httpUrl: U, headers: h } } });
+    expect(JSON.parse(c.windsurf.action.text)).toEqual({ mcpServers: { korego: { serverUrl: U, headers: h } } });
   });
 });
+
+/** Config base64 do link do Cursor (vazia para outros links). */
+function atobConfig(href: string): string {
+  const cfg = href.startsWith("cursor:") ? new URL(href).searchParams.get("config") : null;
+  return cfg ? atob(cfg) : "";
+}
+
+describe("link do Cursor", () => {
+  it("escapa o base64 mesmo quando ele tem + / =", () => {
+    // Este token gera base64 com "+", "/" e "=" na configuração.
+    const tok = "kg_>>>???~~";
+    const c = byId(tokenAgentClients(O, tok)).cursor;
+    if (c.action.type !== "link") throw new Error("esperava link");
+    const raw = c.action.href.split("config=")[1];
+    expect(raw).not.toMatch(/[+/=]/);
+    expect(cursorConfig(c.action.href)).toEqual({ url: U, headers: { Authorization: `Bearer ${tok}` } });
+  });
+});
+

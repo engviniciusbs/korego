@@ -29,7 +29,7 @@ const items: NavItem[] = [
     match: "/configuracoes/",
     children: [
       { label: "Segurança", href: "/configuracoes/seguranca/" },
-      { label: "Tokens de API", href: "/configuracoes/tokens/" },
+      { label: "Conexões", href: "/configuracoes/conexoes/" },
       { label: "Atualização", href: "/configuracoes/atualizacao/" },
       { label: "Painel", href: "/configuracoes/painel/" },
       { label: "GitHub", href: "/configuracoes/github/" },

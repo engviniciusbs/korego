@@ -1,7 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import TokensPage from "../(painel)/configuracoes/tokens/page";
+import ConexoesPage from "../(painel)/configuracoes/conexoes/page";
+import TokensRedirect from "../(painel)/configuracoes/tokens/page";
+
+const replace = vi.hoisted(() => vi.fn());
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace }),
+  usePathname: () => "/configuracoes/conexoes/",
+}));
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -40,7 +47,7 @@ function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <TokensPage />
+      <ConexoesPage />
     </QueryClientProvider>,
   );
 }
@@ -51,7 +58,7 @@ async function openCreate() {
   return await screen.findByRole("dialog");
 }
 
-describe("Configurações → Tokens de API", () => {
+describe("Configurações → Conexões", () => {
   it("lista nome, prefixo, último uso e expiração (nunca quando nulos)", async () => {
     routes["GET /api/tokens"] = () =>
       json({
@@ -83,20 +90,16 @@ describe("Configurações → Tokens de API", () => {
     await waitFor(() => expect(screen.getByText("kg_SEGREDO123")).toBeInTheDocument());
     expect(sent).toEqual({ name: "novo", expiresInDays: 90, code: "123456" });
     expect(
-      screen.getByText(
-        `claude mcp add --transport http korego ${location.origin}/mcp --header "Authorization: Bearer kg_SEGREDO123"`,
+      within(dlg).getByText(
+        `claude mcp add --transport http -s user korego https://p.exemplo.com/mcp --header "Authorization: Bearer kg_SEGREDO123"`,
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copiar token" })).toBeInTheDocument();
-    fireEvent.click(within(dlg).getByRole("tab", { name: "Codex" }));
-    expect(screen.getByText(/\[mcp_servers\.korego\]/)).toHaveTextContent(
-      `url = "${location.origin}/mcp" http_headers = { "Authorization" = "Bearer kg_SEGREDO123" }`,
-    );
-    fireEvent.click(within(dlg).getByRole("tab", { name: "Cursor" }));
-    const link = screen.getByRole("link", { name: "Abrir no Cursor" }).getAttribute("href")!;
+    expect(within(dlg).getAllByRole("article")).toHaveLength(6);
+    const link = within(dlg).getByRole("link", { name: "Adicionar ao Cursor" }).getAttribute("href")!;
     expect(link).toMatch(/^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=korego&config=/);
     const cfg = JSON.parse(atob(decodeURIComponent(link.split("config=")[1])));
-    expect(cfg).toEqual({ url: `${location.origin}/mcp`, headers: { Authorization: "Bearer kg_SEGREDO123" } });
+    expect(cfg).toEqual({ url: `https://p.exemplo.com/mcp`, headers: { Authorization: "Bearer kg_SEGREDO123" } });
     fireEvent.click(screen.getByRole("button", { name: "Fechar" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     await openCreate();
@@ -151,18 +154,18 @@ describe("Configurações → Tokens de API", () => {
     expect(fetchMock.mock.calls.some((c) => c[1]?.method === "DELETE")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Confirmar" }));
     await waitFor(() => expect(screen.queryByText("claude-code")).toBeNull());
-    expect(screen.getByText("Nenhum token criado.")).toBeInTheDocument();
+    expect(screen.getByText("Nenhum agente conectado.")).toBeInTheDocument();
   });
 
   it("com o painel ativo, mostra Conectar um agente com o comando sem token", async () => {
     renderPage();
-    expect(await screen.findByText("Conectar um agente")).toBeInTheDocument();
-    expect(await screen.findByText("claude mcp add --transport http korego https://p.exemplo.com/mcp")).toBeInTheDocument();
-    expect(screen.getByText("Informe só a URL ao agente: o navegador abre para você autorizar com o 2FA.")).toBeInTheDocument();
-    expect(screen.getByText("Use exatamente esta URL; outro endereço do mesmo servidor não autoriza.")).toBeInTheDocument();
-    // O título do painel não se repete no rótulo das abas.
-    expect(screen.getAllByText("Conectar um agente")).toHaveLength(1);
-    expect(screen.getByText("Cliente")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Conectar um agente" })).toBeInTheDocument();
+    expect(await screen.findByText("claude mcp add --transport http -s user korego https://p.exemplo.com/mcp")).toBeInTheDocument();
+    expect(screen.getByText("https://p.exemplo.com/mcp")).toBeInTheDocument();
+    expect(screen.getAllByRole("article")).toHaveLength(6);
+    expect(screen.getByRole("link", { name: "Adicionar ao Cursor" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Agentes conectados" })).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Bearer/);
   });
 
   it("falha ao ler a configuração do painel mostra o erro, não o alerta de domínio", async () => {
@@ -187,5 +190,14 @@ describe("Configurações → Tokens de API", () => {
     const row = (await screen.findByText("agente")).closest("tr")!;
     expect(within(row).getByText("OAuth")).toBeInTheDocument();
     expect(within(screen.getByText("claude-code").closest("tr")!).queryByText("OAuth")).toBeNull();
+  });
+});
+
+describe("endereço antigo /configuracoes/tokens/", () => {
+  it("redireciona para Conexões", () => {
+    replace.mockClear();
+    render(<TokensRedirect />);
+    expect(replace).toHaveBeenCalledWith("/configuracoes/conexoes/");
+    expect(screen.getByText("Redirecionando para Conexões…")).toBeInTheDocument();
   });
 });
