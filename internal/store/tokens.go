@@ -34,7 +34,6 @@ type APIToken struct {
 type TokenRotation struct {
 	AccessHash, RefreshHash, Prefix string
 	AccessExpiresAt, At             time.Time
-	KeepPrev                        bool // rotação dentro da janela: mantém prev_* e rotated_at
 }
 
 const apiTokenCols = `id, user_id, name, token_hash, prefix, created_at, last_used_at, last_used_ip, expires_at, revoked_at,
@@ -187,16 +186,7 @@ func (d *DB) RotateAPIToken(ctx context.Context, id int64, expectRefreshHash str
 	q := `UPDATE api_tokens SET token_hash = ?, refresh_hash = ?, prefix = ?, access_expires_at = ?,
 		prev_access_hash = token_hash, prev_refresh_hash = refresh_hash, rotated_at = ?
 		WHERE id = ? AND refresh_hash = ?`
-	if r.KeepPrev {
-		q = `UPDATE api_tokens SET token_hash = ?, refresh_hash = ?, prefix = ?, access_expires_at = ?
-		WHERE id = ? AND refresh_hash = ?`
-	}
-	var args []any
-	if r.KeepPrev {
-		args = []any{r.AccessHash, r.RefreshHash, r.Prefix, r.AccessExpiresAt.Unix(), id, expectRefreshHash}
-	} else {
-		args = []any{r.AccessHash, r.RefreshHash, r.Prefix, r.AccessExpiresAt.Unix(), r.At.Unix(), id, expectRefreshHash}
-	}
+	args := []any{r.AccessHash, r.RefreshHash, r.Prefix, r.AccessExpiresAt.Unix(), r.At.Unix(), id, expectRefreshHash}
 	res, err := d.sql.ExecContext(ctx, q, args...)
 	if isUnique(err) {
 		return ErrConflict

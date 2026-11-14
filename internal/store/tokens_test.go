@@ -239,31 +239,6 @@ func TestAPIToken_RotateCAS(t *testing.T) {
 	}
 }
 
-func TestAPIToken_RotateKeepPrev(t *testing.T) {
-	db := OpenMemory(t)
-	ctx := context.Background()
-	uid := newTokenUser(t, db)
-	id, _ := db.CreateAPIToken(ctx, oauthToken(uid))
-	t1 := time.Unix(1700001000, 0)
-	if err := db.RotateAPIToken(ctx, id, "ref1", TokenRotation{AccessHash: "acc2", RefreshHash: "ref2",
-		Prefix: "kg_p2xxxxx", AccessExpiresAt: t1.Add(time.Hour), At: t1}); err != nil {
-		t.Fatal(err)
-	}
-	t2 := t1.Add(10 * time.Second)
-	if err := db.RotateAPIToken(ctx, id, "ref2", TokenRotation{AccessHash: "acc3", RefreshHash: "ref3",
-		Prefix: "kg_p3xxxxx", AccessExpiresAt: t2.Add(time.Hour), At: t2, KeepPrev: true}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := db.APITokenByHash(ctx, "acc3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.RefreshHash != "ref3" || got.PrevRefreshHash != "ref1" || got.PrevAccessHash != "acc1" ||
-		got.RotatedAt == nil || !got.RotatedAt.Equal(t1) {
-		t.Fatalf("got %+v", got)
-	}
-}
-
 func TestAPIToken_RevokeByID(t *testing.T) {
 	db := OpenMemory(t)
 	ctx := context.Background()

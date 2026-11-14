@@ -219,7 +219,7 @@ func runServe(args []string) error {
 		Domains: domSvc, Migrate: migEngine, Certs: certSvc, Deploys: deploySvc, DataDir: cfg.DataDir, Runner: deploy.ExecRunner{}, Box: box,
 		GitHub:          ghSvc,
 		GitHubConnected: ghSvc.Ready,
-		Tokens:          &auth.Tokens{DB: db},
+		Tokens:          &auth.Tokens{DB: db, Key: auth.DeriveKey(key, "korego oauth refresh v1")},
 		// Separado do login: tokens inválidos e códigos errados vindos de tokens.
 		TokenLimiter: auth.NewLimiter(5, time.Minute, 15*time.Minute),
 	})

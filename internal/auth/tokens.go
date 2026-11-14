@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -58,6 +60,28 @@ var tokenRe = regexp.MustCompile(`^kg_[A-Za-z0-9_-]{43}$`)
 type Tokens struct {
 	DB  *store.DB
 	Now func() time.Time
+	// Key deriva, de forma determinística, o par entregue a cada refresh
+	// (HMAC); sem ela Refresh falha. Veja DeriveKey.
+	Key []byte
+}
+
+// DeriveKey deriva uma subchave da chave mestra para um uso (label).
+func DeriveKey(master []byte, label string) []byte {
+	m := hmac.New(sha256.New, master)
+	m.Write([]byte(label))
+	return m.Sum(nil)
+}
+
+// derivePair calcula o par que a rotação do refresh R produz. Ser função só de
+// (Key, R) torna a rotação idempotente: quem reapresenta R na janela de graça
+// recebe exatamente o mesmo par.
+func (t *Tokens) derivePair(refresh string) (access, newRefresh string) {
+	mac := func(purpose string) string {
+		m := hmac.New(sha256.New, t.Key)
+		m.Write([]byte(purpose + "\x00" + refresh))
+		return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
+	}
+	return tokenPrefix + mac("access"), refreshPrefix + mac("refresh")
 }
 
 func (t *Tokens) now() time.Time {
@@ -199,15 +223,20 @@ func (t *Tokens) IssueOAuth(ctx context.Context, userID int64, clientName, clien
 	return OAuthPair{}, store.APIToken{}, store.ErrConflict
 }
 
-// Refresh troca um refresh por um novo par. O refresh atual faz rotação normal;
-// o anterior, dentro de RefreshGrace, rotaciona mantendo o histórico; fora da
-// janela é reuso: a conexão é revogada.
+// Refresh troca um refresh por um novo par, derivado do próprio refresh. O
+// refresh atual faz a rotação (CAS); o anterior, dentro de RefreshGrace, recebe
+// o mesmo par já emitido, sem escrita; fora da janela é reuso e a conexão é
+// revogada.
 func (t *Tokens) Refresh(ctx context.Context, refresh, clientID string) (OAuthPair, store.APIToken, error) {
+	if len(t.Key) == 0 {
+		return OAuthPair{}, store.APIToken{}, errors.New("auth: chave de renovação não configurada")
+	}
 	if !refreshRe.MatchString(refresh) {
 		return OAuthPair{}, store.APIToken{}, ErrNoToken
 	}
 	h := hashToken(refresh)
-	// Duas tentativas: uma perdida no CAS relê a linha e cai na janela de graça.
+	access, newRefresh := t.derivePair(refresh)
+	// Duas tentativas: quem perde o CAS relê a linha e cai na janela de graça.
 	for attempt := 0; attempt < 2; attempt++ {
 		tok, err := t.DB.APITokenByRefreshHash(ctx, h)
 		if errors.Is(err, store.ErrNotFound) {
@@ -220,7 +249,6 @@ func (t *Tokens) Refresh(ctx context.Context, refresh, clientID string) (OAuthPa
 		if tok.ClientID != clientID || tok.RevokedAt != nil || (tok.ExpiresAt != nil && !now.Before(*tok.ExpiresAt)) {
 			return OAuthPair{}, store.APIToken{}, ErrNoToken
 		}
-		keepPrev := false
 		if tok.RefreshHash != h { // casou com o anterior
 			if tok.RotatedAt == nil || now.Sub(*tok.RotatedAt) > RefreshGrace {
 				if err := t.DB.RevokeAPITokenByID(ctx, tok.ID, now); err != nil {
@@ -228,11 +256,11 @@ func (t *Tokens) Refresh(ctx context.Context, refresh, clientID string) (OAuthPa
 				}
 				return OAuthPair{}, store.APIToken{}, ErrRefreshReuse
 			}
-			keepPrev = true
-		}
-		access, newRefresh, err := newPair()
-		if err != nil {
-			return OAuthPair{}, store.APIToken{}, err
+			// Na janela: só repete o par já emitido, se ainda for o atual.
+			if hashToken(newRefresh) != tok.RefreshHash || tok.AccessExpiresAt == nil {
+				return OAuthPair{}, store.APIToken{}, ErrNoToken
+			}
+			return OAuthPair{Access: access, Refresh: newRefresh, ExpiresIn: tok.AccessExpiresAt.Sub(now)}, tok, nil
 		}
 		accExp := now.Add(AccessTTL)
 		if tok.ExpiresAt != nil && tok.ExpiresAt.Before(accExp) {
@@ -240,9 +268,9 @@ func (t *Tokens) Refresh(ctx context.Context, refresh, clientID string) (OAuthPa
 		}
 		rot := store.TokenRotation{
 			AccessHash: hashToken(access), RefreshHash: hashToken(newRefresh), Prefix: access[:tokenPrefixLen],
-			AccessExpiresAt: accExp, At: now, KeepPrev: keepPrev,
+			AccessExpiresAt: accExp, At: now,
 		}
-		err = t.DB.RotateAPIToken(ctx, tok.ID, tok.RefreshHash, rot)
+		err = t.DB.RotateAPIToken(ctx, tok.ID, h, rot)
 		if errors.Is(err, store.ErrConflict) {
 			continue
 		}
@@ -251,10 +279,8 @@ func (t *Tokens) Refresh(ctx context.Context, refresh, clientID string) (OAuthPa
 		}
 		tok.TokenHash, tok.RefreshHash, tok.Prefix = rot.AccessHash, rot.RefreshHash, rot.Prefix
 		tok.AccessExpiresAt = &accExp
-		if !keepPrev {
-			tok.PrevRefreshHash = h
-			tok.RotatedAt = &now
-		}
+		tok.PrevRefreshHash = h
+		tok.RotatedAt = &now
 		return OAuthPair{Access: access, Refresh: newRefresh, ExpiresIn: accExp.Sub(now)}, tok, nil
 	}
 	return OAuthPair{}, store.APIToken{}, ErrNoToken

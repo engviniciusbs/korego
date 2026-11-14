@@ -20,7 +20,7 @@ func newTokens(t *testing.T) (*Tokens, int64, *time.Time) {
 		store.User{Email: "admin@exemplo.com", PasswordHash: "h", TOTPSecretEnc: "enc"}, nil)
 	require.NoError(t, err)
 	now := time.Unix(1_800_000_000, 0)
-	return &Tokens{DB: db, Now: func() time.Time { return now }}, uid, &now
+	return &Tokens{DB: db, Key: []byte("chave-de-teste-0123456789abcdef!"), Now: func() time.Time { return now }}, uid, &now
 }
 
 func TestTokens_IssueFormat(t *testing.T) {
@@ -196,26 +196,69 @@ func TestRefresh_RotatesAndGrace(t *testing.T) {
 	ctx := context.Background()
 	p1, _, err := tk.IssueOAuth(ctx, uid, "Codex", "cid", 0)
 	require.NoError(t, err)
-	start := *now
-	*now = start.Add(time.Minute)
+	*now = now.Add(time.Minute)
 	t0 := *now
 	p2, _, err := tk.Refresh(ctx, p1.Refresh, "cid")
 	require.NoError(t, err)
 	require.NotEqual(t, p1.Refresh, p2.Refresh)
+	_, err = tk.Validate(ctx, p1.Access, "1.1.1.1")
+	require.ErrorIs(t, err, ErrStaleToken)
 
 	*now = t0.Add(30 * time.Second)
-	p3, _, err := tk.Refresh(ctx, p1.Refresh, "cid")
+	again, _, err := tk.Refresh(ctx, p1.Refresh, "cid")
 	require.NoError(t, err)
-	_, err = tk.Validate(ctx, p3.Access, "1.1.1.1")
+	require.Equal(t, p2.Access, again.Access)
+	require.Equal(t, p2.Refresh, again.Refresh)
+	_, err = tk.Validate(ctx, p2.Access, "1.1.1.1")
 	require.NoError(t, err)
+	p3, _, err := tk.Refresh(ctx, p2.Refresh, "cid")
+	require.NoError(t, err)
+	require.NotEqual(t, p2.Refresh, p3.Refresh)
 
-	*now = t0.Add(90 * time.Second)
+	// Depois de rotacionar de novo, R1 na janela não casa mais com o par atual.
 	_, _, err = tk.Refresh(ctx, p1.Refresh, "cid")
+	require.ErrorIs(t, err, ErrNoToken)
+
+	// p2 virou o "anterior" de p3 (rotacionado em t0+30s); fora da janela é reuso.
+	*now = t0.Add(100 * time.Second)
+	_, _, err = tk.Refresh(ctx, p2.Refresh, "cid")
 	require.ErrorIs(t, err, ErrRefreshReuse)
 	_, err = tk.Validate(ctx, p3.Access, "1.1.1.1")
 	require.ErrorIs(t, err, ErrStaleToken)
-	_, _, err = tk.Refresh(ctx, p3.Refresh, "cid")
-	require.ErrorIs(t, err, ErrNoToken)
+}
+
+func TestRefresh_ReuseAfterWindow(t *testing.T) {
+	tk, uid, now := newTokens(t)
+	ctx := context.Background()
+	p1, _, err := tk.IssueOAuth(ctx, uid, "Codex", "cid", 0)
+	require.NoError(t, err)
+	t0 := *now
+	p2, _, err := tk.Refresh(ctx, p1.Refresh, "cid")
+	require.NoError(t, err)
+	*now = t0.Add(90 * time.Second)
+	_, _, err = tk.Refresh(ctx, p1.Refresh, "cid")
+	require.ErrorIs(t, err, ErrRefreshReuse)
+	_, err = tk.Validate(ctx, p2.Access, "1.1.1.1")
+	require.ErrorIs(t, err, ErrStaleToken)
+}
+
+func TestRefresh_EmptyKey(t *testing.T) {
+	tk, uid, _ := newTokens(t)
+	ctx := context.Background()
+	p, _, err := tk.IssueOAuth(ctx, uid, "X", "cid", 0)
+	require.NoError(t, err)
+	tk.Key = nil
+	_, _, err = tk.Refresh(ctx, p.Refresh, "cid")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrNoToken)
+}
+
+func TestDeriveKey(t *testing.T) {
+	m := []byte("mestra")
+	require.Equal(t, DeriveKey(m, "a"), DeriveKey(m, "a"))
+	require.NotEqual(t, DeriveKey(m, "a"), DeriveKey(m, "b"))
+	require.NotEqual(t, DeriveKey(m, "a"), DeriveKey([]byte("outra"), "a"))
+	require.Len(t, DeriveKey(m, "a"), 32)
 }
 
 func TestRefresh_ClientMismatch(t *testing.T) {
@@ -251,21 +294,17 @@ func TestRefresh_ConcurrentSameRefresh(t *testing.T) {
 	}
 	close(start)
 	wg.Wait()
-	for i := range pairs {
-		require.NoError(t, errs[i])
-	}
-	require.NotEqual(t, pairs[0].Refresh, pairs[1].Refresh)
-	// A conexão segue ativa; só o acesso da última rotação valida (o outro virou "anterior").
-	var ok int
-	for _, pr := range pairs {
-		if _, err := tk.Validate(ctx, pr.Access, "1.1.1.1"); err == nil {
-			ok++
-		}
-	}
-	require.Equal(t, 1, ok)
-	cur, err := tk.DB.APITokenByRefreshHash(ctx, hashToken(p.Refresh))
+	require.NoError(t, errs[0])
+	require.NoError(t, errs[1])
+	require.Equal(t, pairs[0].Access, pairs[1].Access)
+	require.Equal(t, pairs[0].Refresh, pairs[1].Refresh)
+	_, err = tk.Validate(ctx, pairs[0].Access, "1.1.1.1")
+	require.NoError(t, err)
+	cur, err := tk.DB.APITokenByRefreshHash(ctx, hashToken(pairs[0].Refresh))
 	require.NoError(t, err)
 	require.Nil(t, cur.RevokedAt)
+	_, _, err = tk.Refresh(ctx, pairs[0].Refresh, "cid")
+	require.NoError(t, err)
 }
 
 func TestRefresh_CapsAtExpiresAt(t *testing.T) {
