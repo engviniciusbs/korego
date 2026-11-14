@@ -236,8 +236,21 @@ func TestOAuthRequest_SameCodeAsLogin(t *testing.T) {
 func TestOAuthRequest_TokenCannotApprove(t *testing.T) {
 	f := newAuthzFx(t)
 	id := f.authorize(t, "http://localhost:5555/cb")
-	secret, _, err := f.e.deps.Tokens.Issue(t.Context(), 1, "t", 24*time.Hour)
+	secret, tok, err := f.e.deps.Tokens.Issue(t.Context(), 1, "t", 24*time.Hour)
 	require.NoError(t, err)
+	// pelo despacho do MCP: as rotas não existem no núcleo (404)
+	u, err := f.e.svc.DB.UserByEmail(t.Context(), email)
+	require.NoError(t, err)
+	d := api.NewDispatcherForTest(f.e.deps)
+	for _, c := range [][2]string{
+		{http.MethodGet, "/api/oauth/requests/" + id},
+		{http.MethodPost, "/api/oauth/requests/" + id + "/approve"},
+		{http.MethodPost, "/api/oauth/requests/" + id + "/deny"},
+	} {
+		st, _ := d.Do(t.Context(), tok, u, agentAddr, http.Header{}, c[0], c[1], nil, map[string]any{"code": f.fresh(t)}, f.fresh(t))
+		assert.Equal(t, http.StatusNotFound, st, c[1])
+	}
+	assert.Equal(t, 200, f.sess(http.MethodGet, "/api/oauth/requests/"+id, "").Code)
 	bt := withHeader("Authorization", "Bearer "+secret)
 	w := f.do(http.MethodPost, "/api/oauth/requests/"+id+"/approve", `{"code":"`+f.fresh(t)+`"}`, bt)
 	assert.Equal(t, 401, w.Code)
