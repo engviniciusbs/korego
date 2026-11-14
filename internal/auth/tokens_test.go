@@ -3,11 +3,13 @@ package auth
 import (
 	"context"
 	"regexp"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/engviniciusbs/korego/internal/oauth"
 	"github.com/engviniciusbs/korego/internal/store"
 )
 
@@ -63,7 +65,7 @@ func TestTokens_ValidateRejects(t *testing.T) {
 	_, err = tk.DB.RevokeAPIToken(ctx, uid, tok.ID, *now)
 	require.NoError(t, err)
 	_, err = tk.Validate(ctx, secret, "1.1.1.1")
-	require.ErrorIs(t, err, ErrNoToken)
+	require.ErrorIs(t, err, ErrStaleToken)
 
 	exp, _, err := tk.Issue(ctx, uid, "expira", time.Hour)
 	require.NoError(t, err)
@@ -71,7 +73,7 @@ func TestTokens_ValidateRejects(t *testing.T) {
 	require.NoError(t, err)
 	*now = now.Add(time.Hour)
 	_, err = tk.Validate(ctx, exp, "1.1.1.1")
-	require.ErrorIs(t, err, ErrNoToken)
+	require.ErrorIs(t, err, ErrStaleToken)
 }
 
 func TestTokens_TouchThrottled(t *testing.T) {
@@ -124,4 +126,159 @@ func repeat(s string, n int) string {
 		out += s
 	}
 	return out
+}
+
+func TestIssueOAuth_UniqueName(t *testing.T) {
+	tk, uid, _ := newTokens(t)
+	ctx := context.Background()
+	var names []string
+	for i := 0; i < 3; i++ {
+		pair, tok, err := tk.IssueOAuth(ctx, uid, "Claude Code", "cid", 90*24*time.Hour)
+		require.NoError(t, err)
+		names = append(names, tok.Name)
+		require.Regexp(t, `^kgr_[A-Za-z0-9_-]{43}$`, pair.Refresh)
+		require.Regexp(t, `^kg_[A-Za-z0-9_-]{43}$`, pair.Access)
+		require.Equal(t, time.Hour, pair.ExpiresIn)
+		require.Equal(t, "oauth", tok.Kind)
+	}
+	require.Equal(t, []string{"Claude Code", "Claude Code (2)", "Claude Code (3)"}, names)
+
+	// Nome longo é cortado para caber com o sufixo em 64 runas.
+	long := repeat("é", 70)
+	_, a, err := tk.IssueOAuth(ctx, uid, long, "cid", 0)
+	require.NoError(t, err)
+	_, b, err := tk.IssueOAuth(ctx, uid, long, "cid", 0)
+	require.NoError(t, err)
+	require.Equal(t, 64, len([]rune(a.Name)))
+	require.Equal(t, 64, len([]rune(b.Name)))
+	require.Contains(t, b.Name, " (2)")
+}
+
+func TestValidate_AccessExpiresStale(t *testing.T) {
+	tk, uid, now := newTokens(t)
+	ctx := context.Background()
+	pair, _, err := tk.IssueOAuth(ctx, uid, "Cursor", "cid", 90*24*time.Hour)
+	require.NoError(t, err)
+	start := *now
+	*now = start.Add(59 * time.Minute)
+	_, err = tk.Validate(ctx, pair.Access, "1.1.1.1")
+	require.NoError(t, err)
+	*now = start.Add(61 * time.Minute)
+	_, err = tk.Validate(ctx, pair.Access, "1.1.1.1")
+	require.ErrorIs(t, err, ErrStaleToken)
+}
+
+func TestValidate_UnknownVsStale(t *testing.T) {
+	tk, uid, now := newTokens(t)
+	ctx := context.Background()
+	rnd, err := oauth.RandomToken()
+	require.NoError(t, err)
+	_, err = tk.Validate(ctx, "kg_"+rnd, "1.1.1.1")
+	require.ErrorIs(t, err, ErrNoToken)
+
+	secret, tok, err := tk.Issue(ctx, uid, "rev", 0)
+	require.NoError(t, err)
+	require.NoError(t, tk.RevokeByID(ctx, tok.ID))
+	_, err = tk.Validate(ctx, secret, "1.1.1.1")
+	require.ErrorIs(t, err, ErrStaleToken)
+
+	pair, _, err := tk.IssueOAuth(ctx, uid, "VS Code", "cid", 0)
+	require.NoError(t, err)
+	*now = now.Add(time.Minute)
+	_, _, err = tk.Refresh(ctx, pair.Refresh, "cid")
+	require.NoError(t, err)
+	_, err = tk.Validate(ctx, pair.Access, "1.1.1.1")
+	require.ErrorIs(t, err, ErrStaleToken)
+}
+
+func TestRefresh_RotatesAndGrace(t *testing.T) {
+	tk, uid, now := newTokens(t)
+	ctx := context.Background()
+	p1, _, err := tk.IssueOAuth(ctx, uid, "Codex", "cid", 0)
+	require.NoError(t, err)
+	start := *now
+	*now = start.Add(time.Minute)
+	t0 := *now
+	p2, _, err := tk.Refresh(ctx, p1.Refresh, "cid")
+	require.NoError(t, err)
+	require.NotEqual(t, p1.Refresh, p2.Refresh)
+
+	*now = t0.Add(30 * time.Second)
+	p3, _, err := tk.Refresh(ctx, p1.Refresh, "cid")
+	require.NoError(t, err)
+	_, err = tk.Validate(ctx, p3.Access, "1.1.1.1")
+	require.NoError(t, err)
+
+	*now = t0.Add(90 * time.Second)
+	_, _, err = tk.Refresh(ctx, p1.Refresh, "cid")
+	require.ErrorIs(t, err, ErrRefreshReuse)
+	_, err = tk.Validate(ctx, p3.Access, "1.1.1.1")
+	require.ErrorIs(t, err, ErrStaleToken)
+	_, _, err = tk.Refresh(ctx, p3.Refresh, "cid")
+	require.ErrorIs(t, err, ErrNoToken)
+}
+
+func TestRefresh_ClientMismatch(t *testing.T) {
+	tk, uid, _ := newTokens(t)
+	ctx := context.Background()
+	p, _, err := tk.IssueOAuth(ctx, uid, "Gemini", "cid", 0)
+	require.NoError(t, err)
+	_, _, err = tk.Refresh(ctx, p.Refresh, "outro")
+	require.ErrorIs(t, err, ErrNoToken)
+	_, err = tk.Validate(ctx, p.Access, "1.1.1.1")
+	require.NoError(t, err)
+	_, _, err = tk.Refresh(ctx, "kgr_curto", "cid")
+	require.ErrorIs(t, err, ErrNoToken)
+}
+
+func TestRefresh_ConcurrentSameRefresh(t *testing.T) {
+	tk, uid, _ := newTokens(t)
+	ctx := context.Background()
+	p, _, err := tk.IssueOAuth(ctx, uid, "Windsurf", "cid", 0)
+	require.NoError(t, err)
+
+	start := make(chan struct{})
+	pairs := make([]OAuthPair, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range pairs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			pairs[i], _, errs[i] = tk.Refresh(ctx, p.Refresh, "cid")
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for i := range pairs {
+		require.NoError(t, errs[i])
+	}
+	require.NotEqual(t, pairs[0].Refresh, pairs[1].Refresh)
+	// A conexão segue ativa; só o acesso da última rotação valida (o outro virou "anterior").
+	var ok int
+	for _, pr := range pairs {
+		if _, err := tk.Validate(ctx, pr.Access, "1.1.1.1"); err == nil {
+			ok++
+		}
+	}
+	require.Equal(t, 1, ok)
+	cur, err := tk.DB.APITokenByRefreshHash(ctx, hashToken(p.Refresh))
+	require.NoError(t, err)
+	require.Nil(t, cur.RevokedAt)
+}
+
+func TestRefresh_CapsAtExpiresAt(t *testing.T) {
+	tk, uid, now := newTokens(t)
+	ctx := context.Background()
+	p, _, err := tk.IssueOAuth(ctx, uid, "Claude Code", "cid", 30*time.Minute)
+	require.NoError(t, err)
+	start := *now
+	*now = start.Add(10 * time.Minute)
+	p2, _, err := tk.Refresh(ctx, p.Refresh, "cid")
+	require.NoError(t, err)
+	require.LessOrEqual(t, p2.ExpiresIn, 20*time.Minute)
+	*now = start.Add(31 * time.Minute)
+	_, _, err = tk.Refresh(ctx, p2.Refresh, "cid")
+	require.ErrorIs(t, err, ErrNoToken)
 }

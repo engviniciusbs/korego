@@ -119,6 +119,11 @@ func RequireToken(tokens *auth.Tokens, db *store.DB, lim *auth.Limiter) func(htt
 				WriteError(w, http.StatusUnauthorized, "INVALID_TOKEN", "Token de API inválido, expirado ou revogado.")
 				return
 			}
+			if errors.Is(err, auth.ErrStaleToken) {
+				// Conhecido porém morto (vencido, revogado, acesso trocado): 401 sem contar como palpite.
+				WriteError(w, http.StatusUnauthorized, "INVALID_TOKEN", "Token de API inválido, expirado ou revogado.")
+				return
+			}
 			if err != nil {
 				internalError(w, err)
 				return
