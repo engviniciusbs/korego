@@ -19,9 +19,34 @@ type APIToken struct {
 	LastUsedIP string
 	ExpiresAt  *time.Time // nil = never
 	RevokedAt  *time.Time
+
+	// Conexões OAuth (Kind == "oauth"); em tokens manuais ficam vazios.
+	Kind            string // "manual" (padrão) ou "oauth"
+	ClientID        string
+	AccessExpiresAt *time.Time
+	RefreshHash     string
+	PrevRefreshHash string // refresh anterior, aceito na janela de rotação
+	PrevAccessHash  string
+	RotatedAt       *time.Time
 }
 
-const apiTokenCols = `id, user_id, name, token_hash, prefix, created_at, last_used_at, last_used_ip, expires_at, revoked_at`
+// TokenRotation são os novos valores de uma rotação de token OAuth.
+type TokenRotation struct {
+	AccessHash, RefreshHash, Prefix string
+	AccessExpiresAt, At             time.Time
+	KeepPrev                        bool // rotação dentro da janela: mantém prev_* e rotated_at
+}
+
+const apiTokenCols = `id, user_id, name, token_hash, prefix, created_at, last_used_at, last_used_ip, expires_at, revoked_at,
+	kind, client_id, access_expires_at, refresh_hash, prev_refresh_hash, prev_access_hash, rotated_at`
+
+// nullStr grava string vazia como NULL.
+func nullStr(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
 
 // nullUnix converts an optional time to a nullable unix-seconds SQL value.
 func nullUnix(t *time.Time) any {
@@ -34,23 +59,34 @@ func nullUnix(t *time.Time) any {
 func scanAPIToken(r rowScanner) (APIToken, error) {
 	var t APIToken
 	var c int64
-	var used, exp, rev sql.NullInt64
-	if err := r.Scan(&t.ID, &t.UserID, &t.Name, &t.TokenHash, &t.Prefix, &c, &used, &t.LastUsedIP, &exp, &rev); err != nil {
+	var used, exp, rev, accExp, rot sql.NullInt64
+	var refresh, prevRefresh, prevAccess sql.NullString
+	if err := r.Scan(&t.ID, &t.UserID, &t.Name, &t.TokenHash, &t.Prefix, &c, &used, &t.LastUsedIP, &exp, &rev,
+		&t.Kind, &t.ClientID, &accExp, &refresh, &prevRefresh, &prevAccess, &rot); err != nil {
 		return APIToken{}, err
 	}
 	t.CreatedAt = time.Unix(c, 0)
 	t.LastUsedAt, t.ExpiresAt, t.RevokedAt = unixPtr(used), unixPtr(exp), unixPtr(rev)
+	t.AccessExpiresAt, t.RotatedAt = unixPtr(accExp), unixPtr(rot)
+	t.RefreshHash, t.PrevRefreshHash, t.PrevAccessHash = refresh.String, prevRefresh.String, prevAccess.String
 	return t, nil
 }
 
 // CreateAPIToken inserts a token and returns its id. It returns ErrConflict
 // if the user already has an active (non-revoked) token with the same name.
 func (d *DB) CreateAPIToken(ctx context.Context, t APIToken) (int64, error) {
+	kind := t.Kind
+	if kind == "" {
+		kind = "manual"
+	}
 	res, err := d.sql.ExecContext(ctx,
-		`INSERT INTO api_tokens (user_id, name, token_hash, prefix, created_at, last_used_at, last_used_ip, expires_at, revoked_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO api_tokens (user_id, name, token_hash, prefix, created_at, last_used_at, last_used_ip, expires_at, revoked_at,
+			kind, client_id, access_expires_at, refresh_hash, prev_refresh_hash, prev_access_hash, rotated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.UserID, t.Name, t.TokenHash, t.Prefix, t.CreatedAt.Unix(),
-		nullUnix(t.LastUsedAt), t.LastUsedIP, nullUnix(t.ExpiresAt), nullUnix(t.RevokedAt))
+		nullUnix(t.LastUsedAt), t.LastUsedIP, nullUnix(t.ExpiresAt), nullUnix(t.RevokedAt),
+		kind, t.ClientID, nullUnix(t.AccessExpiresAt), nullStr(t.RefreshHash),
+		nullStr(t.PrevRefreshHash), nullStr(t.PrevAccessHash), nullUnix(t.RotatedAt))
 	if isUnique(err) {
 		return 0, ErrConflict
 	}
@@ -116,6 +152,73 @@ func (d *DB) TouchAPIToken(ctx context.Context, id int64, at time.Time, ip strin
 	if _, err := d.sql.ExecContext(ctx,
 		`UPDATE api_tokens SET last_used_at = ?, last_used_ip = ? WHERE id = ?`, at.Unix(), ip, id); err != nil {
 		return fmt.Errorf("atualizar token de API: %w", err)
+	}
+	return nil
+}
+
+// apiTokenWhere busca um token por uma condição fixa (nunca vinda de entrada externa).
+func (d *DB) apiTokenWhere(ctx context.Context, where string, args ...any) (APIToken, error) {
+	t, err := scanAPIToken(d.sql.QueryRowContext(ctx,
+		`SELECT `+apiTokenCols+` FROM api_tokens WHERE `+where, args...))
+	if errors.Is(err, sql.ErrNoRows) {
+		return APIToken{}, ErrNotFound
+	}
+	if err != nil {
+		return APIToken{}, fmt.Errorf("buscar token de API: %w", err)
+	}
+	return t, nil
+}
+
+// APITokenByRefreshHash devolve o token cujo refresh atual ou anterior casa
+// com o hash, ou ErrNotFound.
+func (d *DB) APITokenByRefreshHash(ctx context.Context, hash string) (APIToken, error) {
+	return d.apiTokenWhere(ctx, `refresh_hash = ? OR prev_refresh_hash = ?`, hash, hash)
+}
+
+// APITokenByPrevAccessHash devolve o token cujo acesso anterior casa com o
+// hash, ou ErrNotFound.
+func (d *DB) APITokenByPrevAccessHash(ctx context.Context, hash string) (APIToken, error) {
+	return d.apiTokenWhere(ctx, `prev_access_hash = ?`, hash)
+}
+
+// RotateAPIToken troca acesso e refresh de um token OAuth. É um CAS em
+// refresh_hash = expectRefreshHash; sem linha afetada devolve ErrConflict.
+func (d *DB) RotateAPIToken(ctx context.Context, id int64, expectRefreshHash string, r TokenRotation) error {
+	q := `UPDATE api_tokens SET token_hash = ?, refresh_hash = ?, prefix = ?, access_expires_at = ?,
+		prev_access_hash = token_hash, prev_refresh_hash = refresh_hash, rotated_at = ?
+		WHERE id = ? AND refresh_hash = ?`
+	if r.KeepPrev {
+		q = `UPDATE api_tokens SET token_hash = ?, refresh_hash = ?, prefix = ?, access_expires_at = ?
+		WHERE id = ? AND refresh_hash = ?`
+	}
+	var args []any
+	if r.KeepPrev {
+		args = []any{r.AccessHash, r.RefreshHash, r.Prefix, r.AccessExpiresAt.Unix(), id, expectRefreshHash}
+	} else {
+		args = []any{r.AccessHash, r.RefreshHash, r.Prefix, r.AccessExpiresAt.Unix(), r.At.Unix(), id, expectRefreshHash}
+	}
+	res, err := d.sql.ExecContext(ctx, q, args...)
+	if isUnique(err) {
+		return ErrConflict
+	}
+	if err != nil {
+		return fmt.Errorf("rotacionar token de API: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rotacionar token de API: %w", err)
+	}
+	if n == 0 {
+		return ErrConflict
+	}
+	return nil
+}
+
+// RevokeAPITokenByID revoga um token sem conferir o dono (revogação por reuso).
+func (d *DB) RevokeAPITokenByID(ctx context.Context, id int64, at time.Time) error {
+	if _, err := d.sql.ExecContext(ctx,
+		`UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, at.Unix(), id); err != nil {
+		return fmt.Errorf("revogar token de API: %w", err)
 	}
 	return nil
 }

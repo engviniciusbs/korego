@@ -36,7 +36,7 @@ func TestAPIToken_CreateAndLookup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	in.ID = id
+	in.ID, in.Kind = id, "manual"
 	if !reflect.DeepEqual(got, in) {
 		t.Fatalf("got %+v, want %+v", got, in)
 	}
@@ -167,5 +167,114 @@ func TestAPIToken_UserCascade(t *testing.T) {
 	}
 	if _, err := db.APITokenByHash(ctx, "h1"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func oauthToken(uid int64) APIToken {
+	t := sampleToken(uid, "Claude Code", "acc1")
+	t.Kind, t.ClientID, t.RefreshHash = "oauth", "c1", "ref1"
+	exp := time.Unix(1700003600, 0)
+	t.AccessExpiresAt = &exp
+	return t
+}
+
+func TestAPIToken_DefaultKindManual(t *testing.T) {
+	db := OpenMemory(t)
+	ctx := context.Background()
+	uid := newTokenUser(t, db)
+	if _, err := db.CreateAPIToken(ctx, sampleToken(uid, "ci", "h1")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.APITokenByHash(ctx, "h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != "manual" || got.ClientID != "" || got.RefreshHash != "" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestAPIToken_RotateCAS(t *testing.T) {
+	db := OpenMemory(t)
+	ctx := context.Background()
+	uid := newTokenUser(t, db)
+	id, err := db.CreateAPIToken(ctx, oauthToken(uid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(1700001000, 0)
+	rot := TokenRotation{AccessHash: "acc2", RefreshHash: "ref2", Prefix: "kg_newpref",
+		AccessExpiresAt: at.Add(time.Hour), At: at}
+	if err := db.RotateAPIToken(ctx, id, "ref1", rot); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.APITokenByHash(ctx, "acc2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RefreshHash != "ref2" || got.PrevRefreshHash != "ref1" || got.PrevAccessHash != "acc1" ||
+		got.Prefix != "kg_newpref" || got.RotatedAt == nil || !got.RotatedAt.Equal(at) ||
+		got.AccessExpiresAt == nil || !got.AccessExpiresAt.Equal(at.Add(time.Hour)) {
+		t.Fatalf("got %+v", got)
+	}
+	if err := db.RotateAPIToken(ctx, id, "ref1", rot); !errors.Is(err, ErrConflict) {
+		t.Fatalf("segunda rotação: err = %v, want ErrConflict", err)
+	}
+	byRef, err := db.APITokenByRefreshHash(ctx, "ref1")
+	if err != nil || byRef.ID != id || byRef.PrevRefreshHash != "ref1" {
+		t.Fatalf("por refresh antigo: %+v, %v", byRef, err)
+	}
+	if byRef, err = db.APITokenByRefreshHash(ctx, "ref2"); err != nil || byRef.ID != id {
+		t.Fatalf("por refresh atual: %+v, %v", byRef, err)
+	}
+	byAcc, err := db.APITokenByPrevAccessHash(ctx, "acc1")
+	if err != nil || byAcc.ID != id {
+		t.Fatalf("por acesso antigo: %+v, %v", byAcc, err)
+	}
+	if _, err := db.APITokenByRefreshHash(ctx, "zzz"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if _, err := db.APITokenByPrevAccessHash(ctx, "zzz"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestAPIToken_RotateKeepPrev(t *testing.T) {
+	db := OpenMemory(t)
+	ctx := context.Background()
+	uid := newTokenUser(t, db)
+	id, _ := db.CreateAPIToken(ctx, oauthToken(uid))
+	t1 := time.Unix(1700001000, 0)
+	if err := db.RotateAPIToken(ctx, id, "ref1", TokenRotation{AccessHash: "acc2", RefreshHash: "ref2",
+		Prefix: "kg_p2xxxxx", AccessExpiresAt: t1.Add(time.Hour), At: t1}); err != nil {
+		t.Fatal(err)
+	}
+	t2 := t1.Add(10 * time.Second)
+	if err := db.RotateAPIToken(ctx, id, "ref2", TokenRotation{AccessHash: "acc3", RefreshHash: "ref3",
+		Prefix: "kg_p3xxxxx", AccessExpiresAt: t2.Add(time.Hour), At: t2, KeepPrev: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.APITokenByHash(ctx, "acc3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RefreshHash != "ref3" || got.PrevRefreshHash != "ref1" || got.PrevAccessHash != "acc1" ||
+		got.RotatedAt == nil || !got.RotatedAt.Equal(t1) {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestAPIToken_RevokeByID(t *testing.T) {
+	db := OpenMemory(t)
+	ctx := context.Background()
+	uid := newTokenUser(t, db)
+	id, _ := db.CreateAPIToken(ctx, oauthToken(uid))
+	at := time.Unix(1700002000, 0)
+	if err := db.RevokeAPITokenByID(ctx, id, at); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := db.APITokenByHash(ctx, "acc1")
+	if got.RevokedAt == nil || !got.RevokedAt.Equal(at) {
+		t.Fatalf("RevokedAt = %v", got.RevokedAt)
 	}
 }
