@@ -11,6 +11,8 @@ export interface ApiToken {
   lastUsedAt: string | null;
   lastUsedIp: string;
   expiresAt: string | null;
+  /** "oauth" para conexões autorizadas pelo navegador; "manual" para tokens criados aqui. */
+  kind: "manual" | "oauth";
 }
 
 export interface CreateTokenInput {

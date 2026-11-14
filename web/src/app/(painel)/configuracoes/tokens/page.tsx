@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { useId, useState, type FormEvent } from "react";
 import { PageHeader, PanelState } from "@/components/shell/page-header";
-import { Alert, Button, Dialog, Input, Label, Panel, Spinner } from "@/components/ui";
+import { Alert, Badge, Button, Dialog, Input, Label, Panel, Spinner } from "@/components/ui";
 import { focusRing } from "@/components/ui/focus";
 import { Tabs, tabId, tabPanelId } from "@/components/ui/tabs";
-import { mcpClients, type McpClientId } from "@/lib/mcp-clients";
+import { mcpClients, mcpOAuthClients, type McpClientId, type McpClientSetup } from "@/lib/mcp-clients";
+import { usePanelSettings } from "@/lib/settings";
 import { selectCls } from "@/components/domains/form-bits";
 import { ApiError } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
@@ -47,9 +48,8 @@ function CopyButton({ text, label }: { text: string; label: string }) {
 const codeCls =
   "block min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap border border-line-strong bg-bg/40 px-3 py-2 font-mono text-xs text-fg [overflow-wrap:anywhere]";
 
-function ConnectClients({ token }: { token: string }) {
+function ConnectClients({ clients }: { clients: McpClientSetup[] }) {
   const uid = useId();
-  const clients = mcpClients(location.origin, token);
   const [active, setActive] = useState<McpClientId>("claude-code");
   const c = clients.find((x) => x.id === active) ?? clients[0];
   return (
@@ -81,6 +81,39 @@ function ConnectClients({ token }: { token: string }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Conexão por OAuth: o agente recebe só a URL e o navegador pede a autorização. */
+function ConnectAgent() {
+  const panel = usePanelSettings();
+  const ready = panel.data && panel.data.domain && panel.data.cert?.state === "active";
+  return (
+    <Panel
+      title="Conectar um agente"
+      description="Informe só a URL ao agente: o navegador abre para você autorizar com o 2FA."
+    >
+      {panel.isPending ? (
+        <PanelState>
+          <Spinner size="sm" decorative />
+          <span role="status">Carregando…</span>
+        </PanelState>
+      ) : ready ? (
+        <div className="space-y-3">
+          <ConnectClients clients={mcpOAuthClients(`https://${panel.data.domain}`)} />
+          <p className="text-xs text-fg-subtle">Use exatamente esta URL; outro endereço do mesmo servidor não autoriza.</p>
+        </div>
+      ) : (
+        <Alert variant="warning">
+          <p>Configure o domínio do painel com HTTPS para conectar agentes.</p>
+          <p className="mt-1">
+            <Link href="/configuracoes/painel/" className="underline">
+              Configurações → Painel
+            </Link>
+          </p>
+        </Alert>
+      )}
+    </Panel>
   );
 }
 
@@ -117,7 +150,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
             <CopyButton text={created.token} label="Copiar token" />
           </div>
         </div>
-        <ConnectClients token={created.token} />
+        <ConnectClients clients={mcpClients(location.origin, created.token)} />
       </Dialog>
     );
   }
@@ -284,7 +317,14 @@ function TokenList() {
             <tbody>
               {items.map((t: ApiToken) => (
                 <tr key={t.id} className="border-b border-line last:border-b-0 hover:bg-surface-2/60">
-                  <td className={`${td} text-fg [overflow-wrap:anywhere]`}>{t.name}</td>
+                  <td className={`${td} text-fg [overflow-wrap:anywhere]`}>
+                    {t.name}
+                    {t.kind === "oauth" && (
+                      <Badge size="sm" className="ml-2">
+                        OAuth
+                      </Badge>
+                    )}
+                  </td>
                   <td className={`${td} font-mono text-fg-muted`} translate="no">
                     {t.prefix}…
                   </td>
@@ -366,6 +406,7 @@ export default function TokensPage() {
         description="Acesso de agentes ao painel via MCP. Exigem o painel em HTTPS."
       />
       <div className="space-y-6">
+        <ConnectAgent />
         <TokenList />
       </div>
     </>

@@ -176,7 +176,30 @@ O KoreGO tem um servidor [MCP](https://modelcontextprotocol.io) em `/mcp` com as
 
 **Limite de confiança.** Um token tem o mesmo poder do administrador no servidor, inclusive publicar qualquer container, o que na prática equivale a ser root no host. O código 2FA protege contra erros de um agente, mas não é uma barreira contra um token vazado. Use tokens com validade, deixe "Nunca" para casos raros e revogue na dúvida.
 
-### Criar um token
+### Conectar por OAuth (recomendado)
+
+O agente recebe só a URL do servidor e o navegador abre para você autorizar, sem copiar token.
+
+1. Configure antes o domínio do painel com HTTPS (Configurações → Painel). Sem isso, o fluxo OAuth fica indisponível.
+2. Abra Configurações → Tokens de API; o painel "Conectar um agente" mostra uma aba por cliente com o comando pronto. No Claude Code:
+
+   ```sh
+   claude mcp add --transport http korego https://painel.exemplo.com/mcp
+   ```
+
+3. No cliente, inicie a conexão (no Claude Code, `/mcp`; no Codex, `codex mcp login korego`). O navegador abre a tela de autorização do KoreGO.
+4. Entre no painel, se preciso, e informe o código 2FA. Escolha a validade da conexão (30 ou 90 dias) e autorize.
+
+Detalhes:
+
+- **Retornos aceitos.** Só são aceitos retornos em loopback (`http://127.0.0.1`, `http://localhost` e `http://[::1]`, com qualquer porta e caminho), `https://vscode.dev/redirect` e `https://insiders.vscode.dev/redirect`. O Cursor ainda não é aceito: use um token.
+- **Use a URL exata.** A conexão vale para `https://<domínio do painel>/mcp`. Trocar o domínio do painel exige reconectar os agentes.
+- **2FA logo após o login.** Cada código vale uma vez; se você acabou de entrar com o código atual, a tela de autorização o recusa. Aguarde o próximo código e tente de novo.
+- **Renovação e revogação.** O acesso é renovado automaticamente até a validade escolhida. As conexões aparecem na mesma lista de tokens, com o selo "OAuth", e são revogadas ali com **Revogar**.
+
+### Criar um token (alternativa)
+
+Se o cliente não suporta OAuth (como o Cursor, por ora), use um token manual.
 
 1. Abra Configurações → Tokens de API e clique em **Novo token**.
 2. Informe um nome (1 a 64 caracteres, único entre os tokens ativos), a validade (90 dias por padrão, 30 dias ou nunca) e o código 2FA atual.

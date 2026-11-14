@@ -94,3 +94,66 @@ export function mcpClients(origin: string, token: string): McpClientSetup[] {
     },
   ];
 }
+
+/**
+ * Versão para o fluxo OAuth: só a URL do servidor, sem token nem cabeçalho.
+ * O cliente abre o navegador para o usuário autorizar com o 2FA.
+ */
+export function mcpOAuthClients(origin: string): McpClientSetup[] {
+  const url = `${origin}/mcp`;
+  const cursorServer = { url };
+  const vscodeServer = { name: NAME, type: "http", url };
+
+  return [
+    {
+      id: "claude-code",
+      label: "Claude Code",
+      hint: "Rode no terminal, na pasta do projeto. Use -s user para valer em todos os projetos.",
+      snippet: `claude mcp add --transport http ${NAME} ${url}`,
+    },
+    {
+      id: "cursor",
+      label: "Cursor",
+      hint: "O Cursor ainda não autoriza por este fluxo; se falhar, use um token abaixo.",
+      snippet: json({ mcpServers: { [NAME]: cursorServer } }),
+      installLink: {
+        href: `cursor://anysphere.cursor-deeplink/mcp/install?name=${NAME}&config=${encodeURIComponent(b64(JSON.stringify(cursorServer)))}`,
+        label: "Abrir no Cursor",
+      },
+    },
+    {
+      id: "vscode",
+      label: "VS Code",
+      hint: "Use o botão para instalar direto ou rode o comando no terminal.",
+      snippet: `code --add-mcp '${JSON.stringify(vscodeServer)}'`,
+      installLink: {
+        href: `vscode:mcp/install?${encodeURIComponent(JSON.stringify(vscodeServer))}`,
+        label: "Abrir no VS Code",
+      },
+    },
+    {
+      id: "codex",
+      label: "Codex",
+      hint: "Depois rode `codex mcp login korego`.",
+      snippet: `[mcp_servers.${NAME}]\nurl = "${url}"\n`,
+    },
+    {
+      id: "gemini",
+      label: "Gemini CLI",
+      hint: "Adicione em ~/.gemini/settings.json.",
+      snippet: json({ mcpServers: { [NAME]: { httpUrl: url } } }),
+    },
+    {
+      id: "windsurf",
+      label: "Windsurf",
+      hint: "Adicione em ~/.codeium/windsurf/mcp_config.json.",
+      snippet: json({ mcpServers: { [NAME]: { serverUrl: url } } }),
+    },
+    {
+      id: "outro",
+      label: "Outro",
+      hint: "Qualquer cliente MCP com transporte Streamable HTTP e OAuth: informe só a URL.",
+      snippet: `URL: ${url}`,
+    },
+  ];
+}

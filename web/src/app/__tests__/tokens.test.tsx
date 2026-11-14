@@ -19,11 +19,15 @@ const item = (over: Record<string, unknown> = {}) => ({
   lastUsedAt: null,
   lastUsedIp: "",
   expiresAt: null,
+  kind: "manual",
   ...over,
 });
 
 beforeEach(() => {
-  routes = { "GET /api/tokens": () => json({ items: [item()] }) };
+  routes = {
+    "GET /api/tokens": () => json({ items: [item()] }),
+    "GET /api/settings/panel": () => json({ domain: "p.exemplo.com", cert: { state: "active" } }),
+  };
   fetchMock = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
     const h = routes[`${init?.method ?? "GET"} ${url.split("?")[0]}`];
     return h ? h(init) : json({ error: { code: "NOT_FOUND", message: "não" } }, 404);
@@ -84,11 +88,11 @@ describe("Configurações → Tokens de API", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copiar token" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("tab", { name: "Codex" }));
+    fireEvent.click(within(dlg).getByRole("tab", { name: "Codex" }));
     expect(screen.getByText(/\[mcp_servers\.korego\]/)).toHaveTextContent(
       `url = "${location.origin}/mcp" http_headers = { "Authorization" = "Bearer kg_SEGREDO123" }`,
     );
-    fireEvent.click(screen.getByRole("tab", { name: "Cursor" }));
+    fireEvent.click(within(dlg).getByRole("tab", { name: "Cursor" }));
     const link = screen.getByRole("link", { name: "Abrir no Cursor" }).getAttribute("href")!;
     expect(link).toMatch(/^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=korego&config=/);
     const cfg = JSON.parse(atob(decodeURIComponent(link.split("config=")[1])));
@@ -148,5 +152,29 @@ describe("Configurações → Tokens de API", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirmar" }));
     await waitFor(() => expect(screen.queryByText("claude-code")).toBeNull());
     expect(screen.getByText("Nenhum token criado.")).toBeInTheDocument();
+  });
+
+  it("com o painel ativo, mostra Conectar um agente com o comando sem token", async () => {
+    renderPage();
+    expect(await screen.findByText("Conectar um agente")).toBeInTheDocument();
+    expect(await screen.findByText("claude mcp add --transport http korego https://p.exemplo.com/mcp")).toBeInTheDocument();
+    expect(screen.getByText("Informe só a URL ao agente: o navegador abre para você autorizar com o 2FA.")).toBeInTheDocument();
+    expect(screen.getByText("Use exatamente esta URL; outro endereço do mesmo servidor não autoriza.")).toBeInTheDocument();
+  });
+
+  it("sem certificado ativo, mostra o alerta e o link para Painel", async () => {
+    routes["GET /api/settings/panel"] = () => json({ domain: "p.exemplo.com", cert: { state: "pending" } });
+    renderPage();
+    expect(await screen.findByText("Configure o domínio do painel com HTTPS para conectar agentes.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Configurações → Painel/ })).toHaveAttribute("href", "/configuracoes/painel/");
+    expect(screen.queryByText(/claude mcp add/)).toBeNull();
+  });
+
+  it("marca a conexão OAuth com o selo OAuth", async () => {
+    routes["GET /api/tokens"] = () => json({ items: [item({ id: 3, name: "agente", kind: "oauth" }), item()] });
+    renderPage();
+    const row = (await screen.findByText("agente")).closest("tr")!;
+    expect(within(row).getByText("OAuth")).toBeInTheDocument();
+    expect(within(screen.getByText("claude-code").closest("tr")!).queryByText("OAuth")).toBeNull();
   });
 });

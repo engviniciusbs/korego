@@ -25,11 +25,12 @@ type tokenDTO struct {
 	LastUsedAt *time.Time `json:"lastUsedAt"`
 	LastUsedIP string     `json:"lastUsedIp"`
 	ExpiresAt  *time.Time `json:"expiresAt"`
+	Kind       string     `json:"kind"`
 }
 
 func toTokenDTO(t store.APIToken) tokenDTO {
 	return tokenDTO{ID: t.ID, Name: t.Name, Prefix: t.Prefix, CreatedAt: t.CreatedAt,
-		LastUsedAt: t.LastUsedAt, LastUsedIP: t.LastUsedIP, ExpiresAt: t.ExpiresAt}
+		LastUsedAt: t.LastUsedAt, LastUsedIP: t.LastUsedIP, ExpiresAt: t.ExpiresAt, Kind: t.Kind}
 }
 
 func (h tokenHandlers) audit(r *http.Request, userID int64, action string, meta map[string]any) {
