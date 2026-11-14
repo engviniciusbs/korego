@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/github"
 	"github.com/engviniciusbs/korego/internal/migrate"
 	"github.com/engviniciusbs/korego/internal/node/nodetest"
+	"github.com/engviniciusbs/korego/internal/node/proxy"
 	"github.com/engviniciusbs/korego/internal/node/proxy/proxytest"
 	"github.com/engviniciusbs/korego/internal/store"
 )
@@ -48,7 +50,8 @@ type probeSeen struct {
 	idAddr  string
 	idHdr   http.Header
 	idOK    bool
-	reqAuth string
+	idHost  string
+	idTLS   bool
 }
 
 // tokenProbe monta RequireToken na frente de um handler que registra o contexto.
@@ -80,6 +83,7 @@ func newTokenProbe(t *testing.T, shareLoginLimiter bool) *tokenProbe {
 		s.sess, _ = api.CurrentSession(r.Context())
 		s.ref, s.refOK = audit.TokenFrom(r.Context())
 		s.idTok, _, s.idAddr, s.idHdr, s.idOK = api.TokenIdentityForTest(r.Context())
+		s.idHost, s.idTLS, _ = api.TokenIdentityTransportForTest(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	})
 	u, err := p.svc.DB.UserByEmail(context.Background(), email)
@@ -120,6 +124,11 @@ func TestRequireToken_Valid(t *testing.T) {
 	assert.Equal(t, "claude-code/1.0", s.idHdr.Get("User-Agent"))
 	assert.Empty(t, s.idHdr.Get("Authorization"))
 	assert.Empty(t, s.idHdr.Get("Cookie"))
+	assert.Equal(t, "example.com", s.idHost)
+	assert.True(t, s.idTLS)
+
+	require.Equal(t, http.StatusNoContent, p.call(t, "/mcp", withRemote("127.0.0.1:1"), bearer(p.token)).Code)
+	assert.False(t, p.seen.idTLS)
 }
 
 func TestRequireToken_SchemeVariants(t *testing.T) {
@@ -426,4 +435,83 @@ func TestDispatch_CarriesIdentityAndQuery(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, st, p)
 		assert.Equal(t, "NOT_FOUND", errCode(b), p)
 	}
+}
+
+// Muitos códigos errados ao mesmo tempo, do mesmo token e IP: só 5 chegam a
+// ser conferidos (Attempt é atômico); o resto é 429.
+func TestGate_ConcurrentWrongCodesLimited(t *testing.T) {
+	g := newGateFx(t)
+	pid := g.project(t)
+	const n = 30
+	var wg sync.WaitGroup
+	statuses := make([]int, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			statuses[i], _ = g.disp.Do(context.Background(), g.tok, g.user, agentAddr, http.Header{},
+				http.MethodDelete, "/api/projects/"+itoa(pid), nil, nil, "000000")
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	count := map[int]int{}
+	for _, s := range statuses {
+		count[s]++
+	}
+	assert.Equal(t, map[int]int{http.StatusForbidden: 5, http.StatusTooManyRequests: n - 5}, count)
+}
+
+// Um token por TLS no domínio do painel vê requestHTTPS/requestHost certos e
+// consegue desligar a porta pública pelo despacho.
+func TestDispatch_CarriesHostAndTLS(t *testing.T) {
+	e, svc, fake, c, _ := domainsEnv(t, "203.0.113.10")
+	var addrs []string
+	svc.OnListenChange = func(a string) error { addrs = append(addrs, a); return nil }
+	fake.CertFn = func(context.Context, string) proxy.CertInfo { return proxy.CertInfo{State: proxy.CertActive} }
+	require.NoError(t, svc.SetPanelDomain(context.Background(), "painel.exemplo.com"))
+	*e.now = e.now.Add(30 * time.Second)
+
+	u, err := e.svc.DB.UserByEmail(context.Background(), email)
+	require.NoError(t, err)
+	tokens := &auth.Tokens{DB: e.svc.DB, Now: e.svc.Now}
+	secret, _, err := tokens.Issue(context.Background(), u.ID, "agente", 0)
+	require.NoError(t, err)
+	disp := api.NewDispatcherForTest(e.deps)
+
+	type result struct {
+		status int
+		body   map[string]any
+	}
+	var got result
+	call := func(method, path string, body any, code string, opts ...reqOpt) {
+		t.Helper()
+		h := api.TokenProbeForTest(tokens, e.svc.DB, nil, func(_ http.ResponseWriter, r *http.Request) {
+			st, b := disp.DoFromContext(r.Context(), method, path, body, code)
+			got = result{status: st}
+			require.NoError(t, json.Unmarshal(b, &got.body), string(b))
+		})
+		r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+		r.RemoteAddr = "203.0.113.5:1"
+		for _, o := range opts {
+			o(r)
+		}
+		h.ServeHTTP(httptest.NewRecorder(), r)
+	}
+
+	call(http.MethodGet, "/api/settings/panel", nil, "", withTLS(), bearer(secret), withHost("Painel.Exemplo.com:443"))
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	assert.Equal(t, true, got.body["requestHTTPS"])
+	assert.Equal(t, "Painel.Exemplo.com", got.body["requestHost"])
+
+	call(http.MethodPut, "/api/settings/panel/public-port", map[string]any{"enabled": false}, e.code(t, e.totp),
+		withTLS(), bearer(secret), withHost("painel.exemplo.com"))
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	assert.Equal(t, false, got.body["publicPort"])
+	assert.Equal(t, []string{"127.0.0.1:8000"}, addrs)
+	md := auditMeta(t, e, c, "panel.public_port", "panel")
+	assert.Equal(t, true, md["ok"])
+	assert.Equal(t, "token", md["via"])
 }

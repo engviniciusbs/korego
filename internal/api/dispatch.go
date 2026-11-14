@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -33,8 +34,8 @@ func newCore(rt *routes) http.Handler {
 // dispatch runs one request through the core router in-process.
 type dispatcher struct{ core http.Handler }
 
-// do monta a requisição (path com /api), copia o endereço e os cabeçalhos de
-// identidade de id, põe X-Korego-Code se code != "", reaplica a identidade no
+// do monta a requisição (path com /api), copia o endereço, o Host, o TLS e os
+// cabeçalhos de identidade de id, põe X-Korego-Code se code != "", reaplica a identidade no
 // contexto e serve pelo núcleo. body só vira JSON quando não é nil.
 func (d dispatcher) do(ctx context.Context, id tokenIdentity, method, path string, query url.Values,
 	body any, code string) (status int, resp []byte) {
@@ -58,6 +59,10 @@ func (d dispatcher) do(ctx context.Context, id tokenIdentity, method, path strin
 		return rec.Code, rec.Body.Bytes()
 	}
 	req.RemoteAddr = id.RemoteAddr
+	req.Host = id.Host
+	if id.TLS {
+		req.TLS = &tls.ConnectionState{}
+	}
 	for k, vs := range id.Header {
 		for _, v := range vs {
 			req.Header.Add(k, v)

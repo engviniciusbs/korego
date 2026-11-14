@@ -45,3 +45,15 @@ func (t DispatcherForTest) Do(ctx context.Context, tok store.APIToken, u store.U
 	method, path string, query url.Values, body any, code string) (int, []byte) {
 	return t.d.do(ctx, tokenIdentity{Token: tok, User: u, RemoteAddr: remoteAddr, Header: hdr}, method, path, query, body, code)
 }
+
+// TokenIdentityTransportForTest devolve o Host e o TLS guardados na identidade.
+func TokenIdentityTransportForTest(ctx context.Context) (host string, tls, ok bool) {
+	id, ok := ctx.Value(tokenIdentityKey).(tokenIdentity)
+	return id.Host, id.TLS, ok
+}
+
+// DoFromContext despacha com a identidade que RequireToken pôs em ctx.
+func (t DispatcherForTest) DoFromContext(ctx context.Context, method, path string, body any, code string) (int, []byte) {
+	id, _ := ctx.Value(tokenIdentityKey).(tokenIdentity)
+	return t.d.do(ctx, id, method, path, nil, body, code)
+}

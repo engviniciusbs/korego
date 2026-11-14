@@ -38,6 +38,9 @@ type tokenIdentity struct {
 	RemoteAddr string
 	// Header tem só identityHeaders.
 	Header http.Header
+	// Host e TLS da requisição original (requestIsHTTPS e o Host do painel).
+	Host string
+	TLS  bool
 }
 
 // tokenTransportOK diz se um token pode trafegar nesta requisição: por HTTPS
@@ -120,7 +123,8 @@ func RequireToken(tokens *auth.Tokens, db *store.DB, lim *auth.Limiter) func(htt
 				internalError(w, err)
 				return
 			}
-			id := tokenIdentity{Token: tok, User: u, RemoteAddr: r.RemoteAddr, Header: copyIdentityHeaders(r.Header)}
+			id := tokenIdentity{Token: tok, User: u, RemoteAddr: r.RemoteAddr, Header: copyIdentityHeaders(r.Header),
+				Host: r.Host, TLS: r.TLS != nil}
 			next.ServeHTTP(w, r.WithContext(withTokenIdentity(r.Context(), id)))
 		})
 	}
@@ -160,9 +164,11 @@ func codeConfirmed(ctx context.Context) bool {
 // requireCodeForToken: no-op for cookie requests; for token requests needs
 // header X-Korego-Code, verified with auth.Service.VerifyCode and the token
 // limiter (key "token:"+ip); on success marks ctx so confirmCode returns true
-// without reading the body. It answers before the handler runs: 429
-// RATE_LIMITED, 403 CODE_REQUIRED or 403 INVALID_CODE, each audited as
-// api_token.code. Only a wrong code counts toward the limiter.
+// without reading the body. It answers before the handler runs: 403
+// CODE_REQUIRED, 429 RATE_LIMITED or 403 INVALID_CODE, each audited as
+// api_token.code. Like confirmCode, every submitted code goes through
+// Limiter.Attempt (atomic check-and-count, so concurrent guesses cannot slip
+// past the limit) and a correct one resets it; a missing code does not count.
 func requireCodeForToken(svc *auth.Service, lim *auth.Limiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,14 +185,14 @@ func requireCodeForToken(svc *auth.Service, lim *auth.Limiter) func(http.Handler
 				record(svc, r, "api_token.code", r.Method+" "+r.URL.Path, map[string]any{"ok": false, "stage": stage})
 				WriteError(w, status, code, msg)
 			}
-			key, now := tokenLimitKey(r), clock(svc.Now)
-			if lim != nil && lim.Blocked(key, now) {
-				refuse(http.StatusTooManyRequests, "RATE_LIMITED", msgRateLimited, "rate_limited")
-				return
-			}
 			code := strings.TrimSpace(r.Header.Get(codeHeader))
 			if code == "" {
 				refuse(http.StatusForbidden, "CODE_REQUIRED", msgCodeRequired, "code_required")
+				return
+			}
+			key := tokenLimitKey(r)
+			if lim != nil && !lim.Attempt(key, clock(svc.Now)) {
+				refuse(http.StatusTooManyRequests, "RATE_LIMITED", msgRateLimited, "rate_limited")
 				return
 			}
 			ctx, cancel := detached(r, auditTimeout)
@@ -197,9 +203,6 @@ func requireCodeForToken(svc *auth.Service, lim *auth.Limiter) func(http.Handler
 				return
 			}
 			if !valid {
-				if lim != nil {
-					lim.Fail(key, now)
-				}
 				refuse(http.StatusForbidden, "INVALID_CODE", msgInvalidCode, "invalid_code")
 				return
 			}
