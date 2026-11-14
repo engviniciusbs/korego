@@ -220,6 +220,14 @@ func TestAPIToken_RotateCAS(t *testing.T) {
 	if err := db.RotateAPIToken(ctx, id, "ref1", rot); !errors.Is(err, ErrConflict) {
 		t.Fatalf("segunda rotação: err = %v, want ErrConflict", err)
 	}
+	// Linha revogada não rotaciona, mesmo com o refresh atual.
+	if err := db.RevokeAPITokenByID(ctx, id, at); err != nil {
+		t.Fatal(err)
+	}
+	rot3 := TokenRotation{AccessHash: "acc3", RefreshHash: "ref3", Prefix: "kg_newpref", AccessExpiresAt: at, At: at}
+	if err := db.RotateAPIToken(ctx, id, "ref2", rot3); !errors.Is(err, ErrConflict) {
+		t.Fatalf("rotação revogada: err = %v, want ErrConflict", err)
+	}
 	byRef, err := db.APITokenByRefreshHash(ctx, "ref1")
 	if err != nil || byRef.ID != id || byRef.PrevRefreshHash != "ref1" {
 		t.Fatalf("por refresh antigo: %+v, %v", byRef, err)

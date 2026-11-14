@@ -13,7 +13,7 @@ type APIToken struct {
 	ID, UserID int64
 	Name       string
 	TokenHash  string
-	Prefix     string // first 10 chars of the secret ("kg_" + 7)
+	Prefix     string // first 10 chars of the secret ("kg_" + 7, ou "kgo_" + 6 no OAuth)
 	CreatedAt  time.Time
 	LastUsedAt *time.Time
 	LastUsedIP string
@@ -174,6 +174,25 @@ func (d *DB) APITokenByRefreshHash(ctx context.Context, hash string) (APIToken, 
 	return d.apiTokenWhere(ctx, `refresh_hash = ? OR prev_refresh_hash = ?`, hash, hash)
 }
 
+// APITokenByID devolve o token pelo id, sem conferir o dono, ou ErrNotFound.
+func (d *DB) APITokenByID(ctx context.Context, id int64) (APIToken, error) {
+	return d.apiTokenWhere(ctx, `id = ?`, id)
+}
+
+// RevokeOtherOAuthTokens revoga as conexões OAuth vivas do usuário com o mesmo
+// client_id, exceto keepID: autorizar o cliente de novo substitui a conexão
+// antiga. Devolve quantas foram revogadas.
+func (d *DB) RevokeOtherOAuthTokens(ctx context.Context, userID int64, clientID string, keepID int64, at time.Time) (int64, error) {
+	res, err := d.sql.ExecContext(ctx,
+		`UPDATE api_tokens SET revoked_at = ?
+		WHERE user_id = ? AND kind = 'oauth' AND client_id = ? AND id <> ? AND revoked_at IS NULL`,
+		at.Unix(), userID, clientID, keepID)
+	if err != nil {
+		return 0, fmt.Errorf("revogar conexões anteriores: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // APITokenByPrevAccessHash devolve o token cujo acesso anterior casa com o
 // hash, ou ErrNotFound.
 func (d *DB) APITokenByPrevAccessHash(ctx context.Context, hash string) (APIToken, error) {
@@ -181,11 +200,12 @@ func (d *DB) APITokenByPrevAccessHash(ctx context.Context, hash string) (APIToke
 }
 
 // RotateAPIToken troca acesso e refresh de um token OAuth. É um CAS em
-// refresh_hash = expectRefreshHash; sem linha afetada devolve ErrConflict.
+// refresh_hash = expectRefreshHash, só em linha não revogada; sem linha
+// afetada devolve ErrConflict.
 func (d *DB) RotateAPIToken(ctx context.Context, id int64, expectRefreshHash string, r TokenRotation) error {
 	q := `UPDATE api_tokens SET token_hash = ?, refresh_hash = ?, prefix = ?, access_expires_at = ?,
 		prev_access_hash = token_hash, prev_refresh_hash = refresh_hash, rotated_at = ?
-		WHERE id = ? AND refresh_hash = ?`
+		WHERE id = ? AND refresh_hash = ? AND revoked_at IS NULL`
 	args := []any{r.AccessHash, r.RefreshHash, r.Prefix, r.AccessExpiresAt.Unix(), r.At.Unix(), id, expectRefreshHash}
 	res, err := d.sql.ExecContext(ctx, q, args...)
 	if isUnique(err) {

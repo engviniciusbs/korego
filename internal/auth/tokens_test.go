@@ -137,7 +137,8 @@ func TestIssueOAuth_UniqueName(t *testing.T) {
 		require.NoError(t, err)
 		names = append(names, tok.Name)
 		require.Regexp(t, `^kgr_[A-Za-z0-9_-]{43}$`, pair.Refresh)
-		require.Regexp(t, `^kg_[A-Za-z0-9_-]{43}$`, pair.Access)
+		require.Regexp(t, `^kgo_[A-Za-z0-9_-]{43}$`, pair.Access)
+		require.Equal(t, pair.Access[:10], tok.Prefix)
 		require.Equal(t, time.Hour, pair.ExpiresIn)
 		require.Equal(t, "oauth", tok.Kind)
 	}
@@ -145,9 +146,9 @@ func TestIssueOAuth_UniqueName(t *testing.T) {
 
 	// Nome longo é cortado para caber com o sufixo em 64 runas.
 	long := repeat("é", 70)
-	_, a, err := tk.IssueOAuth(ctx, uid, long, "cid", 0)
+	_, a, err := tk.IssueOAuth(ctx, uid, long, "cid", 90*24*time.Hour)
 	require.NoError(t, err)
-	_, b, err := tk.IssueOAuth(ctx, uid, long, "cid", 0)
+	_, b, err := tk.IssueOAuth(ctx, uid, long, "cid", 90*24*time.Hour)
 	require.NoError(t, err)
 	require.Equal(t, 64, len([]rune(a.Name)))
 	require.Equal(t, 64, len([]rune(b.Name)))
@@ -182,7 +183,7 @@ func TestValidate_UnknownVsStale(t *testing.T) {
 	_, err = tk.Validate(ctx, secret, "1.1.1.1")
 	require.ErrorIs(t, err, ErrStaleToken)
 
-	pair, _, err := tk.IssueOAuth(ctx, uid, "VS Code", "cid", 0)
+	pair, _, err := tk.IssueOAuth(ctx, uid, "VS Code", "cid", 90*24*time.Hour)
 	require.NoError(t, err)
 	*now = now.Add(time.Minute)
 	_, _, err = tk.Refresh(ctx, pair.Refresh, "cid")
@@ -194,7 +195,7 @@ func TestValidate_UnknownVsStale(t *testing.T) {
 func TestRefresh_RotatesAndGrace(t *testing.T) {
 	tk, uid, now := newTokens(t)
 	ctx := context.Background()
-	p1, _, err := tk.IssueOAuth(ctx, uid, "Codex", "cid", 0)
+	p1, _, err := tk.IssueOAuth(ctx, uid, "Codex", "cid", 90*24*time.Hour)
 	require.NoError(t, err)
 	*now = now.Add(time.Minute)
 	t0 := *now
@@ -230,7 +231,7 @@ func TestRefresh_RotatesAndGrace(t *testing.T) {
 func TestRefresh_ReuseAfterWindow(t *testing.T) {
 	tk, uid, now := newTokens(t)
 	ctx := context.Background()
-	p1, _, err := tk.IssueOAuth(ctx, uid, "Codex", "cid", 0)
+	p1, _, err := tk.IssueOAuth(ctx, uid, "Codex", "cid", 90*24*time.Hour)
 	require.NoError(t, err)
 	t0 := *now
 	p2, _, err := tk.Refresh(ctx, p1.Refresh, "cid")
@@ -245,7 +246,7 @@ func TestRefresh_ReuseAfterWindow(t *testing.T) {
 func TestRefresh_EmptyKey(t *testing.T) {
 	tk, uid, _ := newTokens(t)
 	ctx := context.Background()
-	p, _, err := tk.IssueOAuth(ctx, uid, "X", "cid", 0)
+	p, _, err := tk.IssueOAuth(ctx, uid, "X", "cid", 90*24*time.Hour)
 	require.NoError(t, err)
 	tk.Key = nil
 	_, _, err = tk.Refresh(ctx, p.Refresh, "cid")
@@ -264,7 +265,7 @@ func TestDeriveKey(t *testing.T) {
 func TestRefresh_ClientMismatch(t *testing.T) {
 	tk, uid, _ := newTokens(t)
 	ctx := context.Background()
-	p, _, err := tk.IssueOAuth(ctx, uid, "Gemini", "cid", 0)
+	p, _, err := tk.IssueOAuth(ctx, uid, "Gemini", "cid", 90*24*time.Hour)
 	require.NoError(t, err)
 	_, _, err = tk.Refresh(ctx, p.Refresh, "outro")
 	require.ErrorIs(t, err, ErrNoToken)
@@ -277,7 +278,7 @@ func TestRefresh_ClientMismatch(t *testing.T) {
 func TestRefresh_ConcurrentSameRefresh(t *testing.T) {
 	tk, uid, _ := newTokens(t)
 	ctx := context.Background()
-	p, _, err := tk.IssueOAuth(ctx, uid, "Windsurf", "cid", 0)
+	p, _, err := tk.IssueOAuth(ctx, uid, "Windsurf", "cid", 90*24*time.Hour)
 	require.NoError(t, err)
 
 	start := make(chan struct{})
@@ -320,4 +321,80 @@ func TestRefresh_CapsAtExpiresAt(t *testing.T) {
 	*now = start.Add(31 * time.Minute)
 	_, _, err = tk.Refresh(ctx, p2.Refresh, "cid")
 	require.ErrorIs(t, err, ErrNoToken)
+}
+
+func TestIssueOAuth_RejectsNonPositiveTTL(t *testing.T) {
+	tk, uid, _ := newTokens(t)
+	for _, ttl := range []time.Duration{0, -time.Hour} {
+		_, _, err := tk.IssueOAuth(context.Background(), uid, "X", "cid", ttl)
+		require.ErrorIs(t, err, ErrInvalidTTL, ttl)
+	}
+}
+
+// Conexão mais curta que AccessTTL: o primeiro acesso já para no fim dela.
+func TestIssueOAuth_CapsInitialAccess(t *testing.T) {
+	tk, uid, now := newTokens(t)
+	ctx := context.Background()
+	p, tok, err := tk.IssueOAuth(ctx, uid, "Curta", "cid", 20*time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, 20*time.Minute, p.ExpiresIn)
+	require.True(t, tok.AccessExpiresAt.Equal(now.Add(20*time.Minute)))
+	require.True(t, tok.ExpiresAt.Equal(now.Add(20*time.Minute)))
+}
+
+// kg_ só resolve token manual e kgo_ só conexão OAuth.
+func TestValidate_PrefixMatchesKind(t *testing.T) {
+	tk, uid, now := newTokens(t)
+	ctx := context.Background()
+	rnd, err := oauth.RandomToken()
+	require.NoError(t, err)
+	manualLike := "kg_" + rnd
+	_, err = tk.DB.CreateAPIToken(ctx, store.APIToken{UserID: uid, Name: "cruzado", TokenHash: hashToken(manualLike),
+		Prefix: manualLike[:10], CreatedAt: *now, Kind: "oauth", ClientID: "cid", RefreshHash: "r1"})
+	require.NoError(t, err)
+	_, err = tk.Validate(ctx, manualLike, "1.1.1.1")
+	require.ErrorIs(t, err, ErrNoToken)
+
+	oauthLike := "kgo_" + rnd
+	_, err = tk.DB.CreateAPIToken(ctx, store.APIToken{UserID: uid, Name: "cruzado2", TokenHash: hashToken(oauthLike),
+		Prefix: oauthLike[:10], CreatedAt: *now})
+	require.NoError(t, err)
+	_, err = tk.Validate(ctx, oauthLike, "1.1.1.1")
+	require.ErrorIs(t, err, ErrNoToken)
+
+	// kgo_ desconhecido também é ErrNoToken; quem decide não contar é o middleware.
+	other, err := oauth.RandomToken()
+	require.NoError(t, err)
+	_, err = tk.Validate(ctx, "kgo_"+other, "1.1.1.1")
+	require.ErrorIs(t, err, ErrNoToken)
+	require.True(t, IsOAuthAccess("kgo_"+other))
+	require.False(t, IsOAuthAccess("kg_"+other))
+}
+
+// A rotação mantém o prefixo exibido da primeira emissão.
+func TestRefresh_KeepsPrefix(t *testing.T) {
+	tk, uid, now := newTokens(t)
+	ctx := context.Background()
+	p1, tok, err := tk.IssueOAuth(ctx, uid, "Codex", "cid", 90*24*time.Hour)
+	require.NoError(t, err)
+	*now = now.Add(time.Minute)
+	p2, tok2, err := tk.Refresh(ctx, p1.Refresh, "cid")
+	require.NoError(t, err)
+	require.Regexp(t, `^kgo_[A-Za-z0-9_-]{43}$`, p2.Access)
+	require.Equal(t, tok.Prefix, tok2.Prefix)
+	cur, err := tk.Validate(ctx, p2.Access, "1.1.1.1")
+	require.NoError(t, err)
+	require.Equal(t, tok.Prefix, cur.Prefix)
+}
+
+// Conexão revogada no meio de uma renovação não é rotacionada.
+func TestRefresh_RevokedNotRotated(t *testing.T) {
+	tk, uid, _ := newTokens(t)
+	ctx := context.Background()
+	p, tok, err := tk.IssueOAuth(ctx, uid, "Rev", "cid", 90*24*time.Hour)
+	require.NoError(t, err)
+	require.NoError(t, tk.RevokeByID(ctx, tok.ID))
+	err = tk.DB.RotateAPIToken(ctx, tok.ID, hashToken(p.Refresh), store.TokenRotation{
+		AccessHash: "a", RefreshHash: "b", Prefix: tok.Prefix, AccessExpiresAt: time.Now(), At: time.Now()})
+	require.ErrorIs(t, err, store.ErrConflict)
 }

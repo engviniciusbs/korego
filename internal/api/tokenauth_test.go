@@ -565,12 +565,36 @@ func TestRequireToken_WWWAuthenticate(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Equal(t, `Bearer resource_metadata="https://p.exemplo.com/.well-known/oauth-protected-resource/mcp"`,
 		w.Header().Get("WWW-Authenticate"))
-	// Token vencido/desconhecido também leva o cabeçalho.
+	// Token desconhecido leva o cabeçalho com error="invalid_token".
 	w = p.call(t, "/mcp", withTLS(), bearer("kg_"+strings.Repeat("C", 43)))
-	assert.Contains(t, w.Header().Get("WWW-Authenticate"), "resource_metadata=")
+	assert.Equal(t, `Bearer resource_metadata="https://p.exemplo.com/.well-known/oauth-protected-resource/mcp", error="invalid_token"`,
+		w.Header().Get("WWW-Authenticate"))
+	// Token conhecido porém morto também.
+	_, err := p.svc.DB.RevokeAPIToken(context.Background(), p.tok.UserID, p.tok.ID, *p.now)
+	require.NoError(t, err)
+	w = p.call(t, "/mcp", withTLS(), bearer(p.token))
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Equal(t, `Bearer resource_metadata="https://p.exemplo.com/.well-known/oauth-protected-resource/mcp", error="invalid_token"`,
+		w.Header().Get("WWW-Authenticate"))
 
 	p.h = p.handler(func(context.Context) (string, bool) { return "", false })
 	w = p.call(t, "/mcp", withTLS())
 	require.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Equal(t, "Bearer", w.Header().Get("WWW-Authenticate"))
+	w = p.call(t, "/mcp", withTLS(), bearer("kg_"+strings.Repeat("C", 43)))
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Equal(t, `Bearer error="invalid_token"`, w.Header().Get("WWW-Authenticate"))
+}
+
+// Um kgo_ bem formado e desconhecido (acesso antigo depois de rotações) dá
+// 401 com o desafio, sem contar no limitador; um kg_ desconhecido conta.
+func TestRequireToken_UnknownOAuthAccessDoesNotCount(t *testing.T) {
+	p := newTokenProbe(t, false)
+	p.h = p.handler(func(context.Context) (string, bool) { return "https://p.exemplo.com", true })
+	for i := 0; i < 10; i++ {
+		w := p.call(t, "/mcp", withTLS(), bearer("kgo_"+strings.Repeat("D", 43)))
+		require.Equal(t, http.StatusUnauthorized, w.Code, i)
+		assert.Contains(t, w.Header().Get("WWW-Authenticate"), `error="invalid_token"`, i)
+	}
+	assert.Equal(t, http.StatusNoContent, p.call(t, "/mcp", withTLS(), bearer(p.token)).Code)
 }

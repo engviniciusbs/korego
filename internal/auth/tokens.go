@@ -28,6 +28,9 @@ var ErrStaleToken = errors.New("token vencido")
 // graça; a conexão é revogada.
 var ErrRefreshReuse = errors.New("refresh reutilizado")
 
+// ErrInvalidTTL indica validade de conexão OAuth ausente ou não positiva.
+var ErrInvalidTTL = errors.New("validade da conexão inválida")
+
 // ErrInvalidTokenName is returned for empty or too long token names.
 var ErrInvalidTokenName = errors.New("nome de token inválido")
 
@@ -37,6 +40,8 @@ const (
 	tokenPrefixLen  = 10
 
 	refreshPrefix = "kgr_"
+	// oauthAccessPrefix marca o token de acesso OAuth, distinto do manual (kg_).
+	oauthAccessPrefix = "kgo_"
 
 	// AccessTTL é a vida do token de acesso OAuth; RefreshGrace, a janela em que
 	// o refresh anterior ainda é aceito (renovações concorrentes ou resposta perdida).
@@ -54,7 +59,15 @@ type OAuthPair struct {
 	ExpiresIn       time.Duration
 }
 
-var tokenRe = regexp.MustCompile(`^kg_[A-Za-z0-9_-]{43}$`)
+var (
+	tokenRe       = regexp.MustCompile(`^kg_[A-Za-z0-9_-]{43}$`)
+	oauthAccessRe = regexp.MustCompile(`^kgo_[A-Za-z0-9_-]{43}$`)
+)
+
+// IsOAuthAccess diz se secret tem a forma de um token de acesso OAuth (kgo_).
+// Um kgo_ desconhecido costuma ser só um acesso antigo após rotações, não um
+// palpite: quem valida não o conta no limitador.
+func IsOAuthAccess(secret string) bool { return oauthAccessRe.MatchString(secret) }
 
 // Tokens manages API tokens backed by the store.
 type Tokens struct {
@@ -81,7 +94,7 @@ func (t *Tokens) derivePair(refresh string) (access, newRefresh string) {
 		m.Write([]byte(purpose + "\x00" + refresh))
 		return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 	}
-	return tokenPrefix + mac("access"), refreshPrefix + mac("refresh")
+	return oauthAccessPrefix + mac("access"), refreshPrefix + mac("refresh")
 }
 
 func (t *Tokens) now() time.Time {
@@ -126,13 +139,24 @@ func (t *Tokens) Issue(ctx context.Context, userID int64, name string, ttl time.
 // Validate resolves a secret to a live token and records its use (at most
 // once per minute). Malformed or unknown secrets give ErrNoToken; known but
 // dead ones (revoked, expired, access expired, replaced access) give ErrStaleToken.
+// O prefixo fixa o tipo: kg_ só resolve token manual e kgo_ só conexão OAuth;
+// o cruzamento dá ErrNoToken.
 func (t *Tokens) Validate(ctx context.Context, secret, ip string) (store.APIToken, error) {
-	if !tokenRe.MatchString(secret) {
+	var kind string
+	switch {
+	case tokenRe.MatchString(secret):
+		kind = "manual"
+	case oauthAccessRe.MatchString(secret):
+		kind = "oauth"
+	default:
 		return store.APIToken{}, ErrNoToken
 	}
 	h := hashToken(secret)
 	tok, err := t.DB.APITokenByHash(ctx, h)
 	if errors.Is(err, store.ErrNotFound) {
+		if kind != "oauth" {
+			return store.APIToken{}, ErrNoToken
+		}
 		// Acesso substituído por uma rotação: conhecido, porém morto.
 		_, perr := t.DB.APITokenByPrevAccessHash(ctx, h)
 		if errors.Is(perr, store.ErrNotFound) {
@@ -145,6 +169,9 @@ func (t *Tokens) Validate(ctx context.Context, secret, ip string) (store.APIToke
 	}
 	if err != nil {
 		return store.APIToken{}, err
+	}
+	if tok.Kind != kind {
+		return store.APIToken{}, ErrNoToken
 	}
 	now := t.now()
 	if tok.RevokedAt != nil || (tok.ExpiresAt != nil && !now.Before(*tok.ExpiresAt)) ||
@@ -160,7 +187,7 @@ func (t *Tokens) Validate(ctx context.Context, secret, ip string) (store.APIToke
 	return tok, nil
 }
 
-// newPair gera um par kg_/kgr_ novo.
+// newPair gera um par kgo_/kgr_ novo.
 func newPair() (access, refresh string, err error) {
 	a, err := oauth.RandomToken()
 	if err != nil {
@@ -170,22 +197,31 @@ func newPair() (access, refresh string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	return tokenPrefix + a, refreshPrefix + r, nil
+	return oauthAccessPrefix + a, refreshPrefix + r, nil
 }
 
 // IssueOAuth cria uma conexão OAuth. O nome é único por usuário: clientName,
-// depois "clientName (2)" até "(20)", cortado para caber em 64 runas.
+// depois "clientName (2)" até "(20)", cortado para caber em 64 runas. A
+// conexão sempre vence: ttl <= 0 dá ErrInvalidTTL, e o primeiro acesso não
+// passa do fim da conexão.
 func (t *Tokens) IssueOAuth(ctx context.Context, userID int64, clientName, clientID string, ttl time.Duration) (OAuthPair, store.APIToken, error) {
 	clientName = strings.TrimSpace(clientName)
 	if clientName == "" {
 		return OAuthPair{}, store.APIToken{}, ErrInvalidTokenName
+	}
+	if ttl <= 0 {
+		return OAuthPair{}, store.APIToken{}, ErrInvalidTTL
 	}
 	access, refresh, err := newPair()
 	if err != nil {
 		return OAuthPair{}, store.APIToken{}, err
 	}
 	now := t.now()
+	exp := now.Add(ttl)
 	accExp := now.Add(AccessTTL)
+	if exp.Before(accExp) {
+		accExp = exp
+	}
 	tok := store.APIToken{
 		UserID:          userID,
 		TokenHash:       hashToken(access),
@@ -195,10 +231,7 @@ func (t *Tokens) IssueOAuth(ctx context.Context, userID int64, clientName, clien
 		ClientID:        clientID,
 		AccessExpiresAt: &accExp,
 		RefreshHash:     hashToken(refresh),
-	}
-	if ttl > 0 {
-		exp := now.Add(ttl)
-		tok.ExpiresAt = &exp
+		ExpiresAt:       &exp,
 	}
 	for i := 1; i <= maxNameAttempts; i++ {
 		suffix := ""
@@ -218,7 +251,7 @@ func (t *Tokens) IssueOAuth(ctx context.Context, userID int64, clientName, clien
 			return OAuthPair{}, store.APIToken{}, err
 		}
 		tok.ID = id
-		return OAuthPair{Access: access, Refresh: refresh, ExpiresIn: AccessTTL}, tok, nil
+		return OAuthPair{Access: access, Refresh: refresh, ExpiresIn: accExp.Sub(now)}, tok, nil
 	}
 	return OAuthPair{}, store.APIToken{}, store.ErrConflict
 }
@@ -266,8 +299,10 @@ func (t *Tokens) Refresh(ctx context.Context, refresh, clientID string) (OAuthPa
 		if tok.ExpiresAt != nil && tok.ExpiresAt.Before(accExp) {
 			accExp = *tok.ExpiresAt
 		}
+		// O prefixo exibido é o da primeira emissão: a conexão continua
+		// reconhecível no painel depois das rotações.
 		rot := store.TokenRotation{
-			AccessHash: hashToken(access), RefreshHash: hashToken(newRefresh), Prefix: access[:tokenPrefixLen],
+			AccessHash: hashToken(access), RefreshHash: hashToken(newRefresh), Prefix: tok.Prefix,
 			AccessExpiresAt: accExp, At: now,
 		}
 		err = t.DB.RotateAPIToken(ctx, tok.ID, h, rot)

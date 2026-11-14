@@ -78,7 +78,7 @@ func TestToken_CodeExchange(t *testing.T) {
 	m := decode(t, w)
 	assert.Equal(t, "Bearer", m["token_type"])
 	assert.EqualValues(t, 3600, m["expires_in"])
-	assert.True(t, strings.HasPrefix(m["access_token"].(string), "kg_"))
+	assert.True(t, strings.HasPrefix(m["access_token"].(string), "kgo_"))
 	assert.True(t, strings.HasPrefix(m["refresh_token"].(string), "kgr_"))
 	assert.Equal(t, 200, f.mcpStatus(m["access_token"].(string)))
 }
@@ -95,6 +95,35 @@ func TestToken_CodeReuseRevokes(t *testing.T) {
 	require.Equal(t, 400, w.Code)
 	assert.Equal(t, "invalid_grant", decode(t, w)["error"])
 	assert.Equal(t, 401, f.mcpStatus(access))
+	au := audits(t, f.e, f.cookie, "token.code_reuse")
+	require.Len(t, au, 1)
+	assert.Equal(t, "Agente <b>X</b>", au[0]["client"])
+	assert.Equal(t, f.clientID, au[0]["clientId"])
+	assert.NotZero(t, au[0]["tokenId"])
+}
+
+// Autorizar o mesmo cliente de novo revoga a conexão anterior dele; a de
+// outro cliente fica.
+func TestToken_ReauthorizeReplacesConnection(t *testing.T) {
+	f := newGrantFx(t)
+	w := f.exchange(f.authCode(t), nil)
+	require.Equal(t, 200, w.Code, w.Body.String())
+	first := decode(t, w)["access_token"].(string)
+
+	firstClient := f.clientID
+	f.clientID = f.registerClient(t, `{"client_name":"Outro","redirect_uris":["http://localhost:1/cb"]}`)
+	w = f.exchange(f.authCode(t), nil)
+	require.Equal(t, 200, w.Code, w.Body.String())
+	other := decode(t, w)["access_token"].(string)
+
+	f.clientID = firstClient
+	w = f.exchange(f.authCode(t), nil)
+	require.Equal(t, 200, w.Code, w.Body.String())
+	second := decode(t, w)["access_token"].(string)
+
+	assert.Equal(t, 401, f.mcpStatus(first))
+	assert.Equal(t, 200, f.mcpStatus(second))
+	assert.Equal(t, 200, f.mcpStatus(other))
 }
 
 func TestToken_InvalidGrants(t *testing.T) {

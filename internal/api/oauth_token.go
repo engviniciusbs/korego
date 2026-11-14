@@ -79,9 +79,7 @@ func (s *oauthServer) codeGrant(w http.ResponseWriter, r *http.Request, form url
 	if code.Used {
 		// Reuso do código: a conexão que ele gerou é revogada (RFC 6749 §4.1.2).
 		if code.TokenID > 0 {
-			if err := s.d.Tokens.RevokeByID(r.Context(), code.TokenID); err != nil {
-				log.Printf("oauth: revogar conexão do código reutilizado: %v", err)
-			}
+			s.revokeForCodeReuse(r, code.TokenID, code.UserID, code.ClientName, code.ClientID)
 		}
 		invalidGrant("Código já utilizado.")
 		return
@@ -109,13 +107,33 @@ func (s *oauthServer) codeGrant(w http.ResponseWriter, r *http.Request, form url
 	}
 	if s.codes.setToken(hash, tok.ID) {
 		// O código foi reapresentado durante a emissão: a conexão sai.
-		if err := s.d.Tokens.RevokeByID(r.Context(), tok.ID); err != nil {
-			log.Printf("oauth: revogar conexão do código reutilizado: %v", err)
-		}
+		s.revokeForCodeReuse(r, tok.ID, tok.UserID, tok.Name, code.ClientID)
 		invalidGrant("Código já utilizado.")
 		return
 	}
+	// Autorizar o mesmo cliente de novo substitui a conexão anterior dele.
+	if _, err := s.d.Auth.DB.RevokeOtherOAuthTokens(r.Context(), tok.UserID, tok.ClientID, tok.ID, s.now()); err != nil {
+		log.Printf("oauth: revogar conexões anteriores do cliente: %v", err)
+	}
 	tokenResponse(w, pair)
+}
+
+// revokeForCodeReuse revoga a conexão gerada por um código reapresentado e
+// audita token.code_reuse. name é o nome conhecido da conexão, usado se a
+// linha não puder ser lida.
+func (s *oauthServer) revokeForCodeReuse(r *http.Request, tokenID, userID int64, name, clientID string) {
+	if err := s.d.Tokens.RevokeByID(r.Context(), tokenID); err != nil {
+		log.Printf("oauth: revogar conexão do código reutilizado: %v", err)
+	}
+	if tok, err := s.d.Auth.DB.APITokenByID(r.Context(), tokenID); err == nil {
+		name = tok.Name
+	}
+	ctx, cancel := detached(r, auditTimeout)
+	defer cancel()
+	s.d.Auth.Record(ctx, audit.Entry{
+		UserID: &userID, Action: "token.code_reuse", Target: name, IP: auth.ClientIP(r),
+		Metadata: map[string]any{"tokenId": tokenID, "client": name, "clientId": clientID},
+	})
 }
 
 func (s *oauthServer) refreshGrant(w http.ResponseWriter, r *http.Request, form url.Values, invalidGrant func(string)) {
