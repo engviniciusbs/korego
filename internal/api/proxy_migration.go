@@ -114,6 +114,12 @@ func confirmCode(svc *auth.Service, w http.ResponseWriter, r *http.Request, user
 	if r.ContentLength != 0 && !decodeJSON(w, r, &in) {
 		return false
 	}
+	return verifyCode(svc, w, r, userID, ip, in.Code, rec)
+}
+
+// verifyCode confere um código já lido: limitador, presença e VerifyCode.
+func verifyCode(svc *auth.Service, w http.ResponseWriter, r *http.Request, userID int64, ip, code string,
+	rec func(map[string]any)) bool {
 	now := time.Now()
 	if svc.Now != nil {
 		now = svc.Now()
@@ -123,14 +129,14 @@ func confirmCode(svc *auth.Service, w http.ResponseWriter, r *http.Request, user
 		WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", msgRateLimited)
 		return false
 	}
-	if strings.TrimSpace(in.Code) == "" {
+	if strings.TrimSpace(code) == "" {
 		rec(map[string]any{"ok": false, "stage": "code_required"})
 		WriteError(w, http.StatusForbidden, "CODE_REQUIRED", msgCodeRequired)
 		return false
 	}
 	ctx, cancel := detached(r, auditTimeout)
 	defer cancel()
-	ok, err := svc.VerifyCode(ctx, userID, in.Code)
+	ok, err := svc.VerifyCode(ctx, userID, code)
 	if err != nil {
 		internalError(w, err)
 		return false

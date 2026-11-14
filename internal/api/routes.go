@@ -31,6 +31,12 @@ func (rt *routes) mountSessionOnly(r chi.Router) {
 	r.Post("/auth/logout", rt.authH.logout)
 	r.Get("/containers/{id}/logs/download", rt.containersH.download)
 	r.Get("/ws", rt.wsH.serve)
+	if rt.d.Tokens != nil {
+		th := tokenHandlers{svc: rt.d.Auth, tokens: rt.d.Tokens}
+		r.Get("/tokens", th.list)
+		r.Post("/tokens", th.create)
+		r.Delete("/tokens/{id}", th.revoke)
+	}
 }
 
 // mountCore monta todas as demais rotas autenticadas. As ações irreversíveis
