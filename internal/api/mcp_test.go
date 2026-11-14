@@ -111,17 +111,19 @@ func (h headerRT) RoundTrip(r *http.Request) (*http.Response, error) {
 	return h.base.RoundTrip(r)
 }
 
-func (m *mcpFx) connectWith(ctx context.Context, authz string) (*mcp.ClientSession, error) {
+func (m *mcpFx) connectWith(ctx context.Context, authz string, opts ...*mcp.ClientSessionOptions) (*mcp.ClientSession, error) {
 	hc := m.srv.Client()
 	hc.Transport = headerRT{base: hc.Transport, auth: authz}
 	c := mcp.NewClient(&mcp.Implementation{Name: "teste", Version: "1"}, nil)
 	return c.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: m.srv.URL + "/mcp", HTTPClient: hc,
-		MaxRetries: -1, DisableStandaloneSSE: true}, nil)
+		MaxRetries: -1, DisableStandaloneSSE: true}, append(opts, nil)[0])
 }
 
-func (m *mcpFx) connect(t *testing.T) *mcp.ClientSession {
+func (m *mcpFx) connect(t *testing.T) *mcp.ClientSession { return m.connectOpts(t, nil) }
+
+func (m *mcpFx) connectOpts(t *testing.T, opts *mcp.ClientSessionOptions) *mcp.ClientSession {
 	t.Helper()
-	cs, err := m.connectWith(context.Background(), "Bearer "+m.secret)
+	cs, err := m.connectWith(context.Background(), "Bearer "+m.secret, opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cs.Close() })
 	return cs
@@ -379,26 +381,50 @@ func TestMCP_DeployWaitClampAndCancel(t *testing.T) {
 	assert.Equal(t, time.Second, slept, "mínimo de 1 s")
 	restore()
 
-	// Sono real: cancelar o cliente encerra a chamada e a ferramenta no servidor.
-	exited := make(chan struct{}, 1)
+	assertWaitStopsOnCancel(t, cs, did)
+}
+
+// Cliente em protocolo antigo (antes de 2026-07-28): o SDK não liga o
+// cancelamento ao pedido HTTP; a desconexão ainda precisa parar deploy_wait.
+func TestMCP_DeployWaitCancelOldProtocol(t *testing.T) {
+	m := newMCPFx(t, false)
+	cs := m.connectOpts(t, &mcp.ClientSessionOptions{ProtocolVersion: "2025-06-18"})
+	require.Equal(t, "2025-06-18", cs.InitializeResult().ProtocolVersion)
+	assertWaitStopsOnCancel(t, cs, m.imageDeploy(t, cs))
+}
+
+// assertWaitStopsOnCancel: com o sono real, cancelar o cliente encerra a
+// chamada e a ferramenta no servidor, cada uma em até 1 s.
+func assertWaitStopsOnCancel(t *testing.T, cs *mcp.ClientSession, did any) {
+	t.Helper()
+	started, exited := make(chan struct{}, 1), make(chan struct{}, 1)
+	signal := func(c chan struct{}) {
+		select {
+		case c <- struct{}{}:
+		default:
+		}
+	}
 	defer api.SetDeployWaitSleepForTest(func(ctx context.Context, d time.Duration) error {
+		signal(started)
 		err := api.SleepCtxForTest(ctx, d)
 		if err != nil {
-			select {
-			case exited <- struct{}{}:
-			default:
-			}
+			signal(exited)
 		}
 		return err
 	})()
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		_, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "deploy_wait",
 			Arguments: map[string]any{"id": did, "timeoutSeconds": 120}})
 		done <- err
 	}()
-	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deploy_wait não começou a esperar")
+	}
 	cancel()
 	select {
 	case err := <-done:

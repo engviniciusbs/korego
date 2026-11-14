@@ -244,6 +244,8 @@ func addREST[In restInput](tb toolBox, t restTool) {
 		p.Description = t.idDesc
 	}
 	mcp.AddTool(tb.s, tb.tool(t, schema), func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
+		ctx, cancel := boundToRequest(ctx)
+		defer cancel()
 		id, ok := identityOf(req)
 		if !ok {
 			return noIdentityResult(), nil, nil
@@ -395,6 +397,8 @@ func addDeployWait(tb toolBox) {
 		desc: "Espera o deploy terminar (até timeoutSeconds, máximo 120) e devolve status, timedOut e as últimas 50 linhas do log. Se timedOut, chame de novo."}
 	mcp.AddTool(tb.s, tb.tool(t, inputSchema[deployWaitInput]()),
 		func(ctx context.Context, req *mcp.CallToolRequest, in deployWaitInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := boundToRequest(ctx)
+			defer cancel()
 			id, ok := identityOf(req)
 			if !ok {
 				return noIdentityResult(), nil, nil
@@ -482,6 +486,8 @@ func addProxyStatus(tb toolBox) {
 		desc: "Estado do proxy (Caddy) e, por domínio, o certificado servido: é assim que se confirma que o HTTPS respondeu."}
 	mcp.AddTool(tb.s, tb.tool(t, inputSchema[noInput]()),
 		func(ctx context.Context, req *mcp.CallToolRequest, _ noInput) (*mcp.CallToolResult, any, error) {
+			ctx, cancel := boundToRequest(ctx)
+			defer cancel()
 			id, ok := identityOf(req)
 			if !ok {
 				return noIdentityResult(), nil, nil

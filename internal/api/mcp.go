@@ -60,7 +60,31 @@ func newMCPHandler(d dispatcher, version string) http.Handler {
 		PropagateRequestCancellation: true,
 	})
 	return sdkauth.RequireBearerToken(verifyTokenIdentity,
-		&sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(h)
+		&sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(keepRequestCtx(h))
+}
+
+// mcpRequestCtxKey guarda o contexto do pedido HTTP do /mcp.
+type mcpRequestCtxKey struct{}
+
+// keepRequestCtx guarda r.Context() para as ferramentas. Antes do protocolo
+// 2026-07-28 o SDK não cancela a ferramenta quando o cliente cai, e no modo
+// sem estado o notifications/cancelled chega noutro POST (outra sessão).
+func keepRequestCtx(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), mcpRequestCtxKey{}, r.Context())))
+	})
+}
+
+// boundToRequest cancela ctx também quando o pedido HTTP que trouxe a
+// chamada termina (cliente desconectou), em qualquer versão do protocolo.
+func boundToRequest(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	rc, ok := ctx.Value(mcpRequestCtxKey{}).(context.Context)
+	if !ok {
+		return ctx, cancel
+	}
+	stop := context.AfterFunc(rc, cancel)
+	return ctx, func() { stop(); cancel() }
 }
 
 // verifyTokenIdentity não confere o token de novo: devolve a identidade que
