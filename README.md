@@ -4,13 +4,14 @@ KoreGO é um gerenciador de VPS auto-hospedado: um único binário Go que serve 
 
 ## Estado
 
-**Etapa 3 (Proxy avançado e migração do nginx)** concluída, sobre a **Etapa 2 (Publicar)**, a **Etapa 1 (Observar)** e a **Etapa 0 (Fundação)**: binário único com painel embutido, primeiro acesso com criação do administrador (senha + 2FA obrigatório), sessões, auditoria, visão geral do servidor e autoatualização com verificação de checksum e rollback. A Etapa 1 acrescentou métricas ao vivo, containers Docker e PM2; a Etapa 2, publicação de aplicações, domínios com HTTPS automático e deploy pelo GitHub (veja "Publicar"); a Etapa 3 dá aos domínios rotas por caminho, pastas estáticas, certificados próprios, modo "Só Cloudflare", cabeçalhos e compressão, e troca o nginx pelo Caddy do KoreGO com ensaio, volta automática e botão de voltar (veja "Domínios avançados" e "Migrar do nginx").
+**Etapa 3 (Proxy avançado e migração do nginx)** concluída, sobre a **Etapa 2 (Publicar)**, a **Etapa 1 (Observar)** e a **Etapa 0 (Fundação)**: binário único com painel embutido, primeiro acesso com criação do administrador (senha + 2FA obrigatório), sessões, auditoria, visão geral do servidor e autoatualização com verificação de checksum e rollback. A Etapa 1 acrescentou métricas ao vivo, containers Docker e PM2; a Etapa 2, publicação de aplicações, domínios com HTTPS automático e deploy pelo GitHub (veja "Publicar"); a Etapa 3 dá aos domínios rotas por caminho, pastas estáticas, certificados próprios, modo "Só Cloudflare", cabeçalhos e compressão, e troca o nginx pelo Caddy do KoreGO com ensaio, volta automática e botão de voltar (veja "Domínios avançados" e "Migrar do nginx"). Por cima, o painel expõe um servidor **MCP** em `/mcp` com tokens de API, para que agentes como o Claude Code operem o KoreGO (veja "Agentes (MCP)").
 
 Roadmap:
 
 - **Etapa 1 (Observar)**: métricas, containers e PM2 (pronta).
 - **Etapa 2 (Publicar)**: aplicações, deploy, domínios e HTTPS (pronta).
 - **Etapa 3 (Proxy avançado)**: rotas, pastas estáticas, certificados próprios, Só Cloudflare e migração do nginx (pronta).
+- **Agentes (MCP)**: servidor MCP e tokens de API (pronto).
 
 ## Instalação
 
@@ -166,6 +167,42 @@ Os exemplos usam nomes fictícios: `loja.exemplo.net` (uma SPA em `/var/www/loja
 5. **Voltar.** Enquanto o arquivo da unit existir, o botão **Voltar para o nginx** (também com o código do 2FA) põe o Caddy de volta no ensaio e roda `systemctl enable --now nginx`. A troca não altera os arquivos em `/etc/nginx` nem os certificados do certbot, então o nginx volta como estava. Apagar o nginx e o certbot depois fica a seu critério.
 
 O guia completo, com o painel em HTTPS e o desligamento da porta 8000, está em [docs/migracao-nginx.md](docs/migracao-nginx.md).
+
+## Agentes (MCP)
+
+O KoreGO tem um servidor [MCP](https://modelcontextprotocol.io) em `/mcp` com as mesmas ferramentas do painel (projetos, aplicações, deploys, domínios, containers e outras). Assim, um agente como o Claude Code consegue publicar e operar aplicações por conversa. A autenticação é por token de API (`Authorization: Bearer kg_...`), aceito somente em `/mcp`; a API do painel (`/api/*`) continua exigindo sessão e CSRF e ignora o cabeçalho.
+
+**Requisito: HTTPS.** Tokens só funcionam via HTTPS, então configure antes o domínio do painel em Configurações → Painel. A única exceção é o acesso direto por loopback (sem cabeçalhos `X-Forwarded-*` ou `Forwarded`). Pelo painel em `http://IP:8000`, a criação do token é recusada com a orientação de configurar o domínio.
+
+### Criar um token
+
+1. Abra Configurações → Tokens de API e clique em **Novo token**.
+2. Informe um nome (1 a 64 caracteres, único entre os tokens ativos), a validade (90 dias por padrão, 30 dias ou nunca) e o código 2FA atual.
+3. Copie o token na hora: ele é exibido **uma única vez** e só o hash SHA-256 fica guardado.
+4. Registre o servidor no Claude Code com a linha que o painel mostra:
+
+```sh
+claude mcp add --transport http korego https://painel.exemplo.com/mcp --header "Authorization: Bearer kg_..."
+```
+
+### Ações com 2FA
+
+Ações irreversíveis exigem o código 2FA atual a cada chamada; o agente precisa pedi-lo a você. Como cada código só vale uma vez, duas ações seguidas pedem dois códigos diferentes. São elas:
+
+- apagar aplicação, projeto, domínio ou certificado;
+- remover um container;
+- assumir o proxy (troca do nginx) e voltar atrás;
+- aplicar uma atualização do KoreGO;
+- trocar o domínio do painel ou a porta pública;
+- desconectar o GitHub.
+
+### Somente pelo painel
+
+Criar, listar e revogar tokens, gerenciar sessões, encerrar sessão, login, configuração inicial e conectar o GitHub App não são alcançáveis por token. Segredos (valores de variáveis de ambiente, chaves de certificados, segredos TOTP, chaves do GitHub App) nunca voltam pelo MCP.
+
+### Revogar
+
+Em Configurações → Tokens de API, clique em **Revogar** no token e confirme. O token é verificado a cada requisição, então a próxima chamada do agente falha com `INVALID_TOKEN`. A tela mostra o último uso e o IP, e a auditoria (Configurações → Segurança) marca as ações feitas por token com `token <nome>`. Tentativas com token inválido ou código errado têm limite de taxa próprio.
 
 ## Desenvolvimento local
 
