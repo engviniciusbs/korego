@@ -71,12 +71,22 @@ func newTokenProbe(t *testing.T, shareLoginLimiter bool) *tokenProbe {
 	t.Helper()
 	p := &tokenProbe{env: newEnv(t)}
 	p.secret, _, _ = p.setup(t)
-	p.tokens = &auth.Tokens{DB: p.svc.DB, Now: p.svc.Now}
+	p.tokens = &auth.Tokens{DB: p.svc.DB, Now: p.svc.Now, Key: []byte("chave-de-teste-0123456789abcdef!")}
 	p.lim = auth.NewLimiter(5, time.Minute, 15*time.Minute)
 	if shareLoginLimiter {
 		p.lim = p.svc.Limiter
 	}
-	p.h = api.TokenProbeForTest(p.tokens, p.svc.DB, p.lim, func(w http.ResponseWriter, r *http.Request) {
+	p.h = p.handler(nil)
+	u, err := p.svc.DB.UserByEmail(context.Background(), email)
+	require.NoError(t, err)
+	p.token, p.tok, err = p.tokens.Issue(context.Background(), u.ID, "claude-code", 0)
+	require.NoError(t, err)
+	return p
+}
+
+// handler monta RequireToken (com a origem dada) na frente do handler de prova.
+func (p *tokenProbe) handler(origin func(context.Context) (string, bool)) http.Handler {
+	return api.TokenProbeForTest(p.tokens, p.svc.DB, p.lim, origin, func(w http.ResponseWriter, r *http.Request) {
 		s := &p.seen
 		s.calls++
 		s.user, s.userOK = api.CurrentUser(r.Context())
@@ -86,11 +96,6 @@ func newTokenProbe(t *testing.T, shareLoginLimiter bool) *tokenProbe {
 		s.idHost, s.idTLS, _ = api.TokenIdentityTransportForTest(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	})
-	u, err := p.svc.DB.UserByEmail(context.Background(), email)
-	require.NoError(t, err)
-	p.token, p.tok, err = p.tokens.Issue(context.Background(), u.ID, "claude-code", 0)
-	require.NoError(t, err)
-	return p
 }
 
 func (p *tokenProbe) call(t *testing.T, path string, opts ...reqOpt) *httptest.ResponseRecorder {
@@ -488,7 +493,7 @@ func TestDispatch_CarriesHostAndTLS(t *testing.T) {
 	var got result
 	call := func(method, path string, body any, code string, opts ...reqOpt) {
 		t.Helper()
-		h := api.TokenProbeForTest(tokens, e.svc.DB, nil, func(_ http.ResponseWriter, r *http.Request) {
+		h := api.TokenProbeForTest(tokens, e.svc.DB, nil, nil, func(_ http.ResponseWriter, r *http.Request) {
 			st, b := disp.DoFromContext(r.Context(), method, path, body, code)
 			got = result{status: st}
 			require.NoError(t, json.Unmarshal(b, &got.body), string(b))
@@ -514,4 +519,58 @@ func TestDispatch_CarriesHostAndTLS(t *testing.T) {
 	md := auditMeta(t, e, c, "panel.public_port", "panel")
 	assert.Equal(t, true, md["ok"])
 	assert.Equal(t, "token", md["via"])
+}
+
+func TestRequireToken_MissingBearerDoesNotCount(t *testing.T) {
+	p := newTokenProbe(t, false)
+	for i := 0; i < 10; i++ {
+		w := p.call(t, "/mcp", withTLS())
+		require.Equal(t, http.StatusUnauthorized, w.Code, i)
+		assert.Equal(t, "INVALID_TOKEN", errCode(decode(t, w)))
+	}
+	assert.Equal(t, http.StatusNoContent, p.call(t, "/mcp", withTLS(), bearer(p.token)).Code)
+}
+
+func TestRequireToken_StaleDoesNotCount(t *testing.T) {
+	p := newTokenProbe(t, false)
+	ctx := context.Background()
+	// Token manual revogado.
+	revSecret, revTok, err := p.tokens.Issue(ctx, p.tok.UserID, "revogado", 0)
+	require.NoError(t, err)
+	_, err = p.svc.DB.RevokeAPIToken(ctx, revTok.UserID, revTok.ID, *p.now)
+	require.NoError(t, err)
+	// Acesso OAuth vencido (relógio avança além de 1 h).
+	pair, _, err := p.tokens.IssueOAuth(ctx, p.tok.UserID, "Claude Code", "cid", 90*24*time.Hour)
+	require.NoError(t, err)
+	*p.now = p.now.Add(2 * time.Hour)
+	for i := 0; i < 10; i++ {
+		require.Equal(t, http.StatusUnauthorized, p.call(t, "/mcp", withTLS(), bearer(revSecret)).Code, i)
+		require.Equal(t, http.StatusUnauthorized, p.call(t, "/mcp", withTLS(), bearer(pair.Access)).Code, i)
+	}
+	assert.Equal(t, http.StatusNoContent, p.call(t, "/mcp", withTLS(), bearer(p.token)).Code)
+}
+
+func TestRequireToken_UnknownStillCounts(t *testing.T) {
+	p := newTokenProbe(t, false)
+	for i := 0; i < 5; i++ {
+		require.Equal(t, http.StatusUnauthorized, p.call(t, "/mcp", withTLS(), bearer("kg_"+strings.Repeat("B", 43))).Code, i)
+	}
+	assert.Equal(t, http.StatusTooManyRequests, p.call(t, "/mcp", withTLS(), bearer(p.token)).Code)
+}
+
+func TestRequireToken_WWWAuthenticate(t *testing.T) {
+	p := newTokenProbe(t, false)
+	p.h = p.handler(func(context.Context) (string, bool) { return "https://p.exemplo.com", true })
+	w := p.call(t, "/mcp", withTLS())
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Equal(t, `Bearer resource_metadata="https://p.exemplo.com/.well-known/oauth-protected-resource/mcp"`,
+		w.Header().Get("WWW-Authenticate"))
+	// Token vencido/desconhecido também leva o cabeçalho.
+	w = p.call(t, "/mcp", withTLS(), bearer("kg_"+strings.Repeat("C", 43)))
+	assert.Contains(t, w.Header().Get("WWW-Authenticate"), "resource_metadata=")
+
+	p.h = p.handler(func(context.Context) (string, bool) { return "", false })
+	w = p.call(t, "/mcp", withTLS())
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Equal(t, "Bearer", w.Header().Get("WWW-Authenticate"))
 }

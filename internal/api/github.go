@@ -14,7 +14,6 @@ import (
 	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/domains"
 	"github.com/engviniciusbs/korego/internal/github"
-	"github.com/engviniciusbs/korego/internal/node/proxy"
 	"github.com/engviniciusbs/korego/internal/store"
 )
 
@@ -34,17 +33,7 @@ type githubHandlers struct {
 
 // panelURL devolve https://<domínio> quando o painel tem domínio com certificado ativo.
 func (h githubHandlers) panelURL(ctx context.Context) (string, bool, error) {
-	if h.dom == nil {
-		return "", false, nil
-	}
-	p, err := h.dom.Panel(ctx)
-	if err != nil {
-		return "", false, err
-	}
-	if p.Domain == "" || p.Cert.State != proxy.CertActive {
-		return "", false, nil
-	}
-	return "https://" + p.Domain, true, nil
+	return panelOrigin(ctx, h.dom)
 }
 
 // status serves GET /api/github.

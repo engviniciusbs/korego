@@ -20,8 +20,8 @@ func CoreForTest(d Deps) http.Handler {
 }
 
 // TokenProbeForTest monta RequireToken na frente de probe.
-func TokenProbeForTest(tokens *auth.Tokens, db *store.DB, lim *auth.Limiter, probe http.HandlerFunc) http.Handler {
-	return RequireToken(tokens, db, lim)(probe)
+func TokenProbeForTest(tokens *auth.Tokens, db *store.DB, lim *auth.Limiter, origin func(context.Context) (string, bool), probe http.HandlerFunc) http.Handler {
+	return RequireToken(tokens, db, lim, origin)(probe)
 }
 
 // TokenIdentityForTest devolve a identidade de token que RequireToken pôs em ctx.

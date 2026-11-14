@@ -65,6 +65,9 @@ type Deps struct {
 	// TokenLimiter limita, por "token:"+IP, tokens inválidos e códigos
 	// errados vindos de tokens (nil = sem limite).
 	TokenLimiter *auth.Limiter
+	// OAuthOrigin, se não for nil, substitui a origem derivada de Domains
+	// (serve aos testes). Em produção fica nil e a origem vem de panelOrigin.
+	OAuthOrigin originFunc
 }
 
 // newRoutes constrói uma vez todos os handlers autenticados (alguns têm estado).
@@ -143,7 +146,7 @@ func NewRouter(d Deps) http.Handler {
 	// MCP: só Bearer (nunca cookie); as ferramentas despacham no núcleo.
 	if d.Tokens != nil && d.Auth != nil {
 		mcpH := newMCPHandler(dispatcher{core: newCore(rt)}, version.Version)
-		r.With(RequireToken(d.Tokens, d.Auth.DB, d.TokenLimiter)).Handle("/mcp", mcpH)
+		r.With(RequireToken(d.Tokens, d.Auth.DB, d.TokenLimiter, resolveOrigin(d))).Handle("/mcp", mcpH)
 	}
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
 		if d.Web == nil {
