@@ -102,14 +102,23 @@ func newRoutes(d Deps) *routes {
 		}
 	}
 
-	return &routes{d: d, authH: authH, auditH: auditH, systemH: systemH, metricsH: metricsH, usageH: usageH,
+	var oauthSrv *oauthServer
+	if d.Tokens != nil && d.Auth != nil {
+		oauthSrv = newOAuthServer(d, resolveOrigin(d))
+	}
+
+	return &routes{d: d, oauth: oauthSrv, authH: authH, auditH: auditH, systemH: systemH, metricsH: metricsH, usageH: usageH,
 		containersH: containersH, pm2H: pm2H, updateH: updateH, wsH: wsH, ghH: ghH, webhookH: webhookH}
 }
 
 // NewRouter monta o roteador principal, com a API sob /api.
 func NewRouter(d Deps) http.Handler {
-	rt := newRoutes(d)
-	d = rt.d
+	return newRouter(newRoutes(d))
+}
+
+// newRouter monta o roteador a partir das rotas já construídas.
+func newRouter(rt *routes) http.Handler {
+	d := rt.d
 	setup := setupHandlers{svc: d.Auth}
 	authH := rt.authH
 	webhookH, ghH := rt.webhookH, rt.ghH
@@ -143,6 +152,10 @@ func NewRouter(d Deps) http.Handler {
 			WriteError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Método não permitido.")
 		})
 	})
+	// OAuth: metadados e registro, fora de /api (sem cookie, CSRF nem CORS).
+	if rt.oauth != nil {
+		rt.oauth.mountPublic(r)
+	}
 	// MCP: só Bearer (nunca cookie); as ferramentas despacham no núcleo.
 	if d.Tokens != nil && d.Auth != nil {
 		mcpH := newMCPHandler(dispatcher{core: newCore(rt)}, version.Version)

@@ -68,3 +68,13 @@ func SetDeployWaitSleepForTest(f func(ctx context.Context, d time.Duration) erro
 
 // SleepCtxForTest expõe a espera real do deploy_wait.
 func SleepCtxForTest(ctx context.Context, d time.Duration) error { return sleepCtx(ctx, d) }
+
+// OAuthRouterForTest monta o roteador com o teto de clientes nunca autorizados
+// rebaixado (maxUnauthorized <= 0 mantém o padrão).
+func OAuthRouterForTest(d Deps, maxUnauthorized int) http.Handler {
+	rt := newRoutes(d)
+	if rt.oauth != nil && maxUnauthorized > 0 {
+		rt.oauth.maxUnauthorized = maxUnauthorized
+	}
+	return newRouter(rt)
+}
