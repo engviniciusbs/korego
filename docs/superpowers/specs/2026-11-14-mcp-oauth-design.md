@@ -65,13 +65,13 @@ Hoje, para ligar um agente ao `/mcp`, o usuário cria um token no painel, copia 
   - ignora campos desconhecidos (`scope`, `client_uri`, `logo_uri`, `software_*`...);
   - de `grant_types` mantém só `authorization_code` e `refresh_token`; se nenhum sobrar, registra os dois;
   - força `token_endpoint_auth_method: none` e `response_types: ["code"]`;
-  - sem `client_name`, usa "Agente sem nome"; o nome tem caracteres de controle removidos e até 64 caracteres;
+  - sem `client_name`, usa "Agente sem nome"; o nome tem caracteres de controle e de formatação (Cf, como inversões bidi e espaços de largura zero) removidos e até 64 caracteres;
   - responde com os metadados efetivamente registrados.
-- O único motivo de recusa é `redirect_uris`: vazio, mais de 5, ou algum fora da lista. Nesses casos responde 400 `invalid_redirect_uri`, e o URI recusado vai para o log do servidor (sem dados do usuário), para revelar clientes reais que a lista não cobre.
+- O único motivo de recusa é `redirect_uris`: vazio, mais de 5 (contados na entrada) ou nenhum dentro da lista. Retornos fora da lista são **descartados** e o cliente é registrado só com os aceitos (a resposta lista só esses); se nenhum sobrar, responde 400 `invalid_redirect_uri`. Cada URI descartado vai para o log do servidor (cortado em 200 caracteres, sem dados do usuário), para revelar clientes reais que a lista não cobre.
 - **Lista de retornos permitidos**:
   - loopback: `http://127.0.0.1`, `http://localhost` e `http://[::1]`, com qualquer porta e qualquer caminho, sem query nem fragmento;
-  - `https://vscode.dev/redirect` e `https://insiders.vscode.dev/redirect`, exatos;
-  - o retorno OAuth do Cursor, como **um único padrão exato** (esquema, autoridade e caminho; só o segmento com o nome do servidor pode variar). O valor é capturado de um registro real do Cursor durante a implementação. Até lá o Cursor usa token manual.
+  - `https://vscode.dev/redirect` e `https://insiders.vscode.dev/redirect` **não** são aceitos: a página repassa o código a um destino `vscode://` escolhido pelo próprio cliente via `state`, e o servidor não tem como saber quem o recebe. O VS Code usa o retorno de loopback;
+  - o retorno OAuth do Cursor, como **um único padrão exato** (esquema, autoridade e caminho; só o segmento com o nome do servidor pode variar), que precisa casar com o retorno inteiro. O valor é capturado de um registro real do Cursor durante a implementação. Até lá o Cursor usa token manual.
   - **Nunca** se aceitam `vscode://`, `vscode-insiders://` ou esquemas genéricos de editor. Neles o código iria para o handler de qualquer extensão instalada, e uma extensão que registre ou repasse a query entregaria o acesso.
   - Todo o resto é recusado. A lista fica em código, num só lugar e testada.
 - O `client_id` é aleatório, com 32 bytes. Não há segredo de cliente: o cliente é público e o PKCE é obrigatório.
@@ -93,7 +93,7 @@ Hoje, para ligar um agente ao `/mcp`, o usuário cria um token no painel, copia 
 - Sem sessão, vai para `/login/?next=/autorizar/?req=...` e volta depois do login. O suporte a `next` no login é novo e aceita **só** o padrão `^/autorizar/\?req=[A-Za-z0-9_-]{43}$`. Qualquer outro valor é ignorado e o login segue para `/`. Isso fecha os desvios do tipo `/\evil.com`, tabulação e quebra de linha.
 - Mostra:
   - "**<client_name>** quer acesso total a este painel", com a nota "nome informado pelo próprio aplicativo";
-  - o **destino do retorno**, em destaque e em linguagem simples: "este computador (localhost:PORTA)", "Cursor", "VS Code" ou "VS Code (vscode.dev)";
+  - o **destino do retorno**, em destaque e em linguagem simples: "este computador (localhost:PORTA)" ou "Cursor";
   - o aviso de que o acesso equivale ao administrador;
   - a validade (90 dias por padrão, ou 30 dias; sem "Nunca");
   - o campo do código 2FA e os botões Autorizar e Recusar.
@@ -105,18 +105,18 @@ Hoje, para ligar um agente ao `/mcp`, o usuário cria um token no painel, copia 
 
 ### Tokens
 
-- **Código de autorização:** 32 bytes, guardado só como hash, vale 60 s e uma única vez. Fica preso a `client_id`, `redirect_uri`, `code_challenge`, `resource` e usuário. Se o mesmo código for usado de novo, a conexão que ele gerou é revogada (RFC 6749 §4.1.2).
+- **Código de autorização:** 32 bytes, guardado só como hash, vale 60 s e uma única vez. Fica preso a `client_id`, `redirect_uri`, `code_challenge`, `resource` e usuário. Se o mesmo código for usado de novo, a conexão que ele gerou é revogada (RFC 6749 §4.1.2) e o reuso é auditado (`token.code_reuse`). Uma troca bem-sucedida revoga as outras conexões vivas do mesmo usuário com o mesmo `client_id`: autorizar o cliente de novo substitui a conexão antiga.
 - **Conexão:** cada aprovação cria uma linha em `api_tokens`, com nome único gerado a partir de `client_name` (com sufixo se o nome já existir). A linha guarda o hash do token de acesso atual, o hash do refresh atual e o do anterior, o `client_id`, a validade do acesso e a validade absoluta (`expires_at`, 30 ou 90 dias). Isso exige uma migração com colunas novas em `api_tokens` e uma tabela `oauth_clients`. Assim `RequireToken`, a auditoria (`via token`), a lista e a revogação continuam valendo sem caminho paralelo.
-- **Token de acesso:** formato `kg_` como hoje, válido por 1 h. `Validate` passa a recusar o acesso vencido mesmo antes de `expires_at`.
+- **Token de acesso:** prefixo `kgo_` (distinto do `kg_` dos tokens manuais), válido por 1 h e nunca além de `expires_at`. `kg_` só resolve token manual e `kgo_` só conexão OAuth. `Validate` passa a recusar o acesso vencido mesmo antes de `expires_at`. Um `kgo_` bem formado e desconhecido (acesso antigo depois de rotações) dá 401 sem contar no limitador.
 - **Refresh:** prefixo `kgr_`, aceito só em `/oauth/token`, rotativo; o `client_id` do pedido tem de ser o da conexão. Cada uso emite um par novo. O refresh anterior continua aceito por **60 s** depois da rotação, vindo do mesmo cliente, e devolve um par novo: isso cobre resposta perdida e processos concorrentes. Fora dessa janela, a reapresentação do anterior revoga a conexão e é auditada (`token.refresh_reuse`). Nada é emitido além de `expires_at`.
 - **Validade:** escolhida na tela de consentimento, 30 ou 90 dias (padrão 90), e enviada como `ttlDays` no corpo do `approve`.
 - **`/oauth/token`:** form-urlencoded; erros no formato RFC 6749 (`invalid_grant`, `invalid_request`, `invalid_client`, `unsupported_grant_type`); `Cache-Control: no-store`; limitador por IP próprio (`oauth:`+ip). Confere o PKCE S256 em tempo constante.
-- **Auditoria:** `token.oauth_authorized` (cliente, destino, validade), `token.oauth_denied` e `token.refresh_reuse`. A revogação usa o evento atual.
+- **Auditoria:** `token.oauth_authorized` (cliente, destino, validade), `token.oauth_denied`, `token.code_reuse` e `token.refresh_reuse`. A revogação usa o evento atual.
 
 ### Mudanças no `/mcp`
 
-- Quando a origem está configurada, a resposta 401 leva `WWW-Authenticate: Bearer resource_metadata="https://<domínio>/.well-known/oauth-protected-resource/mcp"`. Dá para usar `RequireBearerTokenOptions.ResourceMetadataURL` do SDK ou escrever no próprio `RequireToken`, que responde antes.
-- O limitador `token:` só conta falha quando o hash é **desconhecido**, ou seja, uma tentativa de adivinhar. Não contam como falha: pedido sem `Authorization` (a sondagem de todo cliente OAuth), nem token cujo hash corresponde a uma linha vencida ou revogada, inclusive o token de acesso anterior à rotação. Esses recebem 401 com `WWW-Authenticate`. Sem isso, a expiração a cada hora, várias janelas atrás do mesmo IP ou um cliente revogado insistindo bloqueariam o IP por 15 min, inclusive para os tokens manuais e o 2FA. Guardar o hash do acesso anterior serve para isso.
+- Quando a origem está configurada, a resposta 401 leva `WWW-Authenticate: Bearer resource_metadata="https://<domínio>/.well-known/oauth-protected-resource/mcp"`. Dá para usar `RequireBearerTokenOptions.ResourceMetadataURL` do SDK ou escrever no próprio `RequireToken`, que responde antes. Se um Bearer foi enviado e recusado (desconhecido ou morto), o desafio acrescenta `error="invalid_token"` (RFC 6750 §3.1); sem Bearer, não há parâmetro de erro.
+- O limitador `token:` só conta falha quando o hash é **desconhecido**, ou seja, uma tentativa de adivinhar. Não contam como falha: pedido sem `Authorization` (a sondagem de todo cliente OAuth), nem token cujo hash corresponde a uma linha vencida ou revogada, inclusive o token de acesso anterior à rotação, nem um acesso OAuth (`kgo_`) desconhecido, que costuma ser um acesso antigo de duas ou mais rotações atrás. Esses recebem 401 com `WWW-Authenticate`. Sem isso, a expiração a cada hora, várias janelas atrás do mesmo IP ou um cliente revogado insistindo bloqueariam o IP por 15 min, inclusive para os tokens manuais e o 2FA. Guardar o hash do acesso anterior serve para isso.
 
 ### Web
 
@@ -137,7 +137,7 @@ Hoje, para ligar um agente ao `/mcp`, o usuário cria um token no painel, copia 
 
 | Ameaça | Controle |
 |---|---|
-| Phishing: um cliente registrado com nome falso envia o código para o atacante | Retorno restrito a loopback e editores conhecidos; destino em destaque; 2FA a cada aprovação. Resíduo: malware na máquina do usuário receberia o código, mas nesse caso a máquina já está comprometida. |
+| Phishing: um cliente registrado com nome falso envia o código para o atacante | Retorno restrito a loopback (e ao padrão exato do Cursor, quando capturado); destino em destaque; 2FA a cada aprovação. Resíduo: malware na máquina do usuário receberia o código, mas nesse caso a máquina já está comprometida. |
 | Roubo do código no retorno | PKCE S256 obrigatório; código de 60 s e uso único; preso ao `redirect_uri` e ao cliente; `iss` na resposta (RFC 9207, contra mix-up). |
 | Redirecionamento aberto pelo `/oauth/authorize` | `client_id` e `redirect_uri` inválidos nunca redirecionam; `next` do login só aceita caminho relativo. |
 | Clickjacking na tela de consentimento | `frame-ancestors 'none'` e `X-Frame-Options: DENY` (já globais). |
@@ -150,13 +150,13 @@ Hoje, para ligar um agente ao `/mcp`, o usuário cria um token no painel, copia 
 | Negação de serviço pelo limitador nas sondagens | Pedido sem token não conta. |
 | Repúdio | Auditoria da autorização, da recusa e do reuso de refresh, com o nome do cliente. |
 
-Risco aceito: `https://vscode.dev/redirect` é uma página da Microsoft que repassa o retorno ao VS Code local. Confiar nela é confiar na Microsoft.
+Risco aceito: nenhum retorno https de terceiros. O `https://vscode.dev/redirect` foi retirado porque repassa o código a um destino `vscode://` escolhido pelo cliente via `state`; o VS Code usa o loopback. Resíduo que fica: o loopback entrega o código a qualquer processo local que escute a porta, o que pressupõe a máquina já comprometida.
 
 ## O que fica para o construtor
 
 - Nomes de tipos, arquivos e da migração; como a memória de pedidos pendentes e a limpeza de clientes são agendadas.
 - Se o 401 usa a opção do SDK ou é escrito em `RequireToken`.
 - O texto exato da tela, seguindo o tom do painel.
-- Testes: a lista de retornos (aceitos e recusados, incluindo `http://localhost.evil.com`, `http://127.0.0.1.nip.io`, `https://vscode.dev/redirect/../x`, userinfo `http://a@127.0.0.1`, `vscode://qualquer.extensao/x` e esquemas desconhecidos); registro com campos extras e `grant_types` com device_code aceito; token vencido ou revogado que não conta no limitador; refresh anterior aceito dentro de 60 s e revogando depois; `next` com `/\evil.com` e tabulação; rotas de aprovação recusadas por token; PKCE errado; código reusado; refresh reusado; `resource` diferente; origem não configurada; sondagem sem token que não bloqueia; `next` malicioso.
+- Testes: a lista de retornos (aceitos e recusados, incluindo `http://localhost.evil.com`, `http://127.0.0.1.nip.io`, `https://vscode.dev/redirect` (agora recusado) e `https://vscode.dev/redirect/../x`, userinfo `http://a@127.0.0.1`, `vscode://qualquer.extensao/x` e esquemas desconhecidos); registro com campos extras e `grant_types` com device_code aceito; token vencido ou revogado que não conta no limitador; refresh anterior aceito dentro de 60 s e revogando depois; `next` com `/\evil.com` e tabulação; rotas de aprovação recusadas por token; PKCE errado; código reusado; refresh reusado; `resource` diferente; origem não configurada; sondagem sem token que não bloqueia; `next` malicioso.
 - Capturar os pedidos de registro reais de Claude Code, VS Code, Cursor, Codex e Gemini CLI (o retorno do Cursor é o mais importante) e conferir a lista de retornos contra eles.
 - Um teste ponta a ponta com o cliente OAuth do go-sdk (`auth.AuthorizationCodeHandler`) contra o servidor de teste, simulando a aprovação. Se possível, também com `claude mcp add` real, como no e2e anterior.

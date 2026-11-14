@@ -170,11 +170,11 @@ O guia completo, com o painel em HTTPS e o desligamento da porta 8000, está em 
 
 ## Agentes (MCP)
 
-O KoreGO tem um servidor [MCP](https://modelcontextprotocol.io) em `/mcp` com as mesmas ferramentas do painel (projetos, aplicações, deploys, domínios, containers e outras). Assim, um agente como o Claude Code consegue publicar e operar aplicações por conversa. A autenticação é por token de API (`Authorization: Bearer kg_...`), aceito somente em `/mcp`; a API do painel (`/api/*`) continua exigindo sessão e CSRF e ignora o cabeçalho.
+O KoreGO tem um servidor [MCP](https://modelcontextprotocol.io) em `/mcp` com as mesmas ferramentas do painel (projetos, aplicações, deploys, domínios, containers e outras). Assim, um agente como o Claude Code consegue publicar e operar aplicações por conversa. Há duas formas de autenticar: por OAuth (recomendado), em que o agente recebe só a URL e você autoriza no navegador com o 2FA, ou por token de API (`Authorization: Bearer kg_...`). As duas são aceitas somente em `/mcp`; a API do painel (`/api/*`) continua exigindo sessão e CSRF e ignora o cabeçalho.
 
 **Requisito: HTTPS.** Tokens só funcionam via HTTPS, então configure antes o domínio do painel em Configurações → Painel. A única exceção é o acesso direto por loopback (sem cabeçalhos `X-Forwarded-*` ou `Forwarded`). Pelo painel em `http://IP:8000`, a criação do token é recusada com a orientação de configurar o domínio.
 
-**Limite de confiança.** Um token tem o mesmo poder do administrador no servidor, inclusive publicar qualquer container, o que na prática equivale a ser root no host. O código 2FA protege contra erros de um agente, mas não é uma barreira contra um token vazado. Use tokens com validade, deixe "Nunca" para casos raros e revogue na dúvida.
+**Limite de confiança.** Um token tem o mesmo poder do administrador no servidor, inclusive publicar qualquer container, o que na prática equivale a ser root no host. O código 2FA protege contra erros de um agente, mas não é uma barreira contra um token vazado. Use tokens com validade, deixe "Nunca" para casos raros e revogue na dúvida. Risco residual: uma conexão OAuth pode criar, pelo MCP e com 2FA, um token manual sem validade, e esse token sobrevive à revogação da conexão; confira a lista de tokens ao revogar uma conexão.
 
 ### Conectar por OAuth (recomendado)
 
@@ -192,10 +192,10 @@ O agente recebe só a URL do servidor e o navegador abre para você autorizar, s
 
 Detalhes:
 
-- **Retornos aceitos.** Só são aceitos retornos em loopback (`http://127.0.0.1`, `http://localhost` e `http://[::1]`, com qualquer porta e caminho), `https://vscode.dev/redirect` e `https://insiders.vscode.dev/redirect`. O Cursor ainda não é aceito: use um token.
+- **Retornos aceitos.** Só são aceitos retornos em loopback (`http://127.0.0.1`, `http://localhost` e `http://[::1]`, com qualquer porta e caminho); o VS Code usa esse retorno local. `https://vscode.dev/redirect` não é aceito: a página repassa o código a um destino `vscode://` escolhido pelo próprio cliente, sem que o servidor saiba quem o recebe. No registro, retornos fora da lista são descartados e o cliente fica só com os aceitos. O Cursor ainda não é aceito: use um token.
 - **Use a URL exata.** A conexão vale para `https://<domínio do painel>/mcp`. Trocar o domínio do painel exige reconectar os agentes.
 - **2FA logo após o login.** Cada código vale uma vez; se você acabou de entrar com o código atual, a tela de autorização o recusa. Aguarde o próximo código e tente de novo.
-- **Renovação e revogação.** O acesso é renovado automaticamente até a validade escolhida. As conexões aparecem na mesma lista de tokens, com o selo "OAuth", e são revogadas ali com **Revogar**.
+- **Renovação e revogação.** O acesso é renovado automaticamente até a validade escolhida. As conexões aparecem na mesma lista de tokens, com o selo "OAuth", e são revogadas ali com **Revogar**. Autorizar de novo o mesmo cliente substitui a conexão anterior dele.
 
 ### Criar um token (alternativa)
 
