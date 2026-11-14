@@ -35,6 +35,8 @@ export function useTokens() {
 export function useCreateToken() {
   const qc = useQueryClient();
   return useMutation({
+    // O token em claro não pode ficar no MutationCache depois do diálogo.
+    gcTime: 0,
     mutationFn: (input: CreateTokenInput) => api<CreateTokenResult>("/api/tokens", { method: "POST", body: input }),
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: tokensKey });

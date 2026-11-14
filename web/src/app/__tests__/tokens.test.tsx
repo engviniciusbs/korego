@@ -90,6 +90,26 @@ describe("Configurações → Tokens de API", () => {
     expect(screen.queryByText("kg_SEGREDO123")).toBeNull();
   });
 
+  it("TOKEN_NAME_TAKEN mostra o erro no nome e limpa o código", async () => {
+    routes["POST /api/tokens"] = () => json({ error: { code: "TOKEN_NAME_TAKEN", message: "Já existe" } }, 409);
+    renderPage();
+    const dlg = await openCreate();
+    fireEvent.change(within(dlg).getByLabelText(/^Nome/), { target: { value: "claude-code" } });
+    fireEvent.change(within(dlg).getByLabelText(/^Código 2FA/), { target: { value: "123456" } });
+    fireEvent.click(within(dlg).getByRole("button", { name: "Criar token" }));
+    expect(await within(dlg).findByText("Já existe um token com esse nome.")).toBeInTheDocument();
+    expect(within(dlg).getByLabelText(/^Código 2FA/)).toHaveValue("");
+  });
+
+  it("marca como expirado o token cuja validade já passou", async () => {
+    routes["GET /api/tokens"] = () =>
+      json({ items: [item({ expiresAt: "2020-01-01T00:00:00Z" }), item({ id: 2, name: "vivo", expiresAt: "2999-01-01T00:00:00Z" })] });
+    renderPage();
+    const old = (await screen.findByText("claude-code")).closest("tr")!;
+    expect(within(old).getByText("expirado")).toBeInTheDocument();
+    expect(within(screen.getByText("vivo").closest("tr")!).queryByText("expirado")).toBeNull();
+  });
+
   it("TOKEN_REQUIRES_HTTPS mostra a mensagem e o link para o painel", async () => {
     routes["POST /api/tokens"] = () =>
       json({ error: { code: "TOKEN_REQUIRES_HTTPS", message: "Tokens de API só funcionam via HTTPS." } }, 403);

@@ -174,6 +174,8 @@ O KoreGO tem um servidor [MCP](https://modelcontextprotocol.io) em `/mcp` com as
 
 **Requisito: HTTPS.** Tokens só funcionam via HTTPS, então configure antes o domínio do painel em Configurações → Painel. A única exceção é o acesso direto por loopback (sem cabeçalhos `X-Forwarded-*` ou `Forwarded`). Pelo painel em `http://IP:8000`, a criação do token é recusada com a orientação de configurar o domínio.
 
+**Limite de confiança.** Um token tem o mesmo poder do administrador no servidor, inclusive publicar qualquer container, o que na prática equivale a ser root no host. O código 2FA protege contra erros de um agente, mas não é uma barreira contra um token vazado. Use tokens com validade, deixe "Nunca" para casos raros e revogue na dúvida.
+
 ### Criar um token
 
 1. Abra Configurações → Tokens de API e clique em **Novo token**.
@@ -196,9 +198,13 @@ Ações irreversíveis exigem o código 2FA atual a cada chamada; o agente preci
 - trocar o domínio do painel ou a porta pública;
 - desconectar o GitHub.
 
+Após 5 códigos errados, todos os pedidos por token vindos do mesmo IP ficam bloqueados por 15 minutos.
+
+Atenção: editar o domínio do próprio painel pelo agente não exige 2FA e pode cortar o acesso dele (por exemplo, com "Só Cloudflare" ou troca de certificado). Se isso acontecer, recupere o acesso pela porta 8000 ou pelo painel.
+
 ### Somente pelo painel
 
-Criar, listar e revogar tokens, gerenciar sessões, encerrar sessão, login, configuração inicial e conectar o GitHub App não são alcançáveis por token. Segredos (valores de variáveis de ambiente, chaves de certificados, segredos TOTP, chaves do GitHub App) nunca voltam pelo MCP.
+Criar, listar e revogar tokens, gerenciar sessões, encerrar sessão, login, configuração inicial e conectar o GitHub App não são alcançáveis por token. Segredos de infraestrutura (chaves de certificados, segredos TOTP, chaves do GitHub App) não são expostos pelo MCP; mas isso não limita o que um token pode fazer no servidor (veja o limite de confiança acima).
 
 ### Revogar
 

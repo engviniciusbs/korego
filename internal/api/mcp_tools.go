@@ -227,9 +227,6 @@ func (tb toolBox) tool(t restTool, schema any) *mcp.Tool {
 	case t.gated:
 		yes := true
 		tool.Annotations.DestructiveHint = &yes
-	default:
-		no := false
-		tool.Annotations.DestructiveHint = &no
 	}
 	return tool
 }

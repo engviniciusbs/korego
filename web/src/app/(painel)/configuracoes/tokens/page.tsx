@@ -106,6 +106,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
           setCreated(r);
         },
         onError: (err) => {
+          setCode("");
           if (err instanceof ApiError && err.code === "TOKEN_NAME_TAKEN") {
             setNameError("Já existe um token com esse nome.");
             document.getElementById(`${uid}-name`)?.focus();
@@ -201,6 +202,7 @@ function TokenList() {
   const revoke = useRevokeToken();
   const [confirming, setConfirming] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
+  const [now] = useState(() => Date.now());
   const items = tokens.data?.items ?? [];
 
   return (
@@ -268,7 +270,18 @@ function TokenList() {
                     )}
                   </td>
                   <td className={`${td} tabular-nums text-fg-muted`}>
-                    {t.expiresAt ? formatDateTime(t.expiresAt) : "nunca"}
+                    {t.expiresAt ? (
+                      new Date(t.expiresAt).getTime() < now ? (
+                        <>
+                          {formatDateTime(t.expiresAt)}{" "}
+                          <span className="text-xs text-danger">expirado</span>
+                        </>
+                      ) : (
+                        formatDateTime(t.expiresAt)
+                      )
+                    ) : (
+                      "nunca"
+                    )}
                   </td>
                   <td className={`${td} text-right`}>
                     {confirming === t.id ? (

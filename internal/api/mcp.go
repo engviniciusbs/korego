@@ -35,7 +35,7 @@ Erros chegam como "<CÓDIGO> (HTTP n): mensagem".`
 
 const (
 	hintCodeRequired = "Peça ao usuário o código de 6 dígitos do aplicativo autenticador e chame de novo com `code`. Nunca invente nem reutilize um código."
-	hintInvalidCode  = "Cada código vale uma vez; se o usuário acabou de usar este, peça o próximo."
+	hintInvalidCode  = "Cada código vale uma vez; se o usuário acabou de usar este, peça o próximo. Após 5 erros, os pedidos deste IP ficam bloqueados por 15 minutos."
 )
 
 // tokenIdentityFrom lê a identidade que RequireToken pôs em ctx.

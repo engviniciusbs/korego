@@ -49,8 +49,10 @@ type migrationStarted struct {
 	Topic  string `json:"topic"`
 }
 
-// start: recusas baratas (troca em andamento, estado do proxy) antes de
-// conferir e gastar o código; depois o código; depois a troca.
+// start: pelo painel, as recusas baratas (troca em andamento, estado do
+// proxy) vêm antes de conferir e gastar o código; depois o código; depois a
+// troca. Em chamadas por token, o gate do MCP já gastou o código antes de
+// chegar aqui.
 func (h migrationHandlers) start(w http.ResponseWriter, r *http.Request, action string,
 	precheck func(context.Context) error, startFn func(context.Context, func(migrate.Result)) error) {
 	sess, ok := CurrentSession(r.Context())

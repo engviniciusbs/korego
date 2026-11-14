@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -160,4 +161,37 @@ func TestTokens_NotReachableByToken(t *testing.T) {
 	d := api.NewDispatcherForTest(f.e.deps)
 	st, _ := d.Do(ctx, tok, u, agentAddr, http.Header{}, http.MethodGet, "/api/tokens", nil, nil, "")
 	assert.Equal(t, http.StatusNotFound, st)
+}
+
+func TestTokens_RejectedNameDoesNotBurnCode(t *testing.T) {
+	f := newTokFx(t)
+	require.Equal(t, http.StatusCreated, f.create(t, "dup", 30, f.fresh(t)).Code)
+
+	code := f.fresh(t)
+	w := f.create(t, "dup", 30, code)
+	require.Equal(t, http.StatusConflict, w.Code)
+	assert.Equal(t, "TOKEN_NAME_TAKEN", errCode(decode(t, w)))
+
+	// o mesmo código segue válido: nada o consumiu
+	w = f.create(t, "outro", 30, code)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+	code = f.fresh(t)
+	w = f.create(t, "   ", 30, code)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equal(t, "VALIDATION_ERROR", errCode(decode(t, w)))
+	w = f.create(t, strings.Repeat("x", 65), 30, code)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Equal(t, http.StatusCreated, f.create(t, "terceiro", 30, code).Code)
+}
+
+func TestTokens_MissingExpiryDefaultsTo90Days(t *testing.T) {
+	f := newTokFx(t)
+	w := f.req(t, http.MethodPost, "/api/tokens", map[string]any{"name": "sem-campo", "code": f.fresh(t)})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	exp, _ := decode(t, w)["item"].(map[string]any)["expiresAt"].(string)
+	require.NotEmpty(t, exp)
+	at, err := time.Parse(time.RFC3339, exp)
+	require.NoError(t, err)
+	assert.WithinDuration(t, f.e.now.Add(90*24*time.Hour), at, time.Minute)
 }

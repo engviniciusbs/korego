@@ -341,7 +341,7 @@ func TestMCP_GatedReplayHint(t *testing.T) {
 	res, txt = callTool(t, cs, "project_delete", map[string]any{"id": pid2, "code": code})
 	require.True(t, res.IsError)
 	assert.True(t, strings.HasPrefix(txt, "INVALID_CODE (HTTP 403): "), txt)
-	assert.Contains(t, txt, "Cada código vale uma vez; se o usuário acabou de usar este, peça o próximo.")
+	assert.Contains(t, txt, "Cada código vale uma vez; se o usuário acabou de usar este, peça o próximo. Após 5 erros, os pedidos deste IP ficam bloqueados por 15 minutos.")
 	_, err = m.db.GetProject(context.Background(), pid2)
 	require.NoError(t, err)
 }
