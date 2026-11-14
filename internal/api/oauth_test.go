@@ -14,6 +14,7 @@ import (
 
 	"github.com/engviniciusbs/korego/internal/api"
 	"github.com/engviniciusbs/korego/internal/auth"
+	"github.com/engviniciusbs/korego/internal/store"
 )
 
 const oauthOrigin = "https://p.exemplo.com"
@@ -109,7 +110,7 @@ func TestOAuthMetadata_RequiresHTTPS(t *testing.T) {
 
 func TestOAuthRegister_TolerantVSCodeLike(t *testing.T) {
 	f := newOAuthFx(t, nil, 0)
-	w := f.register(`{"client_name":"Visual Studio Code","redirect_uris":["https://vscode.dev/redirect","http://127.0.0.1:33418/"],
+	w := f.register(`{"client_name":"Visual Studio Code","redirect_uris":["http://127.0.0.1:33418/","https://vscode.dev/redirect"],
 		"grant_types":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:device_code"],
 		"token_endpoint_auth_method":"client_secret_basic","scope":"x","client_uri":"https://code.visualstudio.com","extra":{"a":1}}`)
 	require.Equal(t, 201, w.Code, w.Body.String())
@@ -120,11 +121,20 @@ func TestOAuthRegister_TolerantVSCodeLike(t *testing.T) {
 	assert.Equal(t, []any{"authorization_code", "refresh_token"}, m["grant_types"])
 	assert.Equal(t, []any{"code"}, m["response_types"])
 	assert.Equal(t, "none", m["token_endpoint_auth_method"])
-	assert.Len(t, m["redirect_uris"], 2)
+	// O vscode.dev é descartado; só o loopback fica.
+	assert.Equal(t, []any{"http://127.0.0.1:33418/"}, m["redirect_uris"])
 	assert.NotZero(t, m["client_id_issued_at"])
 	c, err := f.e.svc.DB.OAuthClientByID(context.Background(), m["client_id"].(string))
 	require.NoError(t, err)
 	assert.Equal(t, "Visual Studio Code", c.Name)
+	assert.Equal(t, []string{"http://127.0.0.1:33418/"}, c.RedirectURIs)
+}
+
+func TestOAuthRegister_OnlyVSCodeDevRejected(t *testing.T) {
+	f := newOAuthFx(t, nil, 0)
+	w := f.register(`{"client_name":"x","redirect_uris":["https://vscode.dev/redirect"]}`)
+	require.Equal(t, 400, w.Code)
+	assert.Equal(t, "invalid_redirect_uri", decode(t, w)["error"])
 }
 
 func TestOAuthRegister_RejectsEditorScheme(t *testing.T) {
@@ -138,6 +148,19 @@ func TestOAuthRegister_RejectsEditorScheme(t *testing.T) {
 	w = f.register(`não é json`)
 	assert.Equal(t, 400, w.Code)
 	assert.Equal(t, "invalid_client_metadata", decode(t, w)["error"])
+}
+
+// Uma falha na limpeza dos clientes vencidos só vai para o log: o registro segue.
+func TestOAuthRegister_PruneFailureContinues(t *testing.T) {
+	f := newOAuthFx(t, nil, 0)
+	_, err := f.e.svc.DB.SQL().Exec(`CREATE TRIGGER falha_limpeza BEFORE DELETE ON oauth_clients
+		BEGIN SELECT RAISE(ABORT, 'limpeza falhou'); END`)
+	require.NoError(t, err)
+	// Um cliente vencido faz a limpeza tentar apagar uma linha (e falhar).
+	require.NoError(t, f.e.svc.DB.CreateOAuthClient(context.Background(), store.OAuthClient{
+		ID: "velho", Name: "Velho", RedirectURIs: []string{"http://127.0.0.1/cb"}, CreatedAt: time.Now().Add(-90 * 24 * time.Hour)}))
+	w := f.register(okReg)
+	require.Equal(t, 201, w.Code, w.Body.String())
 }
 
 func TestOAuthRegister_BodyLimit(t *testing.T) {

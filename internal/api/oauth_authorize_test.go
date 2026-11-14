@@ -92,7 +92,7 @@ func TestAuthorize_InvalidClientNoRedirect(t *testing.T) {
 
 func TestAuthorize_RedirectMismatchNoRedirect(t *testing.T) {
 	f := newAuthzFx(t)
-	for _, red := range []string{"http://localhost.evil.com/cb", "http://localhost:1/outro", "https://vscode.dev/redirect/x", ""} {
+	for _, red := range []string{"http://localhost.evil.com/cb", "http://localhost:1/outro", "https://vscode.dev/redirect/x", "https://vscode.dev/redirect", ""} {
 		w := f.do(http.MethodGet, f.query(red, nil), "")
 		assert.Equal(t, 400, w.Code, red)
 		assert.Empty(t, w.Header().Get("Location"), red)

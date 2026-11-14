@@ -30,13 +30,12 @@ func (s *oauthServer) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reg, err := oauth.SanitizeRegistration(json.RawMessage(body))
+	for _, u := range reg.Dropped {
+		logRefusedRedirect(u)
+	}
 	if err != nil {
-		var re oauth.RedirectError
-		if errors.As(err, &re) {
-			log.Printf("oauth: redirect_uri recusado no registro: %q", re.URI)
-		}
 		if errors.Is(err, oauth.ErrInvalidRedirect) {
-			writeOAuthError(w, http.StatusBadRequest, "invalid_redirect_uri", "redirect_uris vazio, com mais de 5 itens ou com um retorno não permitido.")
+			writeOAuthError(w, http.StatusBadRequest, "invalid_redirect_uri", "redirect_uris vazio, com mais de 5 itens ou sem nenhum retorno permitido.")
 			return
 		}
 		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "Metadados do cliente inválidos.")
@@ -65,6 +64,15 @@ func (s *oauthServer) register(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// logRefusedRedirect registra um retorno recusado no registro, cortado em 200
+// caracteres para o log não crescer com o que o agente mandar.
+func logRefusedRedirect(u string) {
+	if len(u) > 200 {
+		u = u[:200]
+	}
+	log.Printf("oauth: redirect_uri recusado no registro: %q", u)
+}
+
 // storeClient limpa os clientes vencidos, abre vaga no teto (apagando o mais
 // antigo nunca autorizado) e grava o novo.
 func (s *oauthServer) storeClient(r *http.Request, c store.OAuthClient, now time.Time) error {
@@ -72,8 +80,9 @@ func (s *oauthServer) storeClient(r *http.Request, c store.OAuthClient, now time
 	ctx := r.Context()
 	s.regMu.Lock()
 	defer s.regMu.Unlock()
+	// Falha na limpeza não impede o registro: o teto abaixo continua valendo.
 	if _, err := db.PruneOAuthClients(ctx, now.Add(-unauthorizedClientTTL)); err != nil {
-		return err
+		log.Printf("oauth: limpeza de clientes: %v", err)
 	}
 	n, err := db.CountUnauthorizedOAuthClients(ctx)
 	if err != nil {

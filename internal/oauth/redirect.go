@@ -17,10 +17,20 @@ import (
 // segmento do nome do servidor varia; nada de curingas soltos.
 var cursorRedirect *regexp.Regexp
 
-// vscodeRedirects são os únicos retornos https aceitos, comparados de forma exata.
-var vscodeRedirects = map[string]string{
-	"https://vscode.dev/redirect":          "VS Code (vscode.dev)",
-	"https://insiders.vscode.dev/redirect": "VS Code Insiders (vscode.dev)",
+// Não há retornos https: o https://vscode.dev/redirect foi retirado porque
+// repassa o código a um destino vscode:// escolhido pelo próprio cliente via
+// state, sem que o servidor consiga verificar quem recebe. O VS Code usa o
+// retorno de loopback local.
+
+// cursorFullMatch diz se o padrão do Cursor casa com o retorno inteiro, do
+// primeiro ao último caractere; um casamento parcial (prefixo ou sufixo
+// sobrando) não conta, mesmo que o padrão tenha sido escrito sem âncoras.
+func cursorFullMatch(uri string) bool {
+	if cursorRedirect == nil {
+		return false
+	}
+	re, err := regexp.Compile(`\A(?:` + cursorRedirect.String() + `)\z`)
+	return err == nil && re.MatchString(uri)
 }
 
 // parseLoopback devolve a URL se uri é um retorno de loopback válido:
@@ -68,10 +78,7 @@ func RedirectAllowed(uri string) bool {
 	if _, ok := parseLoopback(uri); ok {
 		return true
 	}
-	if _, ok := vscodeRedirects[uri]; ok {
-		return true
-	}
-	return cursorRedirect != nil && cursorRedirect.MatchString(uri)
+	return cursorFullMatch(uri)
 }
 
 // RedirectMatches compara o retorno registrado com o pedido: igualdade exata,
@@ -94,10 +101,7 @@ func RedirectMatches(registered, requested string) bool {
 // DescribeRedirect dá um nome legível ao destino, para a tela de consentimento.
 // Só é chamada com retornos já permitidos.
 func DescribeRedirect(uri string) string {
-	if d, ok := vscodeRedirects[uri]; ok {
-		return d
-	}
-	if cursorRedirect != nil && cursorRedirect.MatchString(uri) {
+	if cursorFullMatch(uri) {
 		return "Cursor"
 	}
 	u, err := url.Parse(uri)

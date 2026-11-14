@@ -66,10 +66,35 @@ func TestSanitizeRegistration(t *testing.T) {
 				t.Errorf("%s: %v", body, err)
 			}
 		}
-		_, err := SanitizeRegistration(json.RawMessage(`{"redirect_uris":["http://localhost/ok","vscode://x"]}`))
+		r, err := SanitizeRegistration(json.RawMessage(`{"redirect_uris":["vscode://x","https://vscode.dev/redirect"]}`))
 		var re RedirectError
 		if !errors.Is(err, ErrInvalidRedirect) || !errors.As(err, &re) || re.URI != "vscode://x" {
 			t.Errorf("err %v", err)
+		}
+		if !reflect.DeepEqual(r.Dropped, []string{"vscode://x", "https://vscode.dev/redirect"}) {
+			t.Errorf("descartados no erro %v", r.Dropped)
+		}
+	})
+	t.Run("retornos recusados são descartados", func(t *testing.T) {
+		r, err := SanitizeRegistration(json.RawMessage(`{"redirect_uris":["http://127.0.0.1:33418/","https://vscode.dev/redirect","http://127.0.0.1:33418/","https://vscode.dev/redirect"]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(r.RedirectURIs, []string{"http://127.0.0.1:33418/"}) {
+			t.Errorf("aceitos %v", r.RedirectURIs)
+		}
+		if !reflect.DeepEqual(r.Dropped, []string{"https://vscode.dev/redirect"}) {
+			t.Errorf("descartados %v", r.Dropped)
+		}
+	})
+	t.Run("nome sem caracteres de formatação", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{"client_name": "Cla\u202Eude\u200B Code\uFEFF", "redirect_uris": []string{"http://localhost/cb"}})
+		r, err := SanitizeRegistration(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.ClientName != "Claude Code" {
+			t.Errorf("nome %q", r.ClientName)
 		}
 	})
 	t.Run("json inválido", func(t *testing.T) {

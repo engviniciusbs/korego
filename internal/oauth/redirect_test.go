@@ -1,6 +1,9 @@
 package oauth
 
-import "testing"
+import (
+	"regexp"
+	"testing"
+)
 
 func TestRedirectAllowed(t *testing.T) {
 	ok := []string{
@@ -10,8 +13,6 @@ func TestRedirectAllowed(t *testing.T) {
 		"http://localhost/callback",
 		"http://127.0.0.1:33418",
 		"http://localhost/callback/",
-		"https://vscode.dev/redirect",
-		"https://insiders.vscode.dev/redirect",
 	}
 	bad := []string{
 		"http://localhost.evil.com/cb",
@@ -23,6 +24,8 @@ func TestRedirectAllowed(t *testing.T) {
 		"http://127.0.0.1/cb#f",
 		"https://127.0.0.1/cb",
 		"https://localhost/cb",
+		"https://vscode.dev/redirect",
+		"https://insiders.vscode.dev/redirect",
 		"https://vscode.dev/redirect/../x",
 		"https://vscode.dev/redirect/",
 		"https://vscode.dev/redirect?x=1",
@@ -78,7 +81,7 @@ func TestRedirectMatches(t *testing.T) {
 		{"http://127.0.0.1:1/cb", "http://127.0.0.1:2/cb?x=1", false},
 		{"http://127.0.0.1:1", "http://127.0.0.1:5555", true},
 		{"http://127.0.0.1:1", "http://127.0.0.1:5555/cb", false},
-		{"https://vscode.dev/redirect", "https://vscode.dev/redirect", true},
+		{"https://vscode.dev/redirect", "https://vscode.dev/redirect", false},
 		{"https://vscode.dev/redirect", "https://insiders.vscode.dev/redirect", false},
 		{"https://vscode.dev/redirect", "https://vscode.dev/redirect/", false},
 		{"https://vscode.dev/redirect", "https://vscode.dev:443/redirect", false},
@@ -94,16 +97,43 @@ func TestRedirectMatches(t *testing.T) {
 
 func TestDescribeRedirect(t *testing.T) {
 	cases := map[string]string{
-		"http://127.0.0.1:33418/":              "este computador (127.0.0.1:33418)",
-		"http://localhost:7777/cb":             "este computador (localhost:7777)",
-		"http://[::1]:5000/cb":                 "este computador ([::1]:5000)",
-		"http://localhost/cb":                  "este computador",
-		"https://vscode.dev/redirect":          "VS Code (vscode.dev)",
-		"https://insiders.vscode.dev/redirect": "VS Code Insiders (vscode.dev)",
+		"http://127.0.0.1:33418/":  "este computador (127.0.0.1:33418)",
+		"http://localhost:7777/cb": "este computador (localhost:7777)",
+		"http://[::1]:5000/cb":     "este computador ([::1]:5000)",
+		"http://localhost/cb":      "este computador",
 	}
 	for in, want := range cases {
 		if got := DescribeRedirect(in); got != want {
 			t.Errorf("DescribeRedirect(%q)=%q, quer %q", in, got, want)
+		}
+	}
+}
+
+// O padrão do Cursor precisa casar com o retorno inteiro: mesmo um padrão
+// escrito sem âncoras não deixa passar prefixo nem sufixo.
+func TestCursorRedirectFullMatch(t *testing.T) {
+	old := cursorRedirect
+	t.Cleanup(func() { cursorRedirect = old })
+	cursorRedirect = regexp.MustCompile(`cursor://anysphere\.cursor-retrieval/oauth/[a-z0-9-]+/callback`)
+
+	full := "cursor://anysphere.cursor-retrieval/oauth/korego/callback"
+	if !RedirectAllowed(full) {
+		t.Errorf("deveria aceitar o casamento completo %q", full)
+	}
+	if got := DescribeRedirect(full); got != "Cursor" {
+		t.Errorf("DescribeRedirect=%q, quer Cursor", got)
+	}
+	for _, u := range []string{
+		"x" + full,
+		full + "x",
+		"https://evil.com/?" + full,
+		full + "/../../evil",
+	} {
+		if RedirectAllowed(u) {
+			t.Errorf("deveria recusar casamento parcial %q", u)
+		}
+		if got := DescribeRedirect(u); got == "Cursor" {
+			t.Errorf("DescribeRedirect(%q) não deveria dizer Cursor", u)
 		}
 	}
 }
