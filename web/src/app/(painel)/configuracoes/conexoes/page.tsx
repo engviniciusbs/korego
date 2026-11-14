@@ -67,8 +67,16 @@ function ConnectAgent() {
   );
 }
 
+/** Origem canônica do painel (domínio com HTTPS), ou a da página como alternativa. */
+function usePanelOrigin(): string {
+  const panel = usePanelSettings();
+  const d = panel.data;
+  return d?.domain && d.cert?.state === "active" ? `https://${d.domain}` : location.origin;
+}
+
 function CreateDialog({ onClose }: { onClose: () => void }) {
   const uid = useId();
+  const origin = usePanelOrigin();
   const formId = `${uid}-form`;
   const create = useCreateToken();
   const [name, setName] = useState("");
@@ -102,7 +110,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
         </div>
         <div>
           <Label>Conectar um agente</Label>
-          <AgentGrid compact className="mt-1.5 border border-line" clients={tokenAgentClients(location.origin, created.token)} />
+          <AgentGrid compact className="mt-1.5 border border-line" clients={tokenAgentClients(origin, created.token)} />
         </div>
       </Dialog>
     );

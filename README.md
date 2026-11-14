@@ -199,15 +199,15 @@ Detalhes:
 
 ### Criar um token (alternativa)
 
-Se o cliente não suporta OAuth (como o Cursor, por ora), use um token manual.
+Se o cliente não suporta OAuth, use um token manual.
 
 1. Abra Configurações → Conexões e clique em **Novo token**.
 2. Informe um nome (1 a 64 caracteres, único entre os tokens ativos), a validade (90 dias por padrão, 30 dias ou nunca) e o código 2FA atual.
 3. Copie o token na hora: ele é exibido **uma única vez** e só o hash SHA-256 fica guardado.
-4. Conecte o agente: o painel mostra uma aba por cliente (Claude Code, Cursor, VS Code, Codex, Gemini CLI, Windsurf e uma opção genérica) com o comando ou o trecho de configuração já preenchido. Cursor e VS Code também têm um botão que abre o editor com a instalação pronta. No Claude Code, por exemplo:
+4. Conecte o agente: o diálogo mostra um cartão por cliente (Cursor, VS Code, Claude Code, Codex, Gemini CLI, Windsurf) com o token já preenchido; Cursor e VS Code têm o botão **Adicionar**. No Claude Code, por exemplo:
 
 ```sh
-claude mcp add --transport http korego https://painel.exemplo.com/mcp --header "Authorization: Bearer kg_..."
+claude mcp add --transport http -s user korego https://painel.exemplo.com/mcp --header "Authorization: Bearer kg_..."
 ```
 
 ### Ações com 2FA

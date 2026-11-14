@@ -109,3 +109,16 @@ function atobConfig(href: string): string {
   const cfg = href.startsWith("cursor:") ? new URL(href).searchParams.get("config") : null;
   return cfg ? atob(cfg) : "";
 }
+
+describe("link do Cursor", () => {
+  it("escapa o base64 mesmo quando ele tem + / =", () => {
+    // Este token gera base64 com "+", "/" e "=" na configuração.
+    const tok = "kg_>>>???~~";
+    const c = byId(tokenAgentClients(O, tok)).cursor;
+    if (c.action.type !== "link") throw new Error("esperava link");
+    const raw = c.action.href.split("config=")[1];
+    expect(raw).not.toMatch(/[+/=]/);
+    expect(cursorConfig(c.action.href)).toEqual({ url: U, headers: { Authorization: `Bearer ${tok}` } });
+  });
+});
+

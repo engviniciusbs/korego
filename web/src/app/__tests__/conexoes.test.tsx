@@ -91,7 +91,7 @@ describe("Configurações → Conexões", () => {
     expect(sent).toEqual({ name: "novo", expiresInDays: 90, code: "123456" });
     expect(
       within(dlg).getByText(
-        `claude mcp add --transport http -s user korego ${location.origin}/mcp --header "Authorization: Bearer kg_SEGREDO123"`,
+        `claude mcp add --transport http -s user korego https://p.exemplo.com/mcp --header "Authorization: Bearer kg_SEGREDO123"`,
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copiar token" })).toBeInTheDocument();
@@ -99,7 +99,7 @@ describe("Configurações → Conexões", () => {
     const link = within(dlg).getByRole("link", { name: "Adicionar ao Cursor" }).getAttribute("href")!;
     expect(link).toMatch(/^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=korego&config=/);
     const cfg = JSON.parse(atob(decodeURIComponent(link.split("config=")[1])));
-    expect(cfg).toEqual({ url: `${location.origin}/mcp`, headers: { Authorization: "Bearer kg_SEGREDO123" } });
+    expect(cfg).toEqual({ url: `https://p.exemplo.com/mcp`, headers: { Authorization: "Bearer kg_SEGREDO123" } });
     fireEvent.click(screen.getByRole("button", { name: "Fechar" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     await openCreate();
@@ -198,5 +198,6 @@ describe("endereço antigo /configuracoes/tokens/", () => {
     replace.mockClear();
     render(<TokensRedirect />);
     expect(replace).toHaveBeenCalledWith("/configuracoes/conexoes/");
+    expect(screen.getByText("Redirecionando para Conexões…")).toBeInTheDocument();
   });
 });

@@ -33,7 +33,10 @@ describe("AgentGrid", () => {
     render(<AgentGrid clients={oauthAgentClients(O)} />);
     fireEvent.click(screen.getByRole("button", { name: "Copiar comando do Claude Code" }));
     expect(writeText).toHaveBeenCalledWith(`claude mcp add --transport http -s user korego ${O}/mcp`);
-    await waitFor(() => expect(screen.getByText("Copiado")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getAllByRole("status").filter((s) => s.textContent === "Copiado")).toHaveLength(1),
+    );
+    expect(screen.getByRole("button", { name: "Copiar comando do Claude Code" })).toHaveTextContent("Copiado");
   });
 
   it("Configuração manual só aparece quando o cliente tem uma", () => {

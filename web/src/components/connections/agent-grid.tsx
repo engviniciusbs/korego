@@ -1,13 +1,13 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui";
 import { focusRing } from "@/components/ui/focus";
 import { cn } from "@/lib/cn";
 import type { AgentClient } from "@/lib/mcp-clients";
 import { ClientLogo } from "./client-logo";
 
-/** Copia `text` e mostra "Copiado" por 2 s. */
+/** Copia `text` e mostra "Copiado" por 2 s (também anunciado a leitores de tela). */
 export function CopyButton({
   text,
   label,
@@ -21,25 +21,39 @@ export function CopyButton({
   className?: string;
   variant?: "secondary" | "ghost";
 }) {
-  const [done, setDone] = useState(false);
+  const [state, setState] = useState<"idle" | "done" | "failed">("idle");
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const show = (s: "done" | "failed") => {
+    clearTimeout(timer.current);
+    setState(s);
+    timer.current = setTimeout(() => setState("idle"), 2000);
+  };
+  const message = state === "done" ? "Copiado" : state === "failed" ? "Não foi possível copiar" : "";
   return (
-    <Button
-      size="sm"
-      variant={variant}
-      aria-label={label}
-      className={cn(done && "text-success", className)}
-      onClick={() => {
-        void navigator.clipboard?.writeText(text).then(
-          () => {
-            setDone(true);
-            setTimeout(() => setDone(false), 2000);
-          },
-          () => {},
-        );
-      }}
-    >
-      {done ? "Copiado" : children}
-    </Button>
+    <>
+      <Button
+        size="sm"
+        variant={variant}
+        aria-label={label}
+        className={cn(state === "done" && "text-success", state === "failed" && "text-danger", className)}
+        onClick={() => {
+          if (!navigator.clipboard) {
+            show("failed");
+            return;
+          }
+          navigator.clipboard.writeText(text).then(
+            () => show("done"),
+            () => show("failed"),
+          );
+        }}
+      >
+        {message || children}
+      </Button>
+      <span role="status" className="sr-only">
+        {message}
+      </span>
+    </>
   );
 }
 
@@ -104,12 +118,15 @@ function Action({ client }: { client: AgentClient }) {
 }
 
 function AgentCard({ client }: { client: AgentClient }) {
+  const titleId = useId();
   return (
-    <article className="flex min-w-0 flex-col gap-3.5 bg-surface px-5 py-5 hover:bg-[#111115] sm:px-6" aria-label={client.name}>
+    <article className="flex min-w-0 flex-col gap-3.5 bg-surface px-5 py-5 sm:px-6" aria-labelledby={titleId}>
       <header className="flex items-center gap-3">
         <ClientLogo id={client.id} />
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold tracking-tight text-fg">{client.name}</h3>
+          <h3 id={titleId} className="text-sm font-semibold tracking-tight text-fg">
+            {client.name}
+          </h3>
           <p className="font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-fg-subtle">{client.kind}</p>
         </div>
       </header>
