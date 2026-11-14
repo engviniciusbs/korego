@@ -210,15 +210,18 @@ func (h deployHandlers) cancel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// rollbackInput é o corpo de POST /apps/{id}/rollback.
+type rollbackInput struct {
+	DeployID int64 `json:"deployId"`
+}
+
 // rollback serves POST /api/apps/{id}/rollback com {"deployId": n}.
 func (h deployHandlers) rollback(w http.ResponseWriter, r *http.Request) {
 	id, ok := appID(w, r)
 	if !ok {
 		return
 	}
-	var in struct {
-		DeployID int64 `json:"deployId"`
-	}
+	var in rollbackInput
 	if !decodeJSON(w, r, &in) {
 		return
 	}

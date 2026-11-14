@@ -79,7 +79,7 @@ func (h migrationHandlers) start(w http.ResponseWriter, r *http.Request, action 
 		refused(err)
 		return
 	}
-	if !h.confirmCode(w, r, sess.UserID, ip, rec) {
+	if !confirmCode(h.svc, w, r, sess.UserID, ip, rec) {
 		return
 	}
 	err := startFn(ctx, func(res migrate.Result) {
@@ -98,7 +98,7 @@ func (h migrationHandlers) start(w http.ResponseWriter, r *http.Request, action 
 // Como no login, toda tentativa passa por Limiter.Attempt (bloqueado: 429
 // RATE_LIMITED) e o acerto zera o contador. Sem código: 403 CODE_REQUIRED;
 // errado: 403 INVALID_CODE. Todas as recusas são auditadas.
-func (h migrationHandlers) confirmCode(w http.ResponseWriter, r *http.Request, userID int64, ip string,
+func confirmCode(svc *auth.Service, w http.ResponseWriter, r *http.Request, userID int64, ip string,
 	rec func(map[string]any)) bool {
 	var in struct {
 		Code string `json:"code"`
@@ -107,10 +107,10 @@ func (h migrationHandlers) confirmCode(w http.ResponseWriter, r *http.Request, u
 		return false
 	}
 	now := time.Now()
-	if h.svc.Now != nil {
-		now = h.svc.Now()
+	if svc.Now != nil {
+		now = svc.Now()
 	}
-	if h.svc.Limiter != nil && !h.svc.Limiter.Attempt(ip, now) {
+	if svc.Limiter != nil && !svc.Limiter.Attempt(ip, now) {
 		rec(map[string]any{"ok": false, "stage": "rate_limited"})
 		WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", "Muitas tentativas. Tente novamente mais tarde.")
 		return false
@@ -122,7 +122,7 @@ func (h migrationHandlers) confirmCode(w http.ResponseWriter, r *http.Request, u
 	}
 	ctx, cancel := detached(r, auditTimeout)
 	defer cancel()
-	ok, err := h.svc.VerifyCode(ctx, userID, in.Code)
+	ok, err := svc.VerifyCode(ctx, userID, in.Code)
 	if err != nil {
 		internalError(w, err)
 		return false
@@ -132,8 +132,8 @@ func (h migrationHandlers) confirmCode(w http.ResponseWriter, r *http.Request, u
 		WriteError(w, http.StatusForbidden, "INVALID_CODE", "Código inválido.")
 		return false
 	}
-	if h.svc.Limiter != nil {
-		h.svc.Limiter.Reset(ip)
+	if svc.Limiter != nil {
+		svc.Limiter.Reset(ip)
 	}
 	return true
 }

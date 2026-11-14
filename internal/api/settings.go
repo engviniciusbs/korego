@@ -44,11 +44,19 @@ func (h settingsHandlers) panel(w http.ResponseWriter, r *http.Request) {
 	h.writePanel(w, r, http.StatusOK)
 }
 
+// panelDomainInput é o corpo de PUT /settings/panel/domain.
+type panelDomainInput struct {
+	Hostname string `json:"hostname"`
+}
+
+// panelPortInput é o corpo de PUT /settings/panel/public-port.
+type panelPortInput struct {
+	Enabled bool `json:"enabled"`
+}
+
 // setDomain serves PUT /api/settings/panel/domain.
 func (h settingsHandlers) setDomain(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Hostname string `json:"hostname"`
-	}
+	var in panelDomainInput
 	if !decodeJSON(w, r, &in) {
 		return
 	}
@@ -74,9 +82,7 @@ func (h settingsHandlers) setDomain(w http.ResponseWriter, r *http.Request) {
 
 // setPublicPort serves PUT /api/settings/panel/public-port.
 func (h settingsHandlers) setPublicPort(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Enabled bool `json:"enabled"`
-	}
+	var in panelPortInput
 	if !decodeJSON(w, r, &in) {
 		return
 	}
