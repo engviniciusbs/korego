@@ -20,8 +20,9 @@ const oauthOrigin = "https://p.exemplo.com"
 
 // oauthFx monta o roteador com origem fixa; os pedidos vão por TLS.
 type oauthFx struct {
-	e *env
-	h http.Handler
+	e    *env
+	h    http.Handler
+	skew *time.Duration // avanço do relógio do servidor OAuth (Deps.Now)
 }
 
 func newOAuthFx(t *testing.T, origin func(context.Context) (string, bool), maxUnauth int) *oauthFx {
@@ -29,13 +30,14 @@ func newOAuthFx(t *testing.T, origin func(context.Context) (string, bool), maxUn
 	if origin == nil {
 		origin = func(context.Context) (string, bool) { return oauthOrigin, true }
 	}
-	tk := &auth.Tokens{}
+	tk := &auth.Tokens{Key: auth.DeriveKey([]byte("chave-de-teste"), "oauth-refresh")}
 	var tick int64
+	skew := new(time.Duration)
 	base := time.Now()
 	e := newEnvDeps(t, api.Deps{Tokens: tk, OAuthOrigin: origin,
-		Now: func() time.Time { tick++; return base.Add(time.Duration(tick) * time.Second) }})
+		Now: func() time.Time { tick++; return base.Add(time.Duration(tick)*time.Second + *skew) }})
 	tk.DB, tk.Now = e.svc.DB, e.svc.Now
-	return &oauthFx{e: e, h: api.OAuthRouterForTest(e.deps, maxUnauth)}
+	return &oauthFx{e: e, h: api.OAuthRouterForTest(e.deps, maxUnauth), skew: skew}
 }
 
 func (f *oauthFx) do(method, path, body string, opts ...reqOpt) *httptest.ResponseRecorder {

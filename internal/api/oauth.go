@@ -92,6 +92,7 @@ func (s *oauthServer) mountPublic(r chi.Router) {
 		r.Get("/.well-known/oauth-authorization-server", s.serverMetadata)
 		r.Post("/oauth/register", s.register)
 		r.Get("/oauth/authorize", s.authorize)
+		r.Post("/oauth/token", s.token)
 	})
 }
 
