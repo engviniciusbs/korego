@@ -13,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/engviniciusbs/korego/internal/api"
 )
 
 const tokRedirect = "http://localhost:1/cb"
@@ -200,4 +202,57 @@ func TestToken_NoOriginStillServesMCP(t *testing.T) {
 	has = false
 	assert.Equal(t, 404, f.exchange("x", nil).Code)
 	assert.Equal(t, 200, f.mcpStatus(m["access_token"].(string)))
+}
+
+// Dois usos do código antes de a conexão do primeiro ser registrada: setToken
+// reporta o reuso para quem emitiu revogar.
+func TestCodeStore_ReplayBeforeSetToken(t *testing.T) {
+	cs := api.NewCodeStoreForTest()
+	now := time.Now()
+	cs.Put("h", now)
+	used, ok := cs.Take("h", now)
+	require.True(t, ok)
+	assert.False(t, used)
+	used, ok = cs.Take("h", now)
+	require.True(t, ok)
+	assert.True(t, used)
+	assert.True(t, cs.SetToken("h", 7), "reuso durante a emissão")
+
+	// sem reuso concorrente, setToken não reporta nada
+	cs.Put("g", now)
+	_, _ = cs.Take("g", now)
+	assert.False(t, cs.SetToken("g", 8))
+}
+
+func TestToken_RefreshWrongClient(t *testing.T) {
+	f := newGrantFx(t)
+	m := decode(t, f.exchange(f.authCode(t), nil))
+	w := f.token(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {m["refresh_token"].(string)},
+		"client_id": {"outro-cliente"}})
+	require.Equal(t, 400, w.Code)
+	assert.Equal(t, "invalid_grant", decode(t, w)["error"])
+	// a conexão não foi revogada e o cliente certo ainda renova
+	assert.Equal(t, 200, f.mcpStatus(m["access_token"].(string)))
+	assert.Equal(t, 200, f.refresh(m["refresh_token"].(string)).Code)
+}
+
+func TestToken_ClientGoneBeforeExchange(t *testing.T) {
+	f := newGrantFx(t)
+	u, err := f.e.svc.DB.UserByEmail(t.Context(), email)
+	require.NoError(t, err)
+	h, put := api.OAuthRouterWithCodesForTest(f.e.deps)
+	put("codigo-fantasma", "cliente-sumiu", tokRedirect, s256(verifier), u.ID)
+	r := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(url.Values{
+		"grant_type": {"authorization_code"}, "code": {"codigo-fantasma"}, "redirect_uri": {tokRedirect},
+		"client_id": {"cliente-sumiu"}, "code_verifier": {verifier}}.Encode()))
+	r.RemoteAddr = "203.0.113.5:1"
+	withTLS()(r)
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	require.Equal(t, 400, w.Code, w.Body.String())
+	assert.Equal(t, "invalid_grant", decode(t, w)["error"])
+	toks, err := f.e.svc.DB.ListAPITokens(t.Context(), u.ID)
+	require.NoError(t, err)
+	assert.Empty(t, toks, "nenhuma conexão emitida")
 }

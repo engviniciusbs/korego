@@ -107,7 +107,14 @@ func (s *oauthServer) codeGrant(w http.ResponseWriter, r *http.Request, form url
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "Erro interno.")
 		return
 	}
-	s.codes.setToken(hash, tok.ID)
+	if s.codes.setToken(hash, tok.ID) {
+		// O código foi reapresentado durante a emissão: a conexão sai.
+		if err := s.d.Tokens.RevokeByID(r.Context(), tok.ID); err != nil {
+			log.Printf("oauth: revogar conexão do código reutilizado: %v", err)
+		}
+		invalidGrant("Código já utilizado.")
+		return
+	}
 	tokenResponse(w, pair)
 }
 

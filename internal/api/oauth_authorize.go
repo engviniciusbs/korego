@@ -94,6 +94,9 @@ type authCode struct {
 	ExpiresAt                                    time.Time
 	Used                                         bool
 	TokenID                                      int64 // conexão gerada, para revogar no reuso
+	// Reused marca um segundo uso visto enquanto a conexão do primeiro ainda
+	// estava sendo emitida (Used e TokenID == 0): setToken o reporta a quem emite.
+	Reused bool
 }
 
 // codeStore guarda os códigos até vencerem, inclusive os já usados, para a
@@ -132,17 +135,24 @@ func (c *codeStore) take(hash string, now time.Time) (*authCode, bool) {
 		return nil, false
 	}
 	cp := *a
+	if a.Used && a.TokenID == 0 {
+		a.Reused = true
+	}
 	a.Used = true
 	return &cp, true
 }
 
-// setToken liga a conexão gerada ao código, para a revogação no reuso.
-func (c *codeStore) setToken(hash string, tokenID int64) {
+// setToken liga a conexão gerada ao código, para a revogação no reuso. Devolve
+// true se o código foi reapresentado antes de a conexão ser registrada: quem
+// emitiu deve então revogá-la e recusar.
+func (c *codeStore) setToken(hash string, tokenID int64) (reused bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if a, ok := c.m[hash]; ok {
 		a.TokenID = tokenID
+		return a.Reused
 	}
+	return false
 }
 
 var authzErrorPage = template.Must(template.New("erro").Parse(`<!doctype html>

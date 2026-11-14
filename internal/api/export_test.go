@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/engviniciusbs/korego/internal/oauth"
+
 	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/store"
 	"github.com/go-chi/chi/v5"
@@ -91,4 +93,36 @@ func (s PendingStoreForTest) Add(id string, now time.Time) {
 func (s PendingStoreForTest) Has(id string, now time.Time) bool {
 	_, ok := s.p.get(id, now)
 	return ok
+}
+
+// CodeStoreForTest expõe o armazém de códigos de autorização.
+type CodeStoreForTest struct{ c *codeStore }
+
+func NewCodeStoreForTest() CodeStoreForTest { return CodeStoreForTest{newCodeStore()} }
+
+func (s CodeStoreForTest) Put(hash string, now time.Time) {
+	s.c.put(hash, authCode{ExpiresAt: now.Add(time.Minute)}, now)
+}
+
+// Take devolve (usado, achado).
+func (s CodeStoreForTest) Take(hash string, now time.Time) (bool, bool) {
+	a, ok := s.c.take(hash, now)
+	if !ok {
+		return false, false
+	}
+	return a.Used, true
+}
+
+func (s CodeStoreForTest) SetToken(hash string, id int64) bool { return s.c.setToken(hash, id) }
+
+// OAuthRouterWithCodesForTest devolve também um atalho que injeta um código
+// de autorização válido para clientID (mesmo inexistente).
+func OAuthRouterWithCodesForTest(d Deps) (http.Handler, func(code, clientID, redirect, challenge string, userID int64)) {
+	rt := newRoutes(d)
+	put := func(code, clientID, redirect, challenge string, userID int64) {
+		now := rt.oauth.now()
+		rt.oauth.codes.put(oauth.Hash(code), authCode{ClientID: clientID, ClientName: "Fantasma", RedirectURI: redirect,
+			Challenge: challenge, UserID: userID, TTL: time.Hour, ExpiresAt: now.Add(authCodeTTL)}, now)
+	}
+	return newRouter(rt), put
 }
