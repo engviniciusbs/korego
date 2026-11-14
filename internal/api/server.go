@@ -60,6 +60,11 @@ type Deps struct {
 	GitHub *github.Service
 	// Hostname compõe o nome do GitHub App no manifesto (nil = os.Hostname).
 	Hostname func() (string, error)
+	// Tokens valida os tokens de API dos agentes (nil desativa /mcp).
+	Tokens *auth.Tokens
+	// TokenLimiter limita, por "token:"+IP, tokens inválidos e códigos
+	// errados vindos de tokens (nil = sem limite).
+	TokenLimiter *auth.Limiter
 }
 
 // newRoutes constrói uma vez todos os handlers autenticados (alguns têm estado).

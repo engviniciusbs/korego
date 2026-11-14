@@ -5,7 +5,7 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// routes guarda os handlers construídos uma vez em NewRouter (alguns têm
+// routes guarda os handlers construídos uma vez em newRoutes (alguns têm
 // estado: ghH, updateH, wsH) para serem montados em mais de um roteador.
 type routes struct {
 	d           Deps
@@ -33,8 +33,10 @@ func (rt *routes) mountSessionOnly(r chi.Router) {
 	r.Get("/ws", rt.wsH.serve)
 }
 
-// mountCore monta todas as demais rotas autenticadas.
+// mountCore monta todas as demais rotas autenticadas. As ações irreversíveis
+// passam por gate: pedido por token exige X-Korego-Code; por cookie, nada muda.
 func (rt *routes) mountCore(r chi.Router) {
+	gate := requireCodeForToken(rt.d.Auth, rt.d.TokenLimiter)
 	r.Get("/audit", rt.auditH.list)
 	r.Get("/system", rt.systemH.info)
 	r.Get("/metrics/current", rt.metricsH.current)
@@ -47,13 +49,13 @@ func (rt *routes) mountCore(r chi.Router) {
 	r.Get("/pm2", rt.pm2H.snapshot)
 	r.Get("/containers", rt.containersH.list)
 	r.Get("/containers/{id}", rt.containersH.details)
-	r.Delete("/containers/{id}", rt.containersH.remove)
+	r.With(gate).Delete("/containers/{id}", rt.containersH.remove)
 	r.Post("/containers/{id}/start", rt.containersH.action("start", docker.Client.Start))
 	r.Post("/containers/{id}/stop", rt.containersH.action("stop", docker.Client.Stop))
 	r.Post("/containers/{id}/restart", rt.containersH.action("restart", docker.Client.Restart))
 	r.Get("/containers/{id}/logs", rt.containersH.logs)
 	if rt.d.Domains != nil {
-		proxyH := proxyHandlers{dom: rt.d.Domains, mig: rt.d.Migrate}
+		proxyH := proxyHandlers{svc: rt.d.Auth, dom: rt.d.Domains, mig: rt.d.Migrate}
 		domainsH := domainHandlers{svc: rt.d.Auth, dom: rt.d.Domains}
 		settingsH := settingsHandlers{svc: rt.d.Auth, dom: rt.d.Domains}
 		r.Get("/proxy", proxyH.status)
@@ -61,23 +63,23 @@ func (rt *routes) mountCore(r chi.Router) {
 		if rt.d.Migrate != nil {
 			migH := migrationHandlers{svc: rt.d.Auth, mig: rt.d.Migrate}
 			r.Get("/proxy/trial-check", migH.trialCheck)
-			r.Post("/proxy/takeover", migH.takeover)
-			r.Post("/proxy/rollback", migH.rollback)
+			r.With(gate).Post("/proxy/takeover", migH.takeover)
+			r.With(gate).Post("/proxy/rollback", migH.rollback)
 		}
 		r.Get("/domains", domainsH.list)
 		r.Post("/domains", domainsH.create)
 		r.Put("/domains/{id}", domainsH.update)
-		r.Delete("/domains/{id}", domainsH.remove)
+		r.With(gate).Delete("/domains/{id}", domainsH.remove)
 		r.Get("/domains/{id}/dns", domainsH.dns)
 		r.Get("/settings/panel", settingsH.panel)
-		r.Put("/settings/panel/domain", settingsH.setDomain)
-		r.Put("/settings/panel/public-port", settingsH.setPublicPort)
+		r.With(gate).Put("/settings/panel/domain", settingsH.setDomain)
+		r.With(gate).Put("/settings/panel/public-port", settingsH.setPublicPort)
 	}
 	if rt.d.Certs != nil {
 		certsH := certHandlers{svc: rt.d.Auth, certs: rt.d.Certs}
 		r.Get("/certificates", certsH.list)
 		r.Post("/certificates", certsH.create)
-		r.Delete("/certificates/{id}", certsH.remove)
+		r.With(gate).Delete("/certificates/{id}", certsH.remove)
 	}
 	if rt.d.DB != nil && rt.d.Deploys != nil {
 		box := rt.d.Box
@@ -91,12 +93,12 @@ func (rt *routes) mountCore(r chi.Router) {
 		r.Get("/projects", projectsH.list)
 		r.Post("/projects", projectsH.create)
 		r.Put("/projects/{id}", projectsH.update)
-		r.Delete("/projects/{id}", projectsH.remove)
+		r.With(gate).Delete("/projects/{id}", projectsH.remove)
 		r.Get("/apps", appsH.list)
 		r.Post("/apps", appsH.create)
 		r.Get("/apps/{id}", appsH.get)
 		r.Put("/apps/{id}", appsH.update)
-		r.Delete("/apps/{id}", appsH.remove)
+		r.With(gate).Delete("/apps/{id}", appsH.remove)
 		r.Get("/apps/{id}/env", appsH.envNames)
 		r.Put("/apps/{id}/env", appsH.envSet)
 		r.Post("/apps/{id}/deploys", deploysH.create)
@@ -108,12 +110,12 @@ func (rt *routes) mountCore(r chi.Router) {
 	}
 	if rt.ghH != nil {
 		r.Get("/github", rt.ghH.status)
-		r.Delete("/github", rt.ghH.disconnect)
+		r.With(gate).Delete("/github", rt.ghH.disconnect)
 		r.Post("/github/manifest", rt.ghH.manifest)
 		r.Get("/github/repos", rt.ghH.repos)
 	}
 	if rt.d.Updater != nil {
 		r.Get("/update", rt.updateH.status)
-		r.Post("/update", rt.updateH.apply)
+		r.With(gate).Post("/update", rt.updateH.apply)
 	}
 }

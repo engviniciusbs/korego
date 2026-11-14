@@ -35,6 +35,8 @@ func TestRouter_CoreExcludesSessionOnly(t *testing.T) {
 	for _, c := range []struct{ method, path string }{
 		{http.MethodGet, "/auth/me"},
 		{http.MethodGet, "/auth/sessions"},
+		{http.MethodDelete, "/auth/sessions/abc"},
+		{http.MethodGet, "/containers/0123456789ab/logs/download"},
 		{http.MethodPost, "/auth/logout"},
 		{http.MethodGet, "/ws"},
 		{http.MethodGet, "/tokens"},

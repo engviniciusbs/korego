@@ -37,6 +37,7 @@ type env struct {
 	h         http.Handler
 	now       *time.Time
 	tokenFile string
+	deps      api.Deps // as Deps passadas ao roteador (com Auth)
 }
 
 func newEnv(t *testing.T) *env { return newEnvWithNode(t, nil) }
@@ -65,7 +66,7 @@ func newEnvDeps(t *testing.T, d api.Deps) *env {
 	}
 	require.NoError(t, os.WriteFile(svc.SetupTokenFile, []byte(setupTok), 0o600))
 	d.Auth = svc
-	return &env{svc: svc, h: api.NewRouter(d), now: &now, tokenFile: svc.SetupTokenFile}
+	return &env{svc: svc, h: api.NewRouter(d), now: &now, tokenFile: svc.SetupTokenFile, deps: d}
 }
 
 type reqOpt func(*http.Request)

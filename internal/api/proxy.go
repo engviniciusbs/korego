@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/domains"
 	"github.com/engviniciusbs/korego/internal/migrate"
 	"github.com/engviniciusbs/korego/internal/node/proxy"
@@ -15,6 +16,7 @@ import (
 const guideURL = "https://github.com/engviniciusbs/korego/blob/main/docs/migracao-nginx.md"
 
 type proxyHandlers struct {
+	svc *auth.Service
 	dom *domains.Service
 	mig *migrate.Engine // nil = sem migração
 }
@@ -58,5 +60,7 @@ func (h proxyHandlers) status(w http.ResponseWriter, r *http.Request) {
 func (h proxyHandlers) retry(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := detached(r, mutationTimeout)
 	defer cancel()
-	WriteJSON(w, http.StatusOK, h.body(ctx, h.dom.Reconcile(ctx)))
+	st := h.dom.Reconcile(ctx)
+	record(h.svc, r, "proxy.retry", "proxy", map[string]any{"ok": true, "state": st.State})
+	WriteJSON(w, http.StatusOK, h.body(ctx, st))
 }

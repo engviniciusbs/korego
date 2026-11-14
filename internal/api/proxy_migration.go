@@ -59,8 +59,11 @@ func (h migrationHandlers) start(w http.ResponseWriter, r *http.Request, action 
 		return
 	}
 	ip := auth.ClientIP(r)
+	// Sem cancelamento, mas com os valores da requisição (o token da auditoria):
+	// o resultado chega depois que a resposta já saiu.
+	base := context.WithoutCancel(r.Context())
 	rec := func(meta map[string]any) {
-		ctx, cancel := context.WithTimeout(context.Background(), auditTimeout)
+		ctx, cancel := context.WithTimeout(base, auditTimeout)
 		defer cancel()
 		h.svc.Record(ctx, audit.Entry{UserID: &sess.UserID, Action: action, IP: ip, Metadata: meta})
 	}
@@ -97,9 +100,14 @@ func (h migrationHandlers) start(w http.ResponseWriter, r *http.Request, action 
 // confirmCode exige um código TOTP novo ou de recuperação no corpo ({code}).
 // Como no login, toda tentativa passa por Limiter.Attempt (bloqueado: 429
 // RATE_LIMITED) e o acerto zera o contador. Sem código: 403 CODE_REQUIRED;
-// errado: 403 INVALID_CODE. Todas as recusas são auditadas.
+// errado: 403 INVALID_CODE. Todas as recusas são auditadas. Se o gate de
+// token (requireCodeForToken) já conferiu o código do cabeçalho, devolve true
+// sem ler o corpo.
 func confirmCode(svc *auth.Service, w http.ResponseWriter, r *http.Request, userID int64, ip string,
 	rec func(map[string]any)) bool {
+	if codeConfirmed(r.Context()) {
+		return true
+	}
 	var in struct {
 		Code string `json:"code"`
 	}
@@ -112,12 +120,12 @@ func confirmCode(svc *auth.Service, w http.ResponseWriter, r *http.Request, user
 	}
 	if svc.Limiter != nil && !svc.Limiter.Attempt(ip, now) {
 		rec(map[string]any{"ok": false, "stage": "rate_limited"})
-		WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", "Muitas tentativas. Tente novamente mais tarde.")
+		WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", msgRateLimited)
 		return false
 	}
 	if strings.TrimSpace(in.Code) == "" {
 		rec(map[string]any{"ok": false, "stage": "code_required"})
-		WriteError(w, http.StatusForbidden, "CODE_REQUIRED", "Confirme com o código do autenticador ou um código de recuperação.")
+		WriteError(w, http.StatusForbidden, "CODE_REQUIRED", msgCodeRequired)
 		return false
 	}
 	ctx, cancel := detached(r, auditTimeout)
@@ -129,7 +137,7 @@ func confirmCode(svc *auth.Service, w http.ResponseWriter, r *http.Request, user
 	}
 	if !ok {
 		rec(map[string]any{"ok": false, "stage": "invalid_code"})
-		WriteError(w, http.StatusForbidden, "INVALID_CODE", "Código inválido.")
+		WriteError(w, http.StatusForbidden, "INVALID_CODE", msgInvalidCode)
 		return false
 	}
 	if svc.Limiter != nil {

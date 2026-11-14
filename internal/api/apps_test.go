@@ -47,6 +47,7 @@ type appsFx struct {
 	svc     *deploy.Service
 	cookie  *http.Cookie
 	csrf    string
+	totp    string // segredo TOTP do usuário
 	release chan struct{}
 	gh      bool
 	removed []string
@@ -96,7 +97,7 @@ func newAppsFx(t *testing.T, mods ...func(*appsFx, *api.Deps)) *appsFx {
 		m(f, &deps)
 	}
 	f.env = newEnvDeps(t, deps)
-	_, f.cookie, f.csrf = f.setup(t)
+	f.totp, f.cookie, f.csrf = f.setup(t)
 	return f
 }
 
