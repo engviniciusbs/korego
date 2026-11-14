@@ -51,11 +51,14 @@ func parseLoopback(uri string) (*url.URL, bool) {
 			return nil, false
 		}
 	}
-	// Caminho já decodificado: recusa "..", "//" e qualquer forma não limpa.
-	// A barra final só é tolerada quando o caminho inteiro é "/".
+	// Caminho já decodificado: aceita vazio e barra final, mas recusa "..",
+	// "." e "//" (qualquer forma não limpa).
 	p := u.Path
-	if p == "" || p[0] != '/' || path.Clean(p) != p {
-		return nil, false
+	if p != "" {
+		q := strings.TrimSuffix(p, "/")
+		if p[0] != '/' || strings.Contains(p, "//") || (q != "" && path.Clean(q) != q) {
+			return nil, false
+		}
 	}
 	return u, true
 }
