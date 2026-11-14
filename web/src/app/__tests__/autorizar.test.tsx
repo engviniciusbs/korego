@@ -130,6 +130,49 @@ describe("Autorizar agente", () => {
     expect(await screen.findByText("Pronto. Pode voltar ao agente.")).toBeInTheDocument();
   });
 
+  it("não segue retorno que não seja http(s)", async () => {
+    routes["POST /api/oauth/requests/" + REQ + "/approve"] = () => json({ redirect: "javascript:alert(1)" });
+    routes["POST /api/oauth/requests/" + REQ + "/deny"] = () => json({ redirect: "vscode://x/cb?error=access_denied" });
+    renderPage();
+    await screen.findByText("Claude Code");
+    fireEvent.change(screen.getByLabelText(/^Código 2FA/), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: "Autorizar" }));
+    expect(await screen.findByText(/endereço de retorno do agente não é válido/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Recusar" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/deny"), expect.anything()));
+    expect(await screen.findByText(/endereço de retorno do agente não é válido/)).toBeInTheDocument();
+    expect(assign).not.toHaveBeenCalled();
+    expect(screen.queryByText("Pronto. Pode voltar ao agente.")).not.toBeInTheDocument();
+  });
+
+  it("envio duplicado enquanto ocupado não repete o pedido", async () => {
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    routes["POST /api/oauth/requests/" + REQ + "/approve"] = () => {
+      calls++;
+      return json({ redirect: "http://127.0.0.1:5555/cb?code=x" });
+    };
+    type Fetch = (url: string, init?: { method?: string; body?: string }) => Promise<Response>;
+    const base = vi.mocked(fetch as unknown as Fetch);
+    const orig = base.getMockImplementation()!;
+    base.mockImplementation(async (url, init) => {
+      if (url.includes("/approve")) await gate;
+      return orig(url, init);
+    });
+    renderPage();
+    await screen.findByText("Claude Code");
+    fireEvent.change(screen.getByLabelText(/^Código 2FA/), { target: { value: "123456" } });
+    const form = screen.getByRole("button", { name: "Autorizar" }).closest("form")!;
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    fireEvent.click(screen.getByRole("button", { name: "Recusar" }));
+    release();
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+    expect(calls).toBe(1);
+    expect(base.mock.calls.filter(([u]) => String(u).includes("/deny"))).toHaveLength(0);
+  });
+
   it("404 mostra a mensagem do servidor e nenhum botão", async () => {
     routes["GET /api/oauth/requests/" + REQ] = () =>
       json({ error: { code: "OAUTH_REQUEST_NOT_FOUND", message: "Pedido expirado." } }, 404);

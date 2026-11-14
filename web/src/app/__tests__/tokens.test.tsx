@@ -160,6 +160,17 @@ describe("Configurações → Tokens de API", () => {
     expect(await screen.findByText("claude mcp add --transport http korego https://p.exemplo.com/mcp")).toBeInTheDocument();
     expect(screen.getByText("Informe só a URL ao agente: o navegador abre para você autorizar com o 2FA.")).toBeInTheDocument();
     expect(screen.getByText("Use exatamente esta URL; outro endereço do mesmo servidor não autoriza.")).toBeInTheDocument();
+    // O título do painel não se repete no rótulo das abas.
+    expect(screen.getAllByText("Conectar um agente")).toHaveLength(1);
+    expect(screen.getByText("Cliente")).toBeInTheDocument();
+  });
+
+  it("falha ao ler a configuração do painel mostra o erro, não o alerta de domínio", async () => {
+    routes["GET /api/settings/panel"] = () => json({ error: { code: "INTERNAL", message: "Erro interno." } }, 500);
+    renderPage();
+    expect(await screen.findByText("Não foi possível carregar a configuração do painel.")).toBeInTheDocument();
+    expect(screen.queryByText("Configure o domínio do painel com HTTPS para conectar agentes.")).toBeNull();
+    expect(screen.queryByText(/claude mcp add/)).toBeNull();
   });
 
   it("sem certificado ativo, mostra o alerta e o link para Painel", async () => {

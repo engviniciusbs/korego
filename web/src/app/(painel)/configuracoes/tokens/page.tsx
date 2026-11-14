@@ -48,13 +48,13 @@ function CopyButton({ text, label }: { text: string; label: string }) {
 const codeCls =
   "block min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap border border-line-strong bg-bg/40 px-3 py-2 font-mono text-xs text-fg [overflow-wrap:anywhere]";
 
-function ConnectClients({ clients }: { clients: McpClientSetup[] }) {
+function ConnectClients({ clients, label }: { clients: McpClientSetup[]; label: string }) {
   const uid = useId();
   const [active, setActive] = useState<McpClientId>("claude-code");
   const c = clients.find((x) => x.id === active) ?? clients[0];
   return (
     <div>
-      <Label>Conectar um agente</Label>
+      <Label>{label}</Label>
       <Tabs
         id={uid}
         label="Cliente MCP"
@@ -98,9 +98,11 @@ function ConnectAgent() {
           <Spinner size="sm" decorative />
           <span role="status">Carregando…</span>
         </PanelState>
+      ) : panel.isError ? (
+        <Alert variant="danger">Não foi possível carregar a configuração do painel.</Alert>
       ) : ready ? (
         <div className="space-y-3">
-          <ConnectClients clients={mcpOAuthClients(`https://${panel.data.domain}`)} />
+          <ConnectClients label="Cliente" clients={mcpOAuthClients(`https://${panel.data.domain}`)} />
           <p className="text-xs text-fg-subtle">Use exatamente esta URL; outro endereço do mesmo servidor não autoriza.</p>
         </div>
       ) : (
@@ -150,7 +152,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
             <CopyButton text={created.token} label="Copiar token" />
           </div>
         </div>
-        <ConnectClients clients={mcpClients(location.origin, created.token)} />
+        <ConnectClients label="Conectar um agente" clients={mcpClients(location.origin, created.token)} />
       </Dialog>
     );
   }

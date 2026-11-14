@@ -116,15 +116,11 @@ export function mcpOAuthClients(origin: string): McpClientSetup[] {
       label: "Cursor",
       hint: "O Cursor ainda não autoriza por este fluxo; se falhar, use um token abaixo.",
       snippet: json({ mcpServers: { [NAME]: cursorServer } }),
-      installLink: {
-        href: `cursor://anysphere.cursor-deeplink/mcp/install?name=${NAME}&config=${encodeURIComponent(b64(JSON.stringify(cursorServer)))}`,
-        label: "Abrir no Cursor",
-      },
     },
     {
       id: "vscode",
       label: "VS Code",
-      hint: "Use o botão para instalar direto ou rode o comando no terminal.",
+      hint: "Use o botão ou o comando; a autorização volta pelo retorno local (loopback).",
       snippet: `code --add-mcp '${JSON.stringify(vscodeServer)}'`,
       installLink: {
         href: `vscode:mcp/install?${encodeURIComponent(JSON.stringify(vscodeServer))}`,
@@ -146,7 +142,7 @@ export function mcpOAuthClients(origin: string): McpClientSetup[] {
     {
       id: "windsurf",
       label: "Windsurf",
-      hint: "Adicione em ~/.codeium/windsurf/mcp_config.json.",
+      hint: "Ainda não verificado com OAuth; se falhar, use um token abaixo.",
       snippet: json({ mcpServers: { [NAME]: { serverUrl: url } } }),
     },
     {

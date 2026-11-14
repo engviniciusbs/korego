@@ -71,4 +71,11 @@ describe("mcpOAuthClients", () => {
     expect(JSON.parse(byId.windsurf.snippet)).toEqual({ mcpServers: { korego: { serverUrl: url } } });
     expect(byId.outro.snippet).toBe(`URL: ${url}`);
   });
+
+  it("Cursor sem link de instalação; dicas de Windsurf e VS Code", () => {
+    expect(byId.cursor.installLink).toBeUndefined();
+    expect(byId.windsurf.hint).toBe("Ainda não verificado com OAuth; se falhar, use um token abaixo.");
+    expect(byId.vscode.hint).toMatch(/loopback/);
+    expect(byId.vscode.installLink?.href.startsWith("vscode:mcp/install?")).toBe(true);
+  });
 });

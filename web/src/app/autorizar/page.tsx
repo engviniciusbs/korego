@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { selectCls } from "@/components/domains/form-bits";
 import { AuthFrame, Field, describedBy } from "@/components/shell/auth-frame";
 import { FullScreenLoading, useAuthRedirect } from "@/components/shell/auth-redirect";
@@ -13,6 +13,17 @@ import { cleanAuthCode, validAuthCode } from "@/lib/validate";
 
 const REQ_RE = /^[A-Za-z0-9_-]{43}$/;
 const FRESH_WARNING = "Você acabou de usar um código no login; aguarde o próximo.";
+const BAD_REDIRECT = "O endereço de retorno do agente não é válido. Inicie a conexão de novo pelo agente.";
+
+// O navegador só segue retornos http(s); qualquer outro esquema é recusado aqui.
+function safeRedirect(redirect: string): boolean {
+  try {
+    const u = new URL(redirect);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 function errorMessage(err: unknown): string {
   if (err instanceof ApiError) {
@@ -54,6 +65,9 @@ export default function AutorizarPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [wrongCode, setWrongCode] = useState(false);
   const [done, setDone] = useState(false);
+  // Trava síncrona: isPending só muda no próximo render, e um segundo envio
+  // no mesmo instante passaria pela checagem.
+  const inFlight = useRef(false);
 
   if (blocked) return <FullScreenLoading />;
 
@@ -62,12 +76,17 @@ export default function AutorizarPage() {
   const busy = approve.isPending || deny.isPending;
 
   function finish(redirect: string) {
+    if (!safeRedirect(redirect)) {
+      setFormError(BAD_REDIRECT);
+      return;
+    }
     setDone(true);
     window.location.assign(redirect);
   }
 
   async function onApprove(e: FormEvent) {
     e.preventDefault();
+    if (busy || inFlight.current) return;
     setFormError(null);
     const clean = cleanAuthCode(code);
     if (!validAuthCode(clean)) {
@@ -76,22 +95,29 @@ export default function AutorizarPage() {
       return;
     }
     setCodeError(null);
+    inFlight.current = true;
     try {
       const res = await approve.mutateAsync({ code: clean, ttlDays: ttl === "30" ? 30 : 90 });
       finish(res.redirect);
     } catch (err) {
       setWrongCode(err instanceof ApiError && err.code === "INVALID_CODE");
       setFormError(errorMessage(err));
+    } finally {
+      inFlight.current = false;
     }
   }
 
   async function onDeny() {
+    if (busy || inFlight.current) return;
     setFormError(null);
+    inFlight.current = true;
     try {
       const res = await deny.mutateAsync();
       finish(res.redirect);
     } catch (err) {
       setFormError(errorMessage(err));
+    } finally {
+      inFlight.current = false;
     }
   }
 
