@@ -1,23 +1,30 @@
 /**
- * Como registrar o servidor MCP do KoreGO em cada cliente de agente.
- * Tudo é montado no navegador a partir da origem do painel e do token recém-criado;
- * nada disso vai para o servidor.
+ * Como conectar cada cliente de agente ao servidor MCP do KoreGO.
+ * Tudo é montado no navegador a partir da origem do painel (e, no fluxo
+ * manual, do token recém-criado); nada disso vai para o servidor.
  */
 
-export type McpClientId = "claude-code" | "cursor" | "vscode" | "codex" | "gemini" | "windsurf" | "outro";
+export type McpClientId = "cursor" | "vscode" | "claude-code" | "codex" | "gemini" | "windsurf";
 
-export interface McpClientSetup {
+/** A ação principal de um cartão: abrir o cliente, copiar um comando ou copiar a configuração. */
+export type AgentAction =
+  | { type: "link"; href: string; label: string }
+  | { type: "command"; text: string }
+  | { type: "config"; text: string; label: string };
+
+export interface AgentClient {
   id: McpClientId;
-  label: string;
-  /** Onde colar o trecho, em uma frase. */
-  hint: string;
-  /** Trecho para copiar (comando ou arquivo de configuração). */
-  snippet: string;
-  /** Link que abre o cliente com a instalação pronta, quando ele oferece um. */
-  installLink?: { href: string; label: string };
+  name: string;
+  kind: "Editor" | "Terminal";
+  action: AgentAction;
+  /** O que acontece depois da ação, em uma frase. */
+  note: string;
+  /** Alternativa recolhida no cartão. */
+  manual?: { label: string; text: string };
 }
 
 const NAME = "korego";
+const COPY_CONFIG = "Copiar configuração";
 
 function b64(s: string): string {
   const bytes = new TextEncoder().encode(s);
@@ -28,128 +35,124 @@ function b64(s: string): string {
 
 const json = (v: unknown) => JSON.stringify(v, null, 2);
 
-/** Linha para registrar o servidor MCP no Claude Code. */
+const cursorLink = (server: object) =>
+  `cursor://anysphere.cursor-deeplink/mcp/install?name=${NAME}&config=${encodeURIComponent(b64(JSON.stringify(server)))}`;
+
+const vscodeLink = (server: object) => `vscode:mcp/install?${encodeURIComponent(JSON.stringify(server))}`;
+
+/** Linha para registrar o servidor MCP no Claude Code com um token manual. */
 export function mcpAddCommand(origin: string, token: string): string {
-  return `claude mcp add --transport http ${NAME} ${origin}/mcp --header "Authorization: Bearer ${token}"`;
+  return `claude mcp add --transport http -s user ${NAME} ${origin}/mcp --header "Authorization: Bearer ${token}"`;
 }
 
-export function mcpClients(origin: string, token: string): McpClientSetup[] {
+/** Fluxo OAuth: só a URL; o cliente abre o navegador para o usuário autorizar com o 2FA. */
+export function oauthAgentClients(origin: string): AgentClient[] {
   const url = `${origin}/mcp`;
-  const auth = `Bearer ${token}`;
-  const headers = { Authorization: auth };
-
-  const cursorServer = { url, headers };
-  const vscodeServer = { name: NAME, type: "http", url, headers };
-
+  const cursorServer = { url };
+  const vscodeServer = { name: NAME, type: "http", url };
   return [
     {
-      id: "claude-code",
-      label: "Claude Code",
-      hint: "Rode no terminal, na pasta do projeto. Use -s user para valer em todos os projetos.",
-      snippet: mcpAddCommand(origin, token),
-    },
-    {
       id: "cursor",
-      label: "Cursor",
-      hint: "Use o botão para instalar direto ou cole em ~/.cursor/mcp.json.",
-      snippet: json({ mcpServers: { [NAME]: cursorServer } }),
-      installLink: {
-        href: `cursor://anysphere.cursor-deeplink/mcp/install?name=${NAME}&config=${encodeURIComponent(b64(JSON.stringify(cursorServer)))}`,
-        label: "Abrir no Cursor",
-      },
+      name: "Cursor",
+      kind: "Editor",
+      action: { type: "link", href: cursorLink(cursorServer), label: "Adicionar ao Cursor" },
+      note: "Abre o Cursor com o KoreGO configurado. Ele mesmo abre o navegador para você autorizar.",
+      manual: { label: "~/.cursor/mcp.json", text: json({ mcpServers: { [NAME]: cursorServer } }) },
     },
     {
       id: "vscode",
-      label: "VS Code",
-      hint: "Use o botão para instalar direto ou rode o comando no terminal.",
-      snippet: `code --add-mcp '${JSON.stringify(vscodeServer)}'`,
-      installLink: {
-        href: `vscode:mcp/install?${encodeURIComponent(JSON.stringify(vscodeServer))}`,
-        label: "Abrir no VS Code",
-      },
+      name: "VS Code",
+      kind: "Editor",
+      action: { type: "link", href: vscodeLink(vscodeServer), label: "Adicionar ao VS Code" },
+      note: "Abre o VS Code com o KoreGO configurado. Ele mesmo abre o navegador para você autorizar.",
+      manual: { label: "Terminal", text: `code --add-mcp '${JSON.stringify(vscodeServer)}'` },
+    },
+    {
+      id: "claude-code",
+      name: "Claude Code",
+      kind: "Terminal",
+      action: { type: "command", text: `claude mcp add --transport http -s user ${NAME} ${url}` },
+      note: "Rode no terminal. Depois, em /mcp → korego → Authenticate, o navegador abre para autorizar.",
     },
     {
       id: "codex",
-      label: "Codex",
-      hint: "Adicione em ~/.codex/config.toml.",
-      snippet: `[mcp_servers.${NAME}]\nurl = "${url}"\nhttp_headers = { "Authorization" = "${auth}" }\n`,
+      name: "Codex",
+      kind: "Terminal",
+      action: { type: "command", text: `codex mcp add ${NAME} --url ${url}\ncodex mcp login ${NAME}` },
+      note: "O segundo comando abre o navegador para autorizar.",
     },
     {
       id: "gemini",
-      label: "Gemini CLI",
-      hint: "Adicione em ~/.gemini/settings.json.",
-      snippet: json({ mcpServers: { [NAME]: { httpUrl: url, headers } } }),
+      name: "Gemini CLI",
+      kind: "Terminal",
+      action: { type: "command", text: `gemini mcp add --scope user --transport http ${NAME} ${url}` },
+      note: "Na primeira chamada o Gemini abre o navegador para autorizar (ou use /mcp auth korego).",
     },
     {
       id: "windsurf",
-      label: "Windsurf",
-      hint: "Adicione em ~/.codeium/windsurf/mcp_config.json.",
-      snippet: json({ mcpServers: { [NAME]: { serverUrl: url, headers } } }),
-    },
-    {
-      id: "outro",
-      label: "Outro",
-      hint: "Qualquer cliente MCP com transporte Streamable HTTP: informe a URL e o cabeçalho.",
-      snippet: `URL: ${url}\nCabeçalho: Authorization: ${auth}`,
+      name: "Windsurf",
+      kind: "Editor",
+      action: { type: "config", label: COPY_CONFIG, text: json({ mcpServers: { [NAME]: { serverUrl: url } } }) },
+      note: "Cole em ~/.codeium/windsurf/mcp_config.json. Ainda não verificado com OAuth.",
     },
   ];
 }
 
-/**
- * Versão para o fluxo OAuth: só a URL do servidor, sem token nem cabeçalho.
- * O cliente abre o navegador para o usuário autorizar com o 2FA.
- */
-export function mcpOAuthClients(origin: string): McpClientSetup[] {
+/** Fluxo manual: cada cliente recebe o token no cabeçalho Authorization. */
+export function tokenAgentClients(origin: string, token: string): AgentClient[] {
   const url = `${origin}/mcp`;
-  const cursorServer = { url };
-  const vscodeServer = { name: NAME, type: "http", url };
-
+  const auth = `Bearer ${token}`;
+  const headers = { Authorization: auth };
+  const cursorServer = { url, headers };
+  const vscodeServer = { name: NAME, type: "http", url, headers };
   return [
     {
-      id: "claude-code",
-      label: "Claude Code",
-      hint: "Rode no terminal, na pasta do projeto. Use -s user para valer em todos os projetos.",
-      snippet: `claude mcp add --transport http ${NAME} ${url}`,
-    },
-    {
       id: "cursor",
-      label: "Cursor",
-      hint: "O Cursor ainda não autoriza por este fluxo; se falhar, use um token abaixo.",
-      snippet: json({ mcpServers: { [NAME]: cursorServer } }),
+      name: "Cursor",
+      kind: "Editor",
+      action: { type: "link", href: cursorLink(cursorServer), label: "Adicionar ao Cursor" },
+      note: "Abre o Cursor com o KoreGO e este token configurados.",
+      manual: { label: "~/.cursor/mcp.json", text: json({ mcpServers: { [NAME]: cursorServer } }) },
     },
     {
       id: "vscode",
-      label: "VS Code",
-      hint: "Use o botão ou o comando; a autorização volta pelo retorno local (loopback).",
-      snippet: `code --add-mcp '${JSON.stringify(vscodeServer)}'`,
-      installLink: {
-        href: `vscode:mcp/install?${encodeURIComponent(JSON.stringify(vscodeServer))}`,
-        label: "Abrir no VS Code",
-      },
+      name: "VS Code",
+      kind: "Editor",
+      action: { type: "link", href: vscodeLink(vscodeServer), label: "Adicionar ao VS Code" },
+      note: "Abre o VS Code com o KoreGO e este token configurados.",
+      manual: { label: "Terminal", text: `code --add-mcp '${JSON.stringify(vscodeServer)}'` },
+    },
+    {
+      id: "claude-code",
+      name: "Claude Code",
+      kind: "Terminal",
+      action: { type: "command", text: mcpAddCommand(origin, token) },
+      note: "Rode no terminal. Vale para todos os projetos.",
     },
     {
       id: "codex",
-      label: "Codex",
-      hint: "Depois rode `codex mcp login korego`.",
-      snippet: `[mcp_servers.${NAME}]\nurl = "${url}"\n`,
+      name: "Codex",
+      kind: "Terminal",
+      action: {
+        type: "config",
+        label: COPY_CONFIG,
+        text: `[mcp_servers.${NAME}]\nurl = "${url}"\nhttp_headers = { "Authorization" = "${auth}" }\n`,
+      },
+      note: "Cole em ~/.codex/config.toml.",
     },
     {
       id: "gemini",
-      label: "Gemini CLI",
-      hint: "Adicione em ~/.gemini/settings.json.",
-      snippet: json({ mcpServers: { [NAME]: { httpUrl: url } } }),
+      name: "Gemini CLI",
+      kind: "Terminal",
+      action: { type: "config", label: COPY_CONFIG, text: json({ mcpServers: { [NAME]: { httpUrl: url, headers } } }) },
+      note: "Cole em ~/.gemini/settings.json.",
     },
     {
       id: "windsurf",
-      label: "Windsurf",
-      hint: "Ainda não verificado com OAuth; se falhar, use um token abaixo.",
-      snippet: json({ mcpServers: { [NAME]: { serverUrl: url } } }),
-    },
-    {
-      id: "outro",
-      label: "Outro",
-      hint: "Qualquer cliente MCP com transporte Streamable HTTP e OAuth: informe só a URL.",
-      snippet: `URL: ${url}`,
+      name: "Windsurf",
+      kind: "Editor",
+      action: { type: "config", label: COPY_CONFIG, text: json({ mcpServers: { [NAME]: { serverUrl: url, headers } } }) },
+      note: "Cole em ~/.codeium/windsurf/mcp_config.json.",
     },
   ];
 }
