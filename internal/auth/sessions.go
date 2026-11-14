@@ -3,13 +3,13 @@ package auth
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/engviniciusbs/korego/internal/oauth"
 	"github.com/engviniciusbs/korego/internal/store"
 )
 
@@ -34,10 +34,8 @@ func (s *Sessions) now() time.Time {
 	return time.Now()
 }
 
-func hashToken(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
-}
+// hashToken é o SHA-256 hex do segredo; a mesma função usada pelo pacote oauth.
+func hashToken(token string) string { return oauth.Hash(token) }
 
 func randomBytes(n int) ([]byte, error) {
 	b := make([]byte, n)

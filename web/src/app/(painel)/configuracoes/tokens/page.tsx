@@ -3,12 +3,15 @@
 import Link from "next/link";
 import { useId, useState, type FormEvent } from "react";
 import { PageHeader, PanelState } from "@/components/shell/page-header";
-import { Alert, Button, Dialog, Input, Label, Panel, Spinner } from "@/components/ui";
+import { Alert, Badge, Button, Dialog, Input, Label, Panel, Spinner } from "@/components/ui";
+import { focusRing } from "@/components/ui/focus";
+import { Tabs, tabId, tabPanelId } from "@/components/ui/tabs";
+import { mcpClients, mcpOAuthClients, type McpClientId, type McpClientSetup } from "@/lib/mcp-clients";
+import { usePanelSettings } from "@/lib/settings";
 import { selectCls } from "@/components/domains/form-bits";
 import { ApiError } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import {
-  mcpAddCommand,
   useCreateToken,
   useRevokeToken,
   useTokens,
@@ -42,6 +45,80 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   );
 }
 
+const codeCls =
+  "block min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap border border-line-strong bg-bg/40 px-3 py-2 font-mono text-xs text-fg [overflow-wrap:anywhere]";
+
+function ConnectClients({ clients, label }: { clients: McpClientSetup[]; label: string }) {
+  const uid = useId();
+  const [active, setActive] = useState<McpClientId>("claude-code");
+  const c = clients.find((x) => x.id === active) ?? clients[0];
+  return (
+    <div>
+      <Label>{label}</Label>
+      <Tabs
+        id={uid}
+        label="Cliente MCP"
+        className="mt-1.5 flex flex-wrap"
+        items={clients.map((x) => ({ value: x.id, label: x.label }))}
+        value={c.id}
+        onChange={setActive}
+      />
+      <div role="tabpanel" id={tabPanelId(uid)} aria-labelledby={tabId(uid, c.id)} className="mt-3 space-y-2">
+        <p className="text-xs text-fg-muted">{c.hint}</p>
+        {c.installLink && (
+          <a
+            href={c.installLink.href}
+            className={`inline-flex h-7 touch-manipulation items-center border border-accent bg-accent px-2.5 text-xs font-medium tracking-tight text-accent-fg hover:border-accent-hover hover:bg-accent-hover ${focusRing}`}
+          >
+            {c.installLink.label}
+          </a>
+        )}
+        <div className="flex items-start gap-2">
+          <code className={codeCls} translate="no">
+            {c.snippet}
+          </code>
+          <CopyButton text={c.snippet} label={`Copiar configuração do ${c.label}`} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Conexão por OAuth: o agente recebe só a URL e o navegador pede a autorização. */
+function ConnectAgent() {
+  const panel = usePanelSettings();
+  const ready = panel.data && panel.data.domain && panel.data.cert?.state === "active";
+  return (
+    <Panel
+      title="Conectar um agente"
+      description="Informe só a URL ao agente: o navegador abre para você autorizar com o 2FA."
+    >
+      {panel.isPending ? (
+        <PanelState>
+          <Spinner size="sm" decorative />
+          <span role="status">Carregando…</span>
+        </PanelState>
+      ) : panel.isError ? (
+        <Alert variant="danger">Não foi possível carregar a configuração do painel.</Alert>
+      ) : ready ? (
+        <div className="space-y-3">
+          <ConnectClients label="Cliente" clients={mcpOAuthClients(`https://${panel.data.domain}`)} />
+          <p className="text-xs text-fg-subtle">Use exatamente esta URL; outro endereço do mesmo servidor não autoriza.</p>
+        </div>
+      ) : (
+        <Alert variant="warning">
+          <p>Configure o domínio do painel com HTTPS para conectar agentes.</p>
+          <p className="mt-1">
+            <Link href="/configuracoes/painel/" className="underline">
+              Configurações → Painel
+            </Link>
+          </p>
+        </Alert>
+      )}
+    </Panel>
+  );
+}
+
 function CreateDialog({ onClose }: { onClose: () => void }) {
   const uid = useId();
   const formId = `${uid}-form`;
@@ -54,7 +131,6 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
   const [created, setCreated] = useState<CreateTokenResult | null>(null);
 
   if (created) {
-    const command = mcpAddCommand(location.origin, created.token);
     return (
       <Dialog
         open
@@ -76,15 +152,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
             <CopyButton text={created.token} label="Copiar token" />
           </div>
         </div>
-        <div>
-          <Label>Registrar no Claude Code</Label>
-          <div className="mt-1.5 flex items-start gap-2">
-            <code className="block min-w-0 flex-1 border border-line-strong bg-bg/40 px-3 py-2 font-mono text-xs text-fg [overflow-wrap:anywhere]" translate="no">
-              {command}
-            </code>
-            <CopyButton text={command} label="Copiar comando" />
-          </div>
-        </div>
+        <ConnectClients label="Conectar um agente" clients={mcpClients(location.origin, created.token)} />
       </Dialog>
     );
   }
@@ -251,7 +319,14 @@ function TokenList() {
             <tbody>
               {items.map((t: ApiToken) => (
                 <tr key={t.id} className="border-b border-line last:border-b-0 hover:bg-surface-2/60">
-                  <td className={`${td} text-fg [overflow-wrap:anywhere]`}>{t.name}</td>
+                  <td className={`${td} text-fg [overflow-wrap:anywhere]`}>
+                    {t.name}
+                    {t.kind === "oauth" && (
+                      <Badge size="sm" className="ml-2">
+                        OAuth
+                      </Badge>
+                    )}
+                  </td>
                   <td className={`${td} font-mono text-fg-muted`} translate="no">
                     {t.prefix}…
                   </td>
@@ -333,6 +408,7 @@ export default function TokensPage() {
         description="Acesso de agentes ao painel via MCP. Exigem o painel em HTTPS."
       />
       <div className="space-y-6">
+        <ConnectAgent />
         <TokenList />
       </div>
     </>

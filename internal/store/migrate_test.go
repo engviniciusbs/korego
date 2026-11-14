@@ -21,7 +21,7 @@ func TestOpen_AppliesMigrations(t *testing.T) {
 	}
 	var v int
 	require.NoError(t, db.SQL().QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v))
-	require.Equal(t, 6, v)
+	require.Equal(t, 7, v)
 }
 
 func TestOpen_Idempotent(t *testing.T) {
@@ -35,7 +35,7 @@ func TestOpen_Idempotent(t *testing.T) {
 
 	var n int
 	require.NoError(t, db2.SQL().QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n))
-	require.Equal(t, 6, n)
+	require.Equal(t, 7, n)
 }
 
 func TestOpen_ForeignKeysOn(t *testing.T) {

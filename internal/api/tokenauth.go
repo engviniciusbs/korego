@@ -97,9 +97,14 @@ func copyIdentityHeaders(h http.Header) http.Header {
 // RequireToken validates the Bearer token and puts in ctx: sessionKey =
 // store.Session{ID: "token:<id>", UserID: tok.UserID}, userKey, audit.WithToken,
 // and tokenIdentityKey. Order: transport (403 TOKEN_REQUIRES_HTTPS), limiter
-// (429 RATE_LIMITED), token (401 INVALID_TOKEN, counted as a failure).
-// A valid token does not reset the limiter, so it cannot clear failed codes.
-func RequireToken(tokens *auth.Tokens, db *store.DB, lim *auth.Limiter) func(http.Handler) http.Handler {
+// (429 RATE_LIMITED), token (401 INVALID_TOKEN). Só conta como falha um Bearer
+// recusado como desconhecido (ErrNoToken) que não seja um acesso OAuth (kgo_):
+// sondagem sem token, token morto (ErrStaleToken) e kgo_ desconhecido (acesso
+// antigo depois de rotações) não bloqueiam o IP. Todo 401 leva
+// WWW-Authenticate, com resource_metadata quando há origem e
+// error="invalid_token" quando um Bearer foi enviado e recusado. A valid token does not reset the
+// limiter, so it cannot clear failed codes. origin nil = sem origem.
+func RequireToken(tokens *auth.Tokens, db *store.DB, lim *auth.Limiter, origin originFunc) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !tokenTransportOK(r) {
@@ -111,12 +116,18 @@ func RequireToken(tokens *auth.Tokens, db *store.DB, lim *auth.Limiter) func(htt
 				WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", msgRateLimited)
 				return
 			}
+			secret, hadBearer := bearerToken(r)
 			tok, u, err := resolveToken(r, tokens, db)
 			if errors.Is(err, auth.ErrNoToken) {
-				if lim != nil {
+				if lim != nil && hadBearer && !auth.IsOAuthAccess(secret) {
 					lim.Fail(key, now)
 				}
-				WriteError(w, http.StatusUnauthorized, "INVALID_TOKEN", "Token de API inválido, expirado ou revogado.")
+				unauthorizedToken(w, r, origin, hadBearer)
+				return
+			}
+			if errors.Is(err, auth.ErrStaleToken) {
+				// Conhecido porém morto (vencido, revogado, acesso trocado): 401 sem contar como palpite.
+				unauthorizedToken(w, r, origin, hadBearer)
 				return
 			}
 			if err != nil {
@@ -128,6 +139,28 @@ func RequireToken(tokens *auth.Tokens, db *store.DB, lim *auth.Limiter) func(htt
 			next.ServeHTTP(w, r.WithContext(withTokenIdentity(r.Context(), id)))
 		})
 	}
+}
+
+// unauthorizedToken responde 401 INVALID_TOKEN com WWW-Authenticate: com
+// origem, aponta os metadados do recurso (RFC 9728); sem origem, só "Bearer".
+// Se um Bearer foi enviado e recusado, acrescenta error="invalid_token"
+// (RFC 6750, seção 3.1); sem Bearer, não há parâmetro de erro.
+func unauthorizedToken(w http.ResponseWriter, r *http.Request, origin originFunc, hadBearer bool) {
+	var params []string
+	if origin != nil {
+		if o, ok := origin(r.Context()); ok {
+			params = append(params, `resource_metadata="`+o+mcpResourceMetadataPath+`"`)
+		}
+	}
+	if hadBearer {
+		params = append(params, `error="invalid_token"`)
+	}
+	challenge := "Bearer"
+	if len(params) > 0 {
+		challenge += " " + strings.Join(params, ", ")
+	}
+	w.Header().Set("WWW-Authenticate", challenge)
+	WriteError(w, http.StatusUnauthorized, "INVALID_TOKEN", "Token de API inválido, expirado ou revogado.")
 }
 
 // resolveToken valida o Bearer e busca o dono; ausente, inválido ou sem dono

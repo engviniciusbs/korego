@@ -20,11 +20,15 @@ type routes struct {
 	wsH         wsHandlers
 	ghH         *githubHandlers
 	webhookH    *webhookHandlers
+	oauth       *oauthServer // nil sem Tokens ou Auth
 }
 
 // mountSessionOnly monta as rotas autenticadas que só valem com sessão
 // (nunca por token).
 func (rt *routes) mountSessionOnly(r chi.Router) {
+	if rt.oauth != nil {
+		rt.oauth.mountSession(r)
+	}
 	r.Get("/auth/me", rt.authH.me)
 	r.Get("/auth/sessions", rt.authH.listSessions)
 	r.Delete("/auth/sessions/{id}", rt.authH.revokeSession)

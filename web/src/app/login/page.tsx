@@ -6,6 +6,7 @@ import { FullScreenLoading, useAuthRedirect } from "@/components/shell/auth-redi
 import { Alert, Button, Input } from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { safeNext, useLocationSearch } from "@/lib/oauth";
 import { cleanAuthCode, validAuthCode } from "@/lib/validate";
 
 function loginErrorMessage(err: unknown): string {
@@ -36,7 +37,8 @@ export default function LoginPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const blocked = useAuthRedirect(status, { authenticated: "/", setup: "/setup/" });
+  const next = safeNext(new URLSearchParams(useLocationSearch()).get("next"));
+  const blocked = useAuthRedirect(status, { authenticated: next ?? "/", setup: "/setup/" });
   if (blocked) return <FullScreenLoading />;
 
   const id = (name: string) => `${ids}-${name}`;

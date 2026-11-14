@@ -65,6 +65,9 @@ type Deps struct {
 	// TokenLimiter limita, por "token:"+IP, tokens inválidos e códigos
 	// errados vindos de tokens (nil = sem limite).
 	TokenLimiter *auth.Limiter
+	// OAuthOrigin, se não for nil, substitui a origem derivada de Domains
+	// (serve aos testes). Em produção fica nil e a origem vem de panelOrigin.
+	OAuthOrigin originFunc
 }
 
 // newRoutes constrói uma vez todos os handlers autenticados (alguns têm estado).
@@ -99,14 +102,23 @@ func newRoutes(d Deps) *routes {
 		}
 	}
 
-	return &routes{d: d, authH: authH, auditH: auditH, systemH: systemH, metricsH: metricsH, usageH: usageH,
+	var oauthSrv *oauthServer
+	if d.Tokens != nil && d.Auth != nil {
+		oauthSrv = newOAuthServer(d, resolveOrigin(d))
+	}
+
+	return &routes{d: d, oauth: oauthSrv, authH: authH, auditH: auditH, systemH: systemH, metricsH: metricsH, usageH: usageH,
 		containersH: containersH, pm2H: pm2H, updateH: updateH, wsH: wsH, ghH: ghH, webhookH: webhookH}
 }
 
 // NewRouter monta o roteador principal, com a API sob /api.
 func NewRouter(d Deps) http.Handler {
-	rt := newRoutes(d)
-	d = rt.d
+	return newRouter(newRoutes(d))
+}
+
+// newRouter monta o roteador a partir das rotas já construídas.
+func newRouter(rt *routes) http.Handler {
+	d := rt.d
 	setup := setupHandlers{svc: d.Auth}
 	authH := rt.authH
 	webhookH, ghH := rt.webhookH, rt.ghH
@@ -140,10 +152,14 @@ func NewRouter(d Deps) http.Handler {
 			WriteError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Método não permitido.")
 		})
 	})
+	// OAuth: metadados e registro, fora de /api (sem cookie, CSRF nem CORS).
+	if rt.oauth != nil {
+		rt.oauth.mountPublic(r)
+	}
 	// MCP: só Bearer (nunca cookie); as ferramentas despacham no núcleo.
 	if d.Tokens != nil && d.Auth != nil {
 		mcpH := newMCPHandler(dispatcher{core: newCore(rt)}, version.Version)
-		r.With(RequireToken(d.Tokens, d.Auth.DB, d.TokenLimiter)).Handle("/mcp", mcpH)
+		r.With(RequireToken(d.Tokens, d.Auth.DB, d.TokenLimiter, resolveOrigin(d))).Handle("/mcp", mcpH)
 	}
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
 		if d.Web == nil {

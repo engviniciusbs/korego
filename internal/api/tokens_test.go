@@ -76,10 +76,11 @@ func TestTokens_CreateListRevoke(t *testing.T) {
 	items := decode(t, w)["items"].([]any)
 	require.Len(t, items, 1)
 	li := items[0].(map[string]any)
-	for _, k := range []string{"id", "name", "prefix", "createdAt", "lastUsedAt", "lastUsedIp", "expiresAt"} {
+	for _, k := range []string{"id", "name", "prefix", "createdAt", "lastUsedAt", "lastUsedIp", "expiresAt", "kind"} {
 		assert.Contains(t, li, k)
 	}
-	assert.Len(t, li, 7)
+	assert.Len(t, li, 8)
+	assert.Equal(t, "manual", li["kind"])
 
 	w = f.req(t, http.MethodDelete, "/api/tokens/"+itoa(int64(id)), nil)
 	require.Equal(t, http.StatusNoContent, w.Code, w.Body.String())

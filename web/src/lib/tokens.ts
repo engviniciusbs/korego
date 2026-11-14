@@ -11,6 +11,8 @@ export interface ApiToken {
   lastUsedAt: string | null;
   lastUsedIp: string;
   expiresAt: string | null;
+  /** "oauth" para conexões autorizadas pelo navegador; "manual" para tokens criados aqui. */
+  kind: "manual" | "oauth";
 }
 
 export interface CreateTokenInput {
@@ -53,9 +55,4 @@ export function useRevokeToken() {
       await qc.invalidateQueries({ queryKey: ["audit"] });
     },
   });
-}
-
-/** Linha para registrar o servidor MCP no Claude Code. */
-export function mcpAddCommand(origin: string, token: string): string {
-  return `claude mcp add --transport http korego ${origin}/mcp --header "Authorization: Bearer ${token}"`;
 }
