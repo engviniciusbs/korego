@@ -74,8 +74,11 @@ func (d dispatcher) do(ctx context.Context, id tokenIdentity, method, path strin
 	if code != "" {
 		req.Header.Set(codeHeader, code)
 	}
-	// Uma confirmação de código nunca vem de fora: só o gate a marca.
+	// Uma confirmação de código nunca vem de fora: só o gate a marca. O
+	// contexto de rota do chi de quem chamou (ex.: /mcp) não pode vazar para
+	// o núcleo, senão ele roteia com o caminho de lá.
 	ictx := context.WithValue(ctx, codeConfirmedKey, false)
+	ictx = context.WithValue(ictx, chi.RouteCtxKey, (*chi.Context)(nil))
 	d.core.ServeHTTP(rec, req.WithContext(withTokenIdentity(ictx, id)))
 	return rec.Code, rec.Body.Bytes()
 }

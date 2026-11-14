@@ -40,18 +40,18 @@ func bearer(s string) reqOpt { return withHeader("Authorization", "Bearer "+s) }
 
 // probeSeen é o que o handler de prova viu no contexto.
 type probeSeen struct {
-	calls   int
-	user    store.User
-	userOK  bool
-	sess    store.Session
-	ref     audit.TokenRef
-	refOK   bool
-	idTok   store.APIToken
-	idAddr  string
-	idHdr   http.Header
-	idOK    bool
-	idHost  string
-	idTLS   bool
+	calls  int
+	user   store.User
+	userOK bool
+	sess   store.Session
+	ref    audit.TokenRef
+	refOK  bool
+	idTok  store.APIToken
+	idAddr string
+	idHdr  http.Header
+	idOK   bool
+	idHost string
+	idTLS  bool
 }
 
 // tokenProbe monta RequireToken na frente de um handler que registra o contexto.

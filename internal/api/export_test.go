@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/engviniciusbs/korego/internal/auth"
 	"github.com/engviniciusbs/korego/internal/store"
@@ -57,3 +58,13 @@ func (t DispatcherForTest) DoFromContext(ctx context.Context, method, path strin
 	id, _ := ctx.Value(tokenIdentityKey).(tokenIdentity)
 	return t.d.do(ctx, id, method, path, nil, body, code)
 }
+
+// SetDeployWaitSleepForTest troca a espera do deploy_wait; restore volta a original.
+func SetDeployWaitSleepForTest(f func(ctx context.Context, d time.Duration) error) (restore func()) {
+	old := deployWaitSleep
+	deployWaitSleep = f
+	return func() { deployWaitSleep = old }
+}
+
+// SleepCtxForTest expõe a espera real do deploy_wait.
+func SleepCtxForTest(ctx context.Context, d time.Duration) error { return sleepCtx(ctx, d) }

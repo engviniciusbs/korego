@@ -140,6 +140,11 @@ func NewRouter(d Deps) http.Handler {
 			WriteError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Método não permitido.")
 		})
 	})
+	// MCP: só Bearer (nunca cookie); as ferramentas despacham no núcleo.
+	if d.Tokens != nil && d.Auth != nil {
+		mcpH := newMCPHandler(dispatcher{core: newCore(rt)}, version.Version)
+		r.With(RequireToken(d.Tokens, d.Auth.DB, d.TokenLimiter)).Handle("/mcp", mcpH)
+	}
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
 		if d.Web == nil {
 			http.NotFound(w, req)
