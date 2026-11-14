@@ -23,7 +23,14 @@ function submit(code = "123456") {
   fireEvent.click(screen.getByRole("button", { name: "Entrar" }));
 }
 
+const REQ = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+function setSearch(search: string) {
+  window.history.replaceState(null, "", "/login/" + search);
+}
+
 beforeEach(() => {
+  setSearch("");
   authStatus = "anonymous";
   replace.mockReset();
   login.mockReset();
@@ -72,5 +79,20 @@ describe("Login", () => {
     authStatus = "setup";
     render(<LoginPage />);
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/setup/"));
+  });
+
+  it("autenticado com next válido volta para a tela de autorização", async () => {
+    setSearch("?next=" + encodeURIComponent("/autorizar/?req=" + REQ));
+    authStatus = "authenticated";
+    render(<LoginPage />);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/autorizar/?req=" + REQ));
+  });
+
+  it("autenticado com next externo cai em /", async () => {
+    setSearch("?next=" + encodeURIComponent("//evil.com"));
+    authStatus = "authenticated";
+    render(<LoginPage />);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
+    expect(replace).not.toHaveBeenCalledWith("//evil.com");
   });
 });
