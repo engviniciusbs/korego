@@ -84,6 +84,15 @@ describe("Configurações → Tokens de API", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copiar token" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Codex" }));
+    expect(screen.getByText(/\[mcp_servers\.korego\]/)).toHaveTextContent(
+      `url = "${location.origin}/mcp" http_headers = { "Authorization" = "Bearer kg_SEGREDO123" }`,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Cursor" }));
+    const link = screen.getByRole("link", { name: "Abrir no Cursor" }).getAttribute("href")!;
+    expect(link).toMatch(/^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=korego&config=/);
+    const cfg = JSON.parse(atob(decodeURIComponent(link.split("config=")[1])));
+    expect(cfg).toEqual({ url: `${location.origin}/mcp`, headers: { Authorization: "Bearer kg_SEGREDO123" } });
     fireEvent.click(screen.getByRole("button", { name: "Fechar" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     await openCreate();

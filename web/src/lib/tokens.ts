@@ -54,8 +54,3 @@ export function useRevokeToken() {
     },
   });
 }
-
-/** Linha para registrar o servidor MCP no Claude Code. */
-export function mcpAddCommand(origin: string, token: string): string {
-  return `claude mcp add --transport http korego ${origin}/mcp --header "Authorization: Bearer ${token}"`;
-}

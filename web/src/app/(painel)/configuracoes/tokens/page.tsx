@@ -4,11 +4,13 @@ import Link from "next/link";
 import { useId, useState, type FormEvent } from "react";
 import { PageHeader, PanelState } from "@/components/shell/page-header";
 import { Alert, Button, Dialog, Input, Label, Panel, Spinner } from "@/components/ui";
+import { focusRing } from "@/components/ui/focus";
+import { Tabs, tabId, tabPanelId } from "@/components/ui/tabs";
+import { mcpClients, type McpClientId } from "@/lib/mcp-clients";
 import { selectCls } from "@/components/domains/form-bits";
 import { ApiError } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import {
-  mcpAddCommand,
   useCreateToken,
   useRevokeToken,
   useTokens,
@@ -42,6 +44,46 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   );
 }
 
+const codeCls =
+  "block min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap border border-line-strong bg-bg/40 px-3 py-2 font-mono text-xs text-fg [overflow-wrap:anywhere]";
+
+function ConnectClients({ token }: { token: string }) {
+  const uid = useId();
+  const clients = mcpClients(location.origin, token);
+  const [active, setActive] = useState<McpClientId>("claude-code");
+  const c = clients.find((x) => x.id === active) ?? clients[0];
+  return (
+    <div>
+      <Label>Conectar um agente</Label>
+      <Tabs
+        id={uid}
+        label="Cliente MCP"
+        className="mt-1.5 flex flex-wrap"
+        items={clients.map((x) => ({ value: x.id, label: x.label }))}
+        value={c.id}
+        onChange={setActive}
+      />
+      <div role="tabpanel" id={tabPanelId(uid)} aria-labelledby={tabId(uid, c.id)} className="mt-3 space-y-2">
+        <p className="text-xs text-fg-muted">{c.hint}</p>
+        {c.installLink && (
+          <a
+            href={c.installLink.href}
+            className={`inline-flex h-7 touch-manipulation items-center border border-accent bg-accent px-2.5 text-xs font-medium tracking-tight text-accent-fg hover:border-accent-hover hover:bg-accent-hover ${focusRing}`}
+          >
+            {c.installLink.label}
+          </a>
+        )}
+        <div className="flex items-start gap-2">
+          <code className={codeCls} translate="no">
+            {c.snippet}
+          </code>
+          <CopyButton text={c.snippet} label={`Copiar configuração do ${c.label}`} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CreateDialog({ onClose }: { onClose: () => void }) {
   const uid = useId();
   const formId = `${uid}-form`;
@@ -54,7 +96,6 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
   const [created, setCreated] = useState<CreateTokenResult | null>(null);
 
   if (created) {
-    const command = mcpAddCommand(location.origin, created.token);
     return (
       <Dialog
         open
@@ -76,15 +117,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
             <CopyButton text={created.token} label="Copiar token" />
           </div>
         </div>
-        <div>
-          <Label>Registrar no Claude Code</Label>
-          <div className="mt-1.5 flex items-start gap-2">
-            <code className="block min-w-0 flex-1 border border-line-strong bg-bg/40 px-3 py-2 font-mono text-xs text-fg [overflow-wrap:anywhere]" translate="no">
-              {command}
-            </code>
-            <CopyButton text={command} label="Copiar comando" />
-          </div>
-        </div>
+        <ConnectClients token={created.token} />
       </Dialog>
     );
   }

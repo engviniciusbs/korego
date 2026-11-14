@@ -181,7 +181,7 @@ O KoreGO tem um servidor [MCP](https://modelcontextprotocol.io) em `/mcp` com as
 1. Abra Configurações → Tokens de API e clique em **Novo token**.
 2. Informe um nome (1 a 64 caracteres, único entre os tokens ativos), a validade (90 dias por padrão, 30 dias ou nunca) e o código 2FA atual.
 3. Copie o token na hora: ele é exibido **uma única vez** e só o hash SHA-256 fica guardado.
-4. Registre o servidor no Claude Code com a linha que o painel mostra:
+4. Conecte o agente: o painel mostra uma aba por cliente (Claude Code, Cursor, VS Code, Codex, Gemini CLI, Windsurf e uma opção genérica) com o comando ou o trecho de configuração já preenchido. Cursor e VS Code também têm um botão que abre o editor com a instalação pronta. No Claude Code, por exemplo:
 
 ```sh
 claude mcp add --transport http korego https://painel.exemplo.com/mcp --header "Authorization: Bearer kg_..."
