@@ -20,6 +20,25 @@ type Entry struct {
 	Metadata map[string]any
 }
 
+// TokenRef identifica o token de API que originou uma requisição.
+type TokenRef struct {
+	ID   int64
+	Name string
+}
+
+type tokenCtxKey struct{}
+
+// WithToken marca ctx como originado por um token de API.
+func WithToken(ctx context.Context, ref TokenRef) context.Context {
+	return context.WithValue(ctx, tokenCtxKey{}, ref)
+}
+
+// TokenFrom retorna o token de API associado a ctx, se houver.
+func TokenFrom(ctx context.Context) (TokenRef, bool) {
+	ref, ok := ctx.Value(tokenCtxKey{}).(TokenRef)
+	return ref, ok
+}
+
 // Logger grava entradas de auditoria no banco.
 type Logger struct {
 	DB  *store.DB
@@ -29,8 +48,18 @@ type Logger struct {
 // Record grava e no log de auditoria.
 func (l *Logger) Record(ctx context.Context, e Entry) error {
 	meta := []byte("{}")
-	if len(e.Metadata) > 0 {
-		b, err := json.Marshal(e.Metadata)
+	md := e.Metadata
+	if ref, ok := TokenFrom(ctx); ok {
+		md = make(map[string]any, len(e.Metadata)+3)
+		for k, v := range e.Metadata {
+			md[k] = v
+		}
+		md["via"] = "token"
+		md["token"] = ref.Name
+		md["tokenId"] = ref.ID
+	}
+	if len(md) > 0 {
+		b, err := json.Marshal(md)
 		if err != nil {
 			return fmt.Errorf("serializar metadados da auditoria: %w", err)
 		}
