@@ -25,6 +25,8 @@ type ctxKey int
 const (
 	sessionKey ctxKey = iota
 	userKey
+	tokenIdentityKey
+	codeConfirmedKey
 )
 
 // CurrentSession returns the session placed in ctx by RequireSession.

@@ -37,6 +37,8 @@ type env struct {
 	h         http.Handler
 	now       *time.Time
 	tokenFile string
+	deps      api.Deps // as Deps passadas ao roteador (com Auth)
+	totp      string   // segredo TOTP, depois de setup
 }
 
 func newEnv(t *testing.T) *env { return newEnvWithNode(t, nil) }
@@ -65,7 +67,7 @@ func newEnvDeps(t *testing.T, d api.Deps) *env {
 	}
 	require.NoError(t, os.WriteFile(svc.SetupTokenFile, []byte(setupTok), 0o600))
 	d.Auth = svc
-	return &env{svc: svc, h: api.NewRouter(d), now: &now, tokenFile: svc.SetupTokenFile}
+	return &env{svc: svc, h: api.NewRouter(d), now: &now, tokenFile: svc.SetupTokenFile, deps: d}
 }
 
 type reqOpt func(*http.Request)
@@ -133,6 +135,7 @@ func (e *env) setup(t *testing.T) (string, *http.Cookie, string) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	body := decode(t, w)
 	require.Len(t, body["recoveryCodes"], 10)
+	e.totp = secret
 	return secret, sessionCookie(t, w), body["csrfToken"].(string)
 }
 

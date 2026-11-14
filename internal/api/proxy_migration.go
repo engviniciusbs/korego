@@ -49,8 +49,10 @@ type migrationStarted struct {
 	Topic  string `json:"topic"`
 }
 
-// start: recusas baratas (troca em andamento, estado do proxy) antes de
-// conferir e gastar o código; depois o código; depois a troca.
+// start: pelo painel, as recusas baratas (troca em andamento, estado do
+// proxy) vêm antes de conferir e gastar o código; depois o código; depois a
+// troca. Em chamadas por token, o gate do MCP já gastou o código antes de
+// chegar aqui.
 func (h migrationHandlers) start(w http.ResponseWriter, r *http.Request, action string,
 	precheck func(context.Context) error, startFn func(context.Context, func(migrate.Result)) error) {
 	sess, ok := CurrentSession(r.Context())
@@ -59,8 +61,11 @@ func (h migrationHandlers) start(w http.ResponseWriter, r *http.Request, action 
 		return
 	}
 	ip := auth.ClientIP(r)
+	// Sem cancelamento, mas com os valores da requisição (o token da auditoria):
+	// o resultado chega depois que a resposta já saiu.
+	base := context.WithoutCancel(r.Context())
 	rec := func(meta map[string]any) {
-		ctx, cancel := context.WithTimeout(context.Background(), auditTimeout)
+		ctx, cancel := context.WithTimeout(base, auditTimeout)
 		defer cancel()
 		h.svc.Record(ctx, audit.Entry{UserID: &sess.UserID, Action: action, IP: ip, Metadata: meta})
 	}
@@ -79,7 +84,7 @@ func (h migrationHandlers) start(w http.ResponseWriter, r *http.Request, action 
 		refused(err)
 		return
 	}
-	if !h.confirmCode(w, r, sess.UserID, ip, rec) {
+	if !confirmCode(h.svc, w, r, sess.UserID, ip, rec) {
 		return
 	}
 	err := startFn(ctx, func(res migrate.Result) {
@@ -97,43 +102,54 @@ func (h migrationHandlers) start(w http.ResponseWriter, r *http.Request, action 
 // confirmCode exige um código TOTP novo ou de recuperação no corpo ({code}).
 // Como no login, toda tentativa passa por Limiter.Attempt (bloqueado: 429
 // RATE_LIMITED) e o acerto zera o contador. Sem código: 403 CODE_REQUIRED;
-// errado: 403 INVALID_CODE. Todas as recusas são auditadas.
-func (h migrationHandlers) confirmCode(w http.ResponseWriter, r *http.Request, userID int64, ip string,
+// errado: 403 INVALID_CODE. Todas as recusas são auditadas. Se o gate de
+// token (requireCodeForToken) já conferiu o código do cabeçalho, devolve true
+// sem ler o corpo.
+func confirmCode(svc *auth.Service, w http.ResponseWriter, r *http.Request, userID int64, ip string,
 	rec func(map[string]any)) bool {
+	if codeConfirmed(r.Context()) {
+		return true
+	}
 	var in struct {
 		Code string `json:"code"`
 	}
 	if r.ContentLength != 0 && !decodeJSON(w, r, &in) {
 		return false
 	}
+	return verifyCode(svc, w, r, userID, ip, in.Code, rec)
+}
+
+// verifyCode confere um código já lido: limitador, presença e VerifyCode.
+func verifyCode(svc *auth.Service, w http.ResponseWriter, r *http.Request, userID int64, ip, code string,
+	rec func(map[string]any)) bool {
 	now := time.Now()
-	if h.svc.Now != nil {
-		now = h.svc.Now()
+	if svc.Now != nil {
+		now = svc.Now()
 	}
-	if h.svc.Limiter != nil && !h.svc.Limiter.Attempt(ip, now) {
+	if svc.Limiter != nil && !svc.Limiter.Attempt(ip, now) {
 		rec(map[string]any{"ok": false, "stage": "rate_limited"})
-		WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", "Muitas tentativas. Tente novamente mais tarde.")
+		WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", msgRateLimited)
 		return false
 	}
-	if strings.TrimSpace(in.Code) == "" {
+	if strings.TrimSpace(code) == "" {
 		rec(map[string]any{"ok": false, "stage": "code_required"})
-		WriteError(w, http.StatusForbidden, "CODE_REQUIRED", "Confirme com o código do autenticador ou um código de recuperação.")
+		WriteError(w, http.StatusForbidden, "CODE_REQUIRED", msgCodeRequired)
 		return false
 	}
 	ctx, cancel := detached(r, auditTimeout)
 	defer cancel()
-	ok, err := h.svc.VerifyCode(ctx, userID, in.Code)
+	ok, err := svc.VerifyCode(ctx, userID, code)
 	if err != nil {
 		internalError(w, err)
 		return false
 	}
 	if !ok {
 		rec(map[string]any{"ok": false, "stage": "invalid_code"})
-		WriteError(w, http.StatusForbidden, "INVALID_CODE", "Código inválido.")
+		WriteError(w, http.StatusForbidden, "INVALID_CODE", msgInvalidCode)
 		return false
 	}
-	if h.svc.Limiter != nil {
-		h.svc.Limiter.Reset(ip)
+	if svc.Limiter != nil {
+		svc.Limiter.Reset(ip)
 	}
 	return true
 }
