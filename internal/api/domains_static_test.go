@@ -3,7 +3,6 @@ package api
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -21,7 +20,7 @@ func TestStatRoot_FollowsCurrentLink(t *testing.T) {
 	got := statRoot("/", filepath.Join(dir, "current"))
 	require.True(t, got.Exists)
 	require.Equal(t, "/", got.Path)
-	require.True(t, strings.HasSuffix(got.Resolved, "releases/20261115133041-9faa1c9"), got.Resolved)
+	require.Equal(t, "20261115133041-9faa1c9", filepath.Base(got.Resolved))
 	require.NotNil(t, got.ModifiedAt)
 
 	missing := statRoot("/", filepath.Join(dir, "nada"))
