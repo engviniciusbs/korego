@@ -6,6 +6,7 @@ import { PanelState } from "@/components/shell/page-header";
 import { Badge, Panel, Spinner, type BadgeVariant } from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import type { AppView } from "@/lib/apps";
+import { useContainers, type Container } from "@/lib/containers";
 import { cn } from "@/lib/cn";
 import { isActive, statusLabel } from "@/lib/deploys";
 import { linkCls } from "./form-bits";
@@ -96,8 +97,42 @@ export function statusVariant(status: string): BadgeVariant {
   return "neutral";
 }
 
-/** Status do deploy atual da aplicação. */
-export function AppStatus({ app }: { app: AppView }) {
+export type StackState = "running" | "partial" | "stopped";
+
+/** Estado de uma stack compose da VPS pelos containers do projeto (fora os do KoreGO). */
+export function stackState(containers: Container[], project: string): StackState {
+  const cs = containers.filter((c) => c.project === project && !c.managed);
+  const up = cs.filter((c) => c.state === "running").length;
+  if (cs.length > 0 && up === cs.length) return "running";
+  return up > 0 ? "partial" : "stopped";
+}
+
+const STACK_BADGE: Record<StackState, { label: string; variant: BadgeVariant }> = {
+  running: { label: "Rodando", variant: "success" },
+  partial: { label: "Parcial", variant: "warning" },
+  stopped: { label: "Parado", variant: "neutral" },
+};
+
+/** Stack compose da VPS: o status vem dos containers, não do último deploy. */
+function StackStatus({ app }: { app: AppView }) {
+  const containers = useContainers();
+  if (!containers.data) {
+    if (containers.isError) return <DeployStatus app={app} />;
+    return (
+      <Badge size="sm" variant="neutral">
+        …<span className="sr-only">Verificando a stack</span>
+      </Badge>
+    );
+  }
+  const b = STACK_BADGE[stackState(containers.data, app.composeProject)];
+  return (
+    <Badge size="sm" dot variant={b.variant}>
+      {b.label}
+    </Badge>
+  );
+}
+
+function DeployStatus({ app }: { app: AppView }) {
   const d = app.currentDeploy;
   if (!d) {
     return (
@@ -111,6 +146,11 @@ export function AppStatus({ app }: { app: AppView }) {
       {statusLabel(d.status)}
     </Badge>
   );
+}
+
+/** Status da aplicação: o do deploy atual ou, numa stack compose da VPS, o dos containers. */
+export function AppStatus({ app }: { app: AppView }) {
+  return app.buildType === "compose-local" ? <StackStatus app={app} /> : <DeployStatus app={app} />;
 }
 
 export const shortSha = (sha: string) => sha.slice(0, 7);
