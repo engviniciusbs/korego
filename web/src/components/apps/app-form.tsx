@@ -137,9 +137,9 @@ function initialState(app?: AppView): FormState {
   };
 }
 
-/** Valida os campos visíveis; devolve as mensagens por campo. */
 const IMMUTABLE_ERROR = "Prefixo inválido: use um caminho como /assets/, só com minúsculas, números e . _ ~ -.";
 
+/** Valida os campos visíveis; devolve as mensagens por campo. */
 function validate(s: FormState, visible: AppField[], editing: boolean): Errors {
   const e: Errors = {};
   const has = (f: AppField) => visible.includes(f);
