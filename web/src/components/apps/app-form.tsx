@@ -20,6 +20,7 @@ import {
   validBranch,
   validGitUrl,
   validImageRef,
+  validImmutablePrefix,
   validPort,
   validRelPath,
   validRepo,
@@ -137,6 +138,8 @@ function initialState(app?: AppView): FormState {
 }
 
 /** Valida os campos visíveis; devolve as mensagens por campo. */
+const IMMUTABLE_ERROR = "Prefixo inválido: use um caminho como /assets/, só com minúsculas, números e . _ ~ -.";
+
 function validate(s: FormState, visible: AppField[], editing: boolean): Errors {
   const e: Errors = {};
   const has = (f: AppField) => visible.includes(f);
@@ -159,9 +162,8 @@ function validate(s: FormState, visible: AppField[], editing: boolean): Errors {
   if (has("staticOutputDir") && !validRelPath(s.staticOutputDir.trim())) e.staticOutputDir = rel;
   if (has("staticBaseDir") && !validRelPath(s.staticBaseDir.trim())) e.staticBaseDir = rel;
   if (has("staticImage") && !validImageRef(s.staticImage.trim())) e.staticImage = "Imagem inválida. Use, por exemplo, node:22-alpine.";
-  if (has("staticImmutablePrefix") && !s.staticImmutablePrefix.trim().startsWith("/")) {
-    e.staticImmutablePrefix = "O prefixo começa com / (por exemplo /assets/).";
-  }
+  const imm = s.staticImmutablePrefix.trim();
+  if (has("staticImmutablePrefix") && imm && !validImmutablePrefix(imm)) e.staticImmutablePrefix = IMMUTABLE_ERROR;
   if (has("internalPort") && (!validPort(Number(s.internalPort)) || s.internalPort.trim() === "")) {
     e.internalPort = "Informe a porta interna da aplicação (1 a 65535).";
   }
@@ -251,6 +253,10 @@ export function AppForm({ projectId, app, onSaved }: AppFormProps) {
   const [errors, setErrors] = useState<Errors>({});
   const [formError, setFormError] = useState<ReactNode>(null);
   const [saved, setSaved] = useState(false);
+
+  // O servidor recusa trocar de/para estático numa app existente.
+  const staticLocked = editing && app?.buildType === "static";
+  const builds = editing && !staticLocked ? BUILDS.filter((b) => b.value !== "static") : BUILDS;
 
   const d = defaultsFor(s.sourceType, s.buildType);
   const visible = d.visible;
@@ -453,14 +459,19 @@ export function AppForm({ projectId, app, onSaved }: AppFormProps) {
               name="buildType"
               className={cn(selectCls, "mt-1.5")}
               value={s.buildType}
+              disabled={staticLocked}
+              aria-describedby={staticLocked ? id("buildType-hint") : undefined}
               onChange={(e) => set("buildType", e.target.value as BuildType)}
             >
-              {BUILDS.map((b) => (
+              {builds.map((b) => (
                 <option key={b.value} value={b.value}>
                   {b.label}
                 </option>
               ))}
             </select>
+            {staticLocked && (
+              <Hint id={id("buildType-hint")}>Um site estático não muda de tipo de build depois de criado.</Hint>
+            )}
           </div>
           {s.buildType === "compose" && <Alert variant="warning">{COMPOSE_WARNING}</Alert>}
           {s.buildType === "static" && (

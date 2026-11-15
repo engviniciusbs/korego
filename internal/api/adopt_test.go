@@ -226,6 +226,20 @@ func TestAdoptStatic_RejectsBadLayout(t *testing.T) {
 	assert.Empty(t, apps)
 }
 
+func TestAdoptStatic_RejectsBadImmutablePrefix(t *testing.T) {
+	a := newAdoptFx(t)
+	pid := a.project(t)
+	_, current := a.site(t, "hoprs", "20260201000000-1234567")
+	body := adoptStaticBody(pid, "hoprs", current)
+	body["staticImmutablePrefix"] = "/Assets/"
+	code, b := a.call(t, http.MethodPost, "/api/adopt/static", body)
+	require.Equal(t, http.StatusBadRequest, code, b)
+	assert.Equal(t, "staticImmutablePrefix", b["error"].(map[string]any)["field"])
+	apps, err := a.db.ListApps(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, apps)
+}
+
 func TestAdoptStatic_Twice(t *testing.T) {
 	a := newAdoptFx(t)
 	pid := a.project(t)

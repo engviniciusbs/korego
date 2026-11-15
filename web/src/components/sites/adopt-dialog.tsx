@@ -21,6 +21,7 @@ import {
   validBranch,
   validGitUrl,
   validImageRef,
+  validImmutablePrefix,
   validRelPath,
   validRepo,
   validSlug,
@@ -346,7 +347,10 @@ function StaticAdopt({ site, onClose }: { site: DetectedSite; onClose: () => voi
     if (!validRelPath(f.staticOutputDir.trim())) next.staticOutputDir = REL_ERROR;
     if (!validRelPath(f.staticBaseDir.trim())) next.staticBaseDir = REL_ERROR;
     if (!validImageRef(f.staticImage.trim())) next.staticImage = "Imagem inválida. Use, por exemplo, node:22-alpine.";
-    if (!f.staticImmutablePrefix.trim().startsWith("/")) next.staticImmutablePrefix = "O prefixo começa com / (por exemplo /assets/).";
+    const imm = f.staticImmutablePrefix.trim();
+    if (imm && !validImmutablePrefix(imm)) {
+      next.staticImmutablePrefix = "Prefixo inválido: use um caminho como /assets/, só com minúsculas, números e . _ ~ -.";
+    }
     setErrors(next);
     setFormError(null);
     if (focusFirst(uid, STATIC_ORDER, next)) return;

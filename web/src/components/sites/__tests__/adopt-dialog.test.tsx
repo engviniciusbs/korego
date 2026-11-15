@@ -135,6 +135,15 @@ describe("AdoptDialog estático", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("prefixo imutável fora da regra do proxy não é enviado", async () => {
+    renderDialog(staticSite);
+    fireEvent.click(await screen.findByRole("button", { name: /exemplo\/hoprs/ }));
+    fireEvent.change(screen.getByLabelText(/^Prefixo imutável/), { target: { value: "/_Next/" } });
+    fireEvent.click(screen.getByRole("button", { name: "Adotar site" }));
+    expect(await screen.findByText(/Prefixo inválido/)).toBeInTheDocument();
+    expect(calls("POST", "/api/adopt/static")).toHaveLength(0);
+  });
+
   it("sem marcar a caixa, vai para a aplicação sem mudar o deploy automático", async () => {
     routes["POST /api/adopt/static"] = () => json({ app: appView({}), domains: [] }, 201);
     renderDialog(staticSite);

@@ -72,11 +72,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderForm(onSaved = vi.fn()) {
+function renderForm(onSaved = vi.fn(), app?: typeof created) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <AppForm projectId={1} onSaved={onSaved} />
+      <AppForm projectId={1} app={app} onSaved={onSaved} />
     </QueryClientProvider>,
   );
   return onSaved;
@@ -271,5 +271,34 @@ describe("AppForm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Criar aplicação" }));
     await waitFor(() => expect(posts()).toHaveLength(1));
     expect(JSON.parse(posts()[0][1].body)).toMatchObject({ buildType: "static", healthTimeoutS: 0 });
+  });
+
+  it("prefixo imutável fora da regra do proxy não é enviado", async () => {
+    renderForm();
+    fireEvent.click(screen.getByRole("radio", { name: /URL Git/ }));
+    fireEvent.change(screen.getByLabelText(/^Tipo de build/), { target: { value: "static" } });
+    fireEvent.change(screen.getByLabelText(/^URL do repositório/), {
+      target: { value: "https://github.com/exemplo/site.git" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Nome/), { target: { value: "site" } });
+    fireEvent.change(screen.getByLabelText(/^Prefixo imutável/), { target: { value: "/Assets/" } });
+    fireEvent.click(screen.getByRole("button", { name: "Criar aplicação" }));
+    expect(await screen.findByText(/Prefixo inválido/)).toBeInTheDocument();
+    expect(posts()).toHaveLength(0);
+  });
+
+  it("editando um site estático o tipo de build fica fixo", () => {
+    renderForm(vi.fn(), { ...created, sourceType: "git", repo: "https://github.com/exemplo/site.git", buildType: "static" });
+    const select = screen.getByLabelText(/^Tipo de build/);
+    expect(select).toBeDisabled();
+    expect(select).toHaveValue("static");
+  });
+
+  it("editando uma app não estática a opção Estático some", () => {
+    renderForm(vi.fn(), { ...created, sourceType: "git", repo: "https://github.com/exemplo/site.git", buildType: "dockerfile" });
+    const select = screen.getByLabelText(/^Tipo de build/);
+    expect(select).not.toBeDisabled();
+    expect(screen.queryByRole("option", { name: "Estático" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Dockerfile" })).toBeInTheDocument();
   });
 });

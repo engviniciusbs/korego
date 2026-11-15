@@ -19,6 +19,7 @@ import (
 	"github.com/engviniciusbs/korego/internal/deploy"
 	"github.com/engviniciusbs/korego/internal/domains"
 	"github.com/engviniciusbs/korego/internal/node/docker"
+	"github.com/engviniciusbs/korego/internal/node/proxy"
 	"github.com/engviniciusbs/korego/internal/secrets"
 	"github.com/engviniciusbs/korego/internal/store"
 )
@@ -347,8 +348,11 @@ func buildStatic(a *store.App, in AppInput) *appError {
 	if p == "" {
 		p = "/assets/"
 	}
-	if len(p) < 2 || p[0] != '/' || p[len(p)-1] != '/' || strings.ContainsAny(p, " \t\r\n") {
-		return &appError{"staticImmutablePrefix", "O prefixo imutável deve começar e terminar com /."}
+	// A mesma regra do proxy: um prefixo que ele recusa derrubaria o site
+	// inteiro no próximo reaplicar.
+	if !proxy.ValidImmutablePrefix(p) {
+		return &appError{"staticImmutablePrefix",
+			"O prefixo imutável deve ser um caminho como /assets/, só com minúsculas, números e . _ ~ -."}
 	}
 	a.StaticImmutablePrefix = p
 	if len(in.StaticBuildCmd) > 1000 || strings.ContainsAny(in.StaticBuildCmd, "\r\n") {
@@ -497,6 +501,12 @@ func (h appHandlers) update(w http.ResponseWriter, r *http.Request) {
 		record(h.svc, r, "app.update", cur.Slug, map[string]any{"ok": false})
 		writeFieldError(w, http.StatusBadRequest, "INVALID_APP",
 			"A origem não pode mudar entre uma stack compose da VPS e as demais.", "sourceType")
+		return
+	}
+	if (a.BuildType == "static") != (cur.BuildType == "static") {
+		record(h.svc, r, "app.update", cur.Slug, map[string]any{"ok": false})
+		writeFieldError(w, http.StatusBadRequest, "INVALID_APP",
+			"O tipo de build não pode mudar entre um site estático e as demais aplicações.", "buildType")
 		return
 	}
 	a.PublishRoot, a.ComposeProject = cur.PublishRoot, cur.ComposeProject
