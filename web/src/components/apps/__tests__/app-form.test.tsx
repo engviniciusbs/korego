@@ -27,6 +27,13 @@ const created = {
   internalPort: 80,
   healthTimeoutS: 60,
   autoDeploy: false,
+  staticBuildCmd: "",
+  staticOutputDir: "",
+  staticBaseDir: "",
+  staticImage: "",
+  staticSpa: false,
+  staticImmutablePrefix: "",
+  publishRoot: "",
   hostPort: 0,
   currentDeploy: null,
   domains: [],
@@ -199,5 +206,55 @@ describe("AppForm", () => {
     fireEvent.click(screen.getByRole("radio", { name: /URL Git/ }));
     fireEvent.change(screen.getByLabelText(/^Tipo de build/), { target: { value: "compose" } });
     expect(screen.getByText(warning)).toBeInTheDocument();
+  });
+
+  it("Estático mostra os padrões, esconde porta e saúde e envia sem porta", async () => {
+    routes["POST /api/apps"] = () => json({ app: { ...created, sourceType: "git", buildType: "static" } }, 201);
+    renderForm();
+    fireEvent.click(screen.getByRole("radio", { name: /URL Git/ }));
+    fireEvent.change(screen.getByLabelText(/^Tipo de build/), { target: { value: "static" } });
+
+    expect(screen.getByLabelText(/^Pasta de saída/)).toHaveValue("dist");
+    expect(screen.getByLabelText(/^Diretório base/)).toHaveValue(".");
+    expect(screen.getByLabelText(/^Imagem do build/)).toHaveValue("node:22-alpine");
+    expect(screen.getByLabelText(/^Prefixo imutável/)).toHaveValue("/assets/");
+    expect(screen.getByLabelText(/^Comando de build/)).toHaveValue("");
+    expect(screen.queryByLabelText(/^Porta interna/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Verificação de saúde/)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/^URL do repositório/), {
+      target: { value: "https://github.com/exemplo/site.git" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Nome/), { target: { value: "site" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /página única/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Criar aplicação" }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    const body = JSON.parse(posts()[0][1].body);
+    expect(body).toMatchObject({
+      buildType: "static",
+      sourceType: "git",
+      internalPort: 0,
+      staticOutputDir: "dist",
+      staticBaseDir: ".",
+      staticImage: "node:22-alpine",
+      staticImmutablePrefix: "/assets/",
+      staticSpa: true,
+    });
+    expect(body).not.toHaveProperty("publishRoot");
+  });
+
+  it("409 PUBLISH_ROOT_EXISTS explica como usar Gerenciar pelo KoreGO", async () => {
+    routes["POST /api/apps"] = () =>
+      json({ error: { code: "PUBLISH_ROOT_EXISTS", message: "A pasta /var/www/site já existe." } }, 409);
+    renderForm();
+    fireEvent.click(screen.getByRole("radio", { name: /URL Git/ }));
+    fireEvent.change(screen.getByLabelText(/^Tipo de build/), { target: { value: "static" } });
+    fireEvent.change(screen.getByLabelText(/^URL do repositório/), {
+      target: { value: "https://github.com/exemplo/site.git" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Nome/), { target: { value: "site" } });
+    fireEvent.click(screen.getByRole("button", { name: "Criar aplicação" }));
+    expect(await screen.findByText(/Gerenciar pelo KoreGO/)).toBeInTheDocument();
+    expect(screen.getByText(/A pasta \/var\/www\/site já existe\./)).toBeInTheDocument();
   });
 });

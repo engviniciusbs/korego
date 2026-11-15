@@ -38,6 +38,8 @@ type deployDTO struct {
 	CreatedAt     time.Time  `json:"createdAt"`
 	StartedAt     *time.Time `json:"startedAt"`
 	FinishedAt    *time.Time `json:"finishedAt"`
+	// ReleaseDir é a pasta da versão publicada (apps estáticas); vazia nas demais.
+	ReleaseDir string `json:"releaseDir"`
 }
 
 func toDeployDTO(d store.Deploy) deployDTO {
@@ -45,6 +47,7 @@ func toDeployDTO(d store.Deploy) deployDTO {
 		ID: d.ID, AppID: d.AppID, Trigger: d.Trigger, Status: d.Status, Reason: d.Reason,
 		CommitSHA: d.CommitSHA, CommitMessage: d.CommitMessage, Image: d.Image, HostPort: d.HostPort,
 		RollbackOf: d.RollbackOf, CreatedAt: d.CreatedAt, StartedAt: d.StartedAt, FinishedAt: d.FinishedAt,
+		ReleaseDir: d.ReleaseDir,
 	}
 }
 
@@ -62,6 +65,8 @@ func deployError(w http.ResponseWriter, err error, notFound string) {
 		WriteError(w, http.StatusConflict, "ROLLBACK_NOT_SUPPORTED", "Aplicações Compose não suportam rollback.")
 	case errors.Is(err, deploy.ErrImageGone):
 		WriteError(w, http.StatusConflict, "IMAGE_GONE", "A imagem desse deploy não está mais disponível.")
+	case errors.Is(err, deploy.ErrReleaseGone):
+		WriteError(w, http.StatusConflict, "RELEASE_GONE", "A versão publicada desse deploy não está mais disponível.")
 	case errors.Is(err, deploy.ErrAppDeleting):
 		WriteError(w, http.StatusConflict, "APP_DELETING", "A aplicação está sendo removida.")
 	case errors.Is(err, deploy.ErrDeployFinished):

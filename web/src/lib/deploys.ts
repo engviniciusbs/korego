@@ -25,6 +25,8 @@ export interface Deploy {
   image: string;
   hostPort: number;
   rollbackOf: number | null;
+  /** Pasta da versão publicada (apps estáticas); vazia quando não há. */
+  releaseDir?: string;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -216,7 +218,7 @@ export function useCancelDeploy() {
   });
 }
 
-/** Erros ROLLBACK_NOT_SUPPORTED, IMAGE_GONE e DEPLOY_FINISHED vêm do servidor. */
+/** Erros ROLLBACK_NOT_SUPPORTED, IMAGE_GONE, RELEASE_GONE e DEPLOY_FINISHED vêm do servidor. */
 export function useRollback() {
   const inv = useInvalidateDeploys();
   return useMutation({

@@ -12,6 +12,7 @@ import {
   type AppView,
   type BuildType,
   type SourceType,
+  STATIC_DEFAULTS,
 } from "@/lib/apps";
 import { cn } from "@/lib/cn";
 import { useGitHub } from "@/lib/github";
@@ -46,6 +47,7 @@ const BUILDS: { value: Exclude<BuildType, "image">; label: string }[] = [
   { value: "dockerfile", label: "Dockerfile" },
   { value: "compose", label: "Docker Compose" },
   { value: "railpack", label: "Railpack (detecta a linguagem)" },
+  { value: "static", label: "Estático" },
 ];
 
 /** Ordem dos campos na tela: o primeiro com erro recebe o foco. */
@@ -56,6 +58,9 @@ const ORDER: AppField[] = [
   "dockerfilePath",
   "composePath",
   "composeService",
+  "staticOutputDir",
+  "staticBaseDir",
+  "staticImmutablePrefix",
   "slug",
   "internalPort",
   "healthTimeoutS",
@@ -76,6 +81,12 @@ interface FormState {
   internalPort: string;
   healthTimeoutS: string;
   autoDeploy: boolean;
+  staticBuildCmd: string;
+  staticOutputDir: string;
+  staticBaseDir: string;
+  staticImage: string;
+  staticSpa: boolean;
+  staticImmutablePrefix: string;
 }
 
 function initialState(app?: AppView): FormState {
@@ -94,6 +105,12 @@ function initialState(app?: AppView): FormState {
       internalPort: String(app.internalPort || ""),
       healthTimeoutS: String(app.healthTimeoutS || DEFAULT_HEALTH),
       autoDeploy: app.autoDeploy,
+      staticBuildCmd: app.staticBuildCmd ?? "",
+      staticOutputDir: app.staticOutputDir || STATIC_DEFAULTS.outputDir,
+      staticBaseDir: app.staticBaseDir || STATIC_DEFAULTS.baseDir,
+      staticImage: app.staticImage || STATIC_DEFAULTS.image,
+      staticSpa: app.staticSpa ?? false,
+      staticImmutablePrefix: app.staticImmutablePrefix || STATIC_DEFAULTS.immutablePrefix,
     };
   }
   const d = defaultsFor("github", "dockerfile");
@@ -110,6 +127,12 @@ function initialState(app?: AppView): FormState {
     internalPort: "",
     healthTimeoutS: String(DEFAULT_HEALTH),
     autoDeploy: true,
+    staticBuildCmd: "",
+    staticOutputDir: STATIC_DEFAULTS.outputDir,
+    staticBaseDir: STATIC_DEFAULTS.baseDir,
+    staticImage: STATIC_DEFAULTS.image,
+    staticSpa: false,
+    staticImmutablePrefix: STATIC_DEFAULTS.immutablePrefix,
   };
 }
 
@@ -133,11 +156,17 @@ function validate(s: FormState, visible: AppField[], editing: boolean): Errors {
   if (has("composeService") && !validServiceName(s.composeService.trim())) {
     e.composeService = "Informe o serviço do Compose que recebe o tráfego.";
   }
-  if (!validPort(Number(s.internalPort)) || s.internalPort.trim() === "") {
+  if (has("staticOutputDir") && !validRelPath(s.staticOutputDir.trim())) e.staticOutputDir = rel;
+  if (has("staticBaseDir") && !validRelPath(s.staticBaseDir.trim())) e.staticBaseDir = rel;
+  if (has("staticImage") && !validImageRef(s.staticImage.trim())) e.staticImage = "Imagem inválida. Use, por exemplo, node:22-alpine.";
+  if (has("staticImmutablePrefix") && !s.staticImmutablePrefix.trim().startsWith("/")) {
+    e.staticImmutablePrefix = "O prefixo começa com / (por exemplo /assets/).";
+  }
+  if (has("internalPort") && (!validPort(Number(s.internalPort)) || s.internalPort.trim() === "")) {
     e.internalPort = "Informe a porta interna da aplicação (1 a 65535).";
   }
   const h = s.healthTimeoutS.trim() === "" ? 0 : Number(s.healthTimeoutS);
-  if (!Number.isInteger(h) || (h !== 0 && (h < 10 || h > 600))) {
+  if (has("healthTimeoutS") && !Number.isInteger(h) || (h !== 0 && (h < 10 || h > 600))) {
     e.healthTimeoutS = "Use de 10 a 600 segundos, ou 0 para o padrão (60).";
   }
   return e;
@@ -146,6 +175,7 @@ function validate(s: FormState, visible: AppField[], editing: boolean): Errors {
 function toInput(s: FormState, projectId: number): AppInput {
   const image = s.sourceType === "image";
   const compose = !image && s.buildType === "compose";
+  const stat = !image && s.buildType === "static";
   const health = s.healthTimeoutS.trim() === "" ? 0 : Number(s.healthTimeoutS);
   return {
     projectId,
@@ -159,9 +189,16 @@ function toInput(s: FormState, projectId: number): AppInput {
     dockerfilePath: !image && s.buildType === "dockerfile" ? s.dockerfilePath.trim() : "",
     composePath: compose ? s.composePath.trim() : "",
     composeService: compose ? s.composeService.trim() : "",
-    internalPort: Number(s.internalPort),
-    healthTimeoutS: health,
+    // Estático não tem porta nem health check: o servidor ignora os dois.
+    internalPort: stat ? 0 : Number(s.internalPort),
+    healthTimeoutS: stat ? 0 : health,
     autoDeploy: s.sourceType === "github" && s.autoDeploy,
+    staticBuildCmd: stat ? s.staticBuildCmd.trim() : "",
+    staticOutputDir: stat ? s.staticOutputDir.trim() : "",
+    staticBaseDir: stat ? s.staticBaseDir.trim() : "",
+    staticImage: stat ? s.staticImage.trim() : "",
+    staticSpa: stat && s.staticSpa,
+    staticImmutablePrefix: stat ? s.staticImmutablePrefix.trim() : "",
   };
 }
 
@@ -174,6 +211,15 @@ function apiErrorOf(err: unknown, visible: AppField[]): { field?: AppField; mess
       const f = err.field as AppField | undefined;
       return f && (visible.includes(f) || f === "internalPort") ? { field: f, message: err.message } : { message: err.message };
     }
+    case "PUBLISH_ROOT_EXISTS":
+      return {
+        message: (
+          <>
+            {err.message} Para publicar uma pasta que já existe, use “Gerenciar pelo KoreGO” nos sites encontrados em
+            Projetos, ou escolha outro nome para a aplicação.
+          </>
+        ),
+      };
     case "APP_EXISTS":
       return { field: "slug", message: "Já existe uma aplicação com esse nome." };
     case "NO_GITHUB":
@@ -417,6 +463,28 @@ export function AppForm({ projectId, app, onSaved }: AppFormProps) {
             </select>
           </div>
           {s.buildType === "compose" && <Alert variant="warning">{COMPOSE_WARNING}</Alert>}
+          {s.buildType === "static" && (
+            <div className="space-y-4">
+              {text("staticBuildCmd", "Comando de build", {
+                placeholder: "npm ci && npm run build…",
+                hint: "Vazio: detectado pelo arquivo de lock. Sem package.json, a pasta de saída é copiada como está.",
+              })}
+              <div className="grid gap-4 sm:grid-cols-2">
+                {text("staticOutputDir", "Pasta de saída", { hint: "Relativa ao diretório base." })}
+                {text("staticBaseDir", "Diretório base", { hint: "Onde o build roda; “.” é a raiz do repositório." })}
+                {text("staticImage", "Imagem do build", { hint: "Usada só para construir; o site é servido pelo proxy." })}
+                {text("staticImmutablePrefix", "Prefixo imutável", {
+                  hint: "Arquivos sob este caminho ganham cache longo.",
+                })}
+              </div>
+              <div>
+                <Checkbox checked={s.staticSpa} onChange={(v) => set("staticSpa", v)} describedBy={id("staticSpa-hint")}>
+                  Aplicação de página única (SPA)
+                </Checkbox>
+                <Hint id={id("staticSpa-hint")}>Rotas sem arquivo voltam para o index.html.</Hint>
+              </div>
+            </div>
+          )}
           <div className="grid gap-4 sm:grid-cols-2">
             {has("dockerfilePath") && text("dockerfilePath", "Caminho do Dockerfile", { placeholder: `${d.dockerfilePath}…` })}
             {has("composePath") && text("composePath", "Caminho do Compose", { placeholder: `${d.composePath}…` })}
@@ -455,6 +523,15 @@ export function AppForm({ projectId, app, onSaved }: AppFormProps) {
           </Hint>
         </div>
 
+        {s.buildType === "static" && s.sourceType !== "image" ? (
+          <Hint>
+            Aplicação estática: sem porta nem verificação de saúde. A raiz publicada é{" "}
+            <span className="font-mono text-fg-muted" translate="no">
+              {app?.publishRoot || `/var/www/${s.slug || "<nome>"}`}
+            </span>
+            .
+          </Hint>
+        ) : (
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
             <Label htmlFor={id("internalPort")} required>
@@ -500,6 +577,7 @@ export function AppForm({ projectId, app, onSaved }: AppFormProps) {
             <Hint id={id("healthTimeoutS-hint")}>Quanto esperar a aplicação responder: 10 a 600 s.</Hint>
           </div>
         </div>
+        )}
 
         {s.sourceType === "github" && (
           <div>

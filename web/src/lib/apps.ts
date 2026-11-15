@@ -3,8 +3,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 
-export type SourceType = "github" | "git" | "image";
-export type BuildType = "dockerfile" | "compose" | "railpack" | "image";
+export type SourceType = "github" | "git" | "image" | "local";
+export type BuildType = "dockerfile" | "compose" | "railpack" | "image" | "static" | "compose-local";
+
+/** Padrões do servidor para apps estáticas (valores vazios caem neles). */
+export const STATIC_DEFAULTS = {
+  outputDir: "dist",
+  baseDir: ".",
+  image: "node:22-alpine",
+  immutablePrefix: "/assets/",
+} as const;
 
 export interface CurrentDeploy {
   id: number;
@@ -33,6 +41,14 @@ export interface AppView {
   currentDeploy: CurrentDeploy | null;
   domains: string[];
   url: string;
+  staticBuildCmd: string;
+  staticOutputDir: string;
+  staticBaseDir: string;
+  staticImage: string;
+  staticSpa: boolean;
+  staticImmutablePrefix: string;
+  /** Só saída: raiz de publicação de apps estáticas e compose-local. */
+  publishRoot: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -52,6 +68,12 @@ export interface AppInput {
   internalPort: number;
   healthTimeoutS: number;
   autoDeploy: boolean;
+  staticBuildCmd: string;
+  staticOutputDir: string;
+  staticBaseDir: string;
+  staticImage: string;
+  staticSpa: boolean;
+  staticImmutablePrefix: string;
 }
 
 export type AppField =
@@ -63,7 +85,12 @@ export type AppField =
   | "composePath"
   | "composeService"
   | "internalPort"
-  | "healthTimeoutS";
+  | "healthTimeoutS"
+  | "staticBuildCmd"
+  | "staticOutputDir"
+  | "staticBaseDir"
+  | "staticImage"
+  | "staticImmutablePrefix";
 
 export interface AppFormDefaults {
   /** Campos mostrados no formulário. */
@@ -84,6 +111,20 @@ export function defaultsFor(sourceType: SourceType, buildType: BuildType): AppFo
     dockerfilePath: "Dockerfile",
     composePath: "docker-compose.yml",
   };
+  if (buildType === "static" && sourceType !== "image") {
+    // Sem porta nem health check: o nginx do proxy serve a raiz publicada.
+    d.required = ["slug", "repo", "branch"];
+    d.visible.push(
+      "repo",
+      "branch",
+      "staticBuildCmd",
+      "staticOutputDir",
+      "staticBaseDir",
+      "staticImage",
+      "staticImmutablePrefix",
+    );
+    return d;
+  }
   if (sourceType === "image") {
     d.visible.push("image");
     d.required.push("image");

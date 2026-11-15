@@ -42,8 +42,10 @@ const BUILD_LABEL: Record<string, string> = {
   compose: "Docker Compose",
   railpack: "Railpack",
   image: "Imagem pronta",
+  static: "Estático",
+  "compose-local": "Compose da VPS",
 };
-const SOURCE_LABEL: Record<string, string> = { github: "GitHub", git: "URL Git", image: "Imagem" };
+const SOURCE_LABEL: Record<string, string> = { github: "GitHub", git: "URL Git", image: "Imagem", local: "VPS" };
 
 function Fact({ label, children, mono = true }: { label: string; children: ReactNode; mono?: boolean }) {
   return (
@@ -100,6 +102,10 @@ function Overview({ app, onDeployed, onOpenDeploys }: { app: AppView; onDeployed
   const deploy = useStartDeploy();
   const d = app.currentDeploy;
   const finished = d?.finishedAt ? formatDateTime(d.finishedAt) : null;
+  const isStatic = app.buildType === "static";
+  // A versão atual é a última parte da pasta publicada pelo deploy atual.
+  const deploys = useDeploys(app.id);
+  const currentRelease = deploys.data?.find((x) => x.id === d?.id)?.releaseDir?.split("/").filter(Boolean).pop();
   return (
     <div className="space-y-4">
       <LatestDeploy app={app} onOpen={onOpenDeploys} />
@@ -144,13 +150,28 @@ function Overview({ app, onDeployed, onOpenDeploys }: { app: AppView; onDeployed
               <Dash label="nenhum deploy ainda" />
             )}
           </Fact>
-          <Fact label="Endereço local">
-            {app.url ? (
-              <span translate="no">{app.url}</span>
-            ) : (
-              <span className="font-sans text-fg-subtle">publicado após o primeiro deploy</span>
-            )}
-          </Fact>
+          {isStatic ? (
+            <>
+              <Fact label="Raiz publicada">
+                <span translate="no">{app.publishRoot || `/var/www/${app.slug}`}</span>
+              </Fact>
+              <Fact label="Versão atual">
+                {currentRelease ? (
+                  <span translate="no">{currentRelease}</span>
+                ) : (
+                  <span className="font-sans text-fg-subtle">publicada após o primeiro deploy</span>
+                )}
+              </Fact>
+            </>
+          ) : (
+            <Fact label="Endereço local">
+              {app.url ? (
+                <span translate="no">{app.url}</span>
+              ) : (
+                <span className="font-sans text-fg-subtle">publicado após o primeiro deploy</span>
+              )}
+            </Fact>
+          )}
           <Fact label="Origem">
             <span translate="no">
               {SOURCE_LABEL[app.sourceType] ?? app.sourceType} · {app.sourceType === "image" ? app.image : app.repo}
@@ -158,12 +179,16 @@ function Overview({ app, onDeployed, onOpenDeploys }: { app: AppView; onDeployed
             </span>
           </Fact>
           <Fact label="Build">{BUILD_LABEL[app.buildType] ?? app.buildType}</Fact>
-          <Fact label="Porta interna">
-            <span className="tabular-nums">{app.internalPort}</span>
-          </Fact>
-          <Fact label="Verificação de saúde">
-            <span className="tabular-nums">{app.healthTimeoutS} s</span>
-          </Fact>
+          {!isStatic && (
+            <>
+              <Fact label="Porta interna">
+                <span className="tabular-nums">{app.internalPort}</span>
+              </Fact>
+              <Fact label="Verificação de saúde">
+                <span className="tabular-nums">{app.healthTimeoutS} s</span>
+              </Fact>
+            </>
+          )}
           <Fact label="Deploy automático" mono={false}>
             {app.sourceType === "github" ? (app.autoDeploy ? "a cada push" : "desligado") : "só com GitHub"}
           </Fact>
