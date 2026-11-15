@@ -34,6 +34,12 @@ func newAdoptFx(t *testing.T) *adoptFx {
 	t.Helper()
 	www, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
+	return newAdoptFxIn(t, www)
+}
+
+// newAdoptFxIn usa www como raiz dos sites.
+func newAdoptFxIn(t *testing.T, www string) *adoptFx {
+	t.Helper()
 	a := &adoptFx{www: www, stacks: map[string][]docker.Container{}}
 	g := &gateFx{}
 	g.appsFx = newAppsFx(t, func(f *appsFx, d *api.Deps) {
@@ -239,6 +245,25 @@ func TestAdoptStatic_RejectsBadImmutablePrefix(t *testing.T) {
 	apps, err := a.db.ListApps(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, apps)
+}
+
+func TestAdoptStatic_SymlinkedWWWKeepsLexicalRoot(t *testing.T) {
+	real, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	link := filepath.Join(t.TempDir(), "www")
+	require.NoError(t, os.Symlink(real, link))
+	a := newAdoptFxIn(t, link)
+	pid := a.project(t)
+	root, current := a.site(t, "hoprs", "20260201000000-1234567")
+	require.Equal(t, filepath.Join(link, "hoprs"), root)
+
+	code, b := a.call(t, http.MethodPost, "/api/adopt/static", adoptStaticBody(pid, "hoprs", current))
+	require.Equal(t, http.StatusCreated, code, b)
+	assert.Equal(t, root, b["app"].(map[string]any)["publishRoot"], "caminho sob a raiz, sem resolver o link")
+
+	code, b = a.call(t, http.MethodPost, "/api/adopt/static", adoptStaticBody(pid, "hoprs-2", current))
+	require.Equal(t, http.StatusConflict, code, b)
+	assert.Equal(t, "ALREADY_ADOPTED", errCode(b))
 }
 
 func TestAdoptStatic_Twice(t *testing.T) {

@@ -178,6 +178,12 @@ func (h appHandlers) wwwBase() string {
 	return deploy.WWWRoot
 }
 
+// lexicallyUnder diz se p fica em uma subpasta de root, sem resolver links.
+func lexicallyUnder(root, p string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(p))
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // staticRootTaken diz se alguma app estática já publica em root.
 func (h appHandlers) staticRootTaken(ctx context.Context, root string) (bool, error) {
 	apps, err := h.db.ListApps(ctx, nil)
@@ -273,7 +279,14 @@ func (h appHandlers) adoptStatic(w http.ResponseWriter, r *http.Request) {
 			a.StaticImmutablePrefix = doms[0].route.ImmutablePrefix
 		}
 	}
-	a.PublishRoot, a.AutoDeploy = publishRoot, false
+	// Grava a raiz como o usuário a vê (dentro da raiz dos sites, sem
+	// resolver links): o proxy só aceita pastas sob /var/www e o Caddy a
+	// enxerga por esse caminho, mesmo com /var/www sendo um link.
+	stored := publishRoot
+	if lex := filepath.Dir(current); lex != publishRoot && lexicallyUnder(h.wwwBase(), lex) {
+		stored = lex
+	}
+	a.PublishRoot, a.AutoDeploy = stored, false
 	doms := adoptedDomains(list, current)
 	next := make([]store.Domain, 0, len(doms))
 	hosts := make([]string, 0, len(doms))
