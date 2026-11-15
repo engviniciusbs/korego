@@ -134,23 +134,17 @@ type adoptedDomain struct {
 	route      store.DomainRoute // a primeira rota trocada (antes da troca)
 }
 
-// sameRoot diz se a pasta de uma rota estática é o current adotado ou leva à
-// mesma versão.
-func sameRoot(root, current, releaseDir string) bool {
-	if root == "" {
-		return false
-	}
-	if filepath.Clean(root) == current {
-		return true
-	}
-	real, err := filepath.EvalSymlinks(root)
-	return err == nil && filepath.Clean(real) == releaseDir
+// sameRoot diz se a pasta de uma rota estática é o current adotado. Uma rota
+// que aponta direto para uma versão (releases/<x>) fica como está: ela não
+// acompanha os deploys e trocá-la mudaria o que ela serve.
+func sameRoot(root, current string) bool {
+	return root != "" && filepath.Clean(root) == current
 }
 
 // adoptedDomains acha os domínios com rota estática para o current adotado e
 // monta a versão com essas rotas como "app" sem AppID: store.AdoptStatic as
 // aponta para a app criada (as demais rotas ficam como estão).
-func adoptedDomains(list []store.Domain, current, releaseDir string) []adoptedDomain {
+func adoptedDomains(list []store.Domain, current string) []adoptedDomain {
 	var out []adoptedDomain
 	for _, d := range list {
 		if d.IsPanel {
@@ -160,7 +154,7 @@ func adoptedDomains(list []store.Domain, current, releaseDir string) []adoptedDo
 		next.Routes = make([]store.DomainRoute, len(d.Routes))
 		var first *store.DomainRoute
 		for i, rt := range d.Routes {
-			if rt.TargetType == "static" && sameRoot(rt.Root, current, releaseDir) {
+			if rt.TargetType == "static" && sameRoot(rt.Root, current) {
 				if first == nil {
 					c := rt
 					first = &c
@@ -271,7 +265,7 @@ func (h appHandlers) adoptStatic(w http.ResponseWriter, r *http.Request) {
 		internalError(w, err)
 		return
 	}
-	if doms := adoptedDomains(list, current, releaseDir); len(doms) > 0 {
+	if doms := adoptedDomains(list, current); len(doms) > 0 {
 		if in.StaticSPA == nil {
 			a.StaticSPA = doms[0].route.SPA
 		}
@@ -280,7 +274,7 @@ func (h appHandlers) adoptStatic(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.PublishRoot, a.AutoDeploy = publishRoot, false
-	doms := adoptedDomains(list, current, releaseDir)
+	doms := adoptedDomains(list, current)
 	next := make([]store.Domain, 0, len(doms))
 	hosts := make([]string, 0, len(doms))
 	for _, ad := range doms {
