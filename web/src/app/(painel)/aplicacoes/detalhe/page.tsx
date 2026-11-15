@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useId, useState, type FormEvent, type ReactNode } from "react";
 import { AppForm, COMPOSE_WARNING } from "@/components/apps/app-form";
 import { EnvEditor } from "@/components/apps/env-editor";
+import { StackPanel, UpdateModeForm } from "@/components/apps/stack-panel";
 import { DeployList } from "@/components/deploys/deploy-list";
 import { linkCls } from "@/components/apps/form-bits";
 import {
@@ -21,6 +22,7 @@ import {
 } from "@/components/apps/page-bits";
 import { PageHeader } from "@/components/shell/page-header";
 import { Alert, Button, Dialog, Input, Label, Panel, Tabs, tabId, tabPanelId } from "@/components/ui";
+import { useStackInfo } from "@/lib/adopt";
 import { ApiError } from "@/lib/api";
 import { useApp, useDeleteApp, type AppView } from "@/lib/apps";
 import { cn } from "@/lib/cn";
@@ -103,6 +105,7 @@ function Overview({ app, onDeployed, onOpenDeploys }: { app: AppView; onDeployed
   const d = app.currentDeploy;
   const finished = d?.finishedAt ? formatDateTime(d.finishedAt) : null;
   const isStatic = app.buildType === "static";
+  const isLocal = app.buildType === "compose-local";
   // A versão atual é a última parte da pasta publicada pelo deploy atual.
   const deploys = useDeploys(app.id);
   const currentRelease = deploys.data?.find((x) => x.id === d?.id)?.releaseDir?.split("/").filter(Boolean).pop();
@@ -121,7 +124,7 @@ function Overview({ app, onDeployed, onOpenDeploys }: { app: AppView; onDeployed
             loading={deploy.isPending}
             onClick={() => deploy.mutate(app.id, { onSuccess: onDeployed })}
           >
-            Deploy agora
+            {isLocal ? "Atualizar" : "Deploy agora"}
           </Button>
         }
       >
@@ -163,6 +166,12 @@ function Overview({ app, onDeployed, onOpenDeploys }: { app: AppView; onDeployed
                 )}
               </Fact>
             </>
+          ) : isLocal ? (
+            <Fact label="Atualização">
+              <span translate="no">
+                {app.updateMode === "script" ? `script ${app.updateScript}` : "docker compose pull e up -d"}
+              </span>
+            </Fact>
           ) : (
             <Fact label="Endereço local">
               {app.url ? (
@@ -174,12 +183,13 @@ function Overview({ app, onDeployed, onOpenDeploys }: { app: AppView; onDeployed
           )}
           <Fact label="Origem">
             <span translate="no">
-              {SOURCE_LABEL[app.sourceType] ?? app.sourceType} · {app.sourceType === "image" ? app.image : app.repo}
+              {SOURCE_LABEL[app.sourceType] ?? app.sourceType} ·{" "}
+              {app.sourceType === "image" ? app.image : isLocal ? `projeto compose ${app.composeProject}` : app.repo}
               {app.branch && app.sourceType !== "image" ? ` @ ${app.branch}` : ""}
             </span>
           </Fact>
           <Fact label="Build">{BUILD_LABEL[app.buildType] ?? app.buildType}</Fact>
-          {!isStatic && (
+          {!isStatic && !isLocal && (
             <>
               <Fact label="Porta interna">
                 <span className="tabular-nums">{app.internalPort}</span>
@@ -189,11 +199,15 @@ function Overview({ app, onDeployed, onOpenDeploys }: { app: AppView; onDeployed
               </Fact>
             </>
           )}
-          <Fact label="Deploy automático" mono={false}>
-            {app.sourceType === "github" ? (app.autoDeploy ? "a cada push" : "desligado") : "só com GitHub"}
-          </Fact>
+          {!isLocal && (
+            <Fact label="Deploy automático" mono={false}>
+              {app.sourceType === "github" ? (app.autoDeploy ? "a cada push" : "desligado") : "só com GitHub"}
+            </Fact>
+          )}
         </dl>
       </Panel>
+
+      {isLocal && <StackPanel app={app} />}
 
       <Panel
         title="Domínios"
@@ -267,7 +281,9 @@ function DangerZone({ app }: { app: AppView }) {
     <Panel title="Zona de perigo" variant="danger" size="sm">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="max-w-prose text-[13px] text-fg-muted">
-          Remove os containers, as imagens e as variáveis da aplicação. Domínios precisam ser removidos antes.
+          {app.buildType === "compose-local"
+            ? "O KoreGO deixa de gerenciar a stack: os containers e os arquivos dela ficam como estão. Domínios precisam ser removidos antes."
+            : "Remove os containers, as imagens e as variáveis da aplicação. Domínios precisam ser removidos antes."}
         </p>
         <Button
           variant="danger"
@@ -296,7 +312,9 @@ function DangerZone({ app }: { app: AppView }) {
             <span className="font-mono text-fg" translate="no">
               {app.slug}
             </span>{" "}
-            sai do ar e é apagada com o histórico de deploys e as variáveis.
+            {app.buildType === "compose-local"
+              ? "sai do KoreGO com o histórico de deploys; a stack continua rodando na VPS."
+              : "sai do ar e é apagada com o histórico de deploys e as variáveis."}
           </p>
           <div>
             <Label htmlFor={`${uid}-confirm`} className="normal-case tracking-normal">
@@ -318,6 +336,23 @@ function DangerZone({ app }: { app: AppView }) {
         </form>
       </Dialog>
     </Panel>
+  );
+}
+
+// --- Variáveis -----------------------------------------------------------------
+
+/** Aviso do .env editado de uma stack compose-local. */
+function StackEnvNotice({ app }: { app: AppView }) {
+  const info = useStackInfo(app.id);
+  if (!info.data) return null;
+  return (
+    <Alert variant="info" className="mb-4">
+      Editando{" "}
+      <span className="font-mono" translate="no">
+        {info.data.envPath}
+      </span>
+      . Gravar não reinicia a stack: use Reiniciar ou Atualizar para aplicar.
+    </Alert>
   );
 }
 
@@ -376,7 +411,7 @@ function AppDetail({ id, initialTab }: { id: number; initialTab: Tab }) {
           <span className="flex flex-wrap items-center gap-2">
             <AppStatus app={a} />
             <span className="font-mono text-[11px] text-fg-subtle" translate="no">
-              {a.sourceType === "image" ? a.image : a.repo}
+              {a.sourceType === "image" ? a.image : a.sourceType === "local" ? a.composeProject : a.repo}
             </span>
           </span>
         }
@@ -391,12 +426,17 @@ function AppDetail({ id, initialTab }: { id: number; initialTab: Tab }) {
         {tab === "deploys" && <DeployList app={a} />}
         {envOpened && (
           <div hidden={tab !== "variaveis"}>
+            {a.buildType === "compose-local" && <StackEnvNotice app={a} />}
             <EnvEditor appId={a.id} />
           </div>
         )}
         {tab === "configuracoes" && (
           <div className="max-w-3xl space-y-4">
-            <AppForm key={a.id} projectId={a.projectId} app={a} onSaved={() => undefined} />
+            {a.buildType === "compose-local" ? (
+              <UpdateModeForm key={a.id} app={a} />
+            ) : (
+              <AppForm key={a.id} projectId={a.projectId} app={a} onSaved={() => undefined} />
+            )}
             <DangerZone app={a} />
           </div>
         )}

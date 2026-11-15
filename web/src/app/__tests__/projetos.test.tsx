@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AppDetailPage from "../(painel)/aplicacoes/detalhe/page";
@@ -262,7 +262,8 @@ describe("Sites na VPS", () => {
     expect(within(mikos).getByText("mikos.com.br")).toBeInTheDocument();
     expect(within(mikos).getByText("1 de 2 containers rodando")).toBeInTheDocument();
     expect(within(mikos).getByText("Parado")).toBeInTheDocument();
-    expect(within(mikos).queryByRole("button")).toBeNull();
+    expect(within(mikos).queryByRole("button", { name: /Remover/ })).toBeNull();
+    expect(within(mikos).getByRole("button", { name: /Gerenciar pelo KoreGO/ })).toBeInTheDocument();
 
     const hoprs = within(list).getByRole("link", { name: "hoprs.online" });
     expect(hoprs).toHaveAttribute("href", "/projetos/site/?tipo=estatico&nome=hoprs.online");
@@ -274,6 +275,25 @@ describe("Sites na VPS", () => {
     expect(within(list).queryByText("painel.com")).toBeNull();
     expect(within(list).queryByText("korego-caddy")).toBeNull();
     expect(within(screen.getByRole("link", { name: "Loja" }).closest("li") as HTMLElement).getByText("KoreGO")).toBeInTheDocument();
+  });
+
+  it("stack adotada some de Na VPS e aparece no projeto", async () => {
+    const adopted = app({
+      id: 8, slug: "mikos", sourceType: "local", buildType: "compose-local", composeProject: "mikos",
+      updateMode: "pull", updateScript: "", image: "", internalPort: 0, hostPort: 0, url: "",
+      currentDeploy: null, domains: [],
+    });
+    routes["GET /api/apps"] = () => json({ apps: [app(), adopted] });
+    renderPage(<ProjetosPage />);
+    const list = await screen.findByRole("list", { name: "Sites na VPS" });
+    expect(within(list).getByRole("link", { name: "hoprs.online" })).toBeInTheDocument();
+    expect(within(list).queryByRole("link", { name: "mikos" })).toBeNull();
+    expect(within(list).queryByText("mikos.com.br")).toBeNull();
+    cleanup();
+
+    nav.search = "id=1";
+    renderPage(<ProjectDetailPage />);
+    expect(await screen.findByRole("link", { name: "mikos" })).toHaveAttribute("href", "/aplicacoes/detalhe/?id=8&aba=visao");
   });
 
   it("pasta que sumiu aparece com aviso", async () => {

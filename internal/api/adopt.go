@@ -476,6 +476,32 @@ func (h appHandlers) stackAction(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// stackInfo serves GET /api/apps/{id}/stack: pasta e arquivos compose de uma
+// stack compose-local, lidos na hora dos rótulos do container mais recente.
+func (h appHandlers) stackInfo(w http.ResponseWriter, r *http.Request) {
+	a, ok := h.loadApp(w, r)
+	if !ok {
+		return
+	}
+	if a.SourceType != "local" {
+		WriteError(w, http.StatusConflict, "NOT_COMPOSE_LOCAL", "Só as stacks compose da VPS têm pasta de stack.")
+		return
+	}
+	ctx, cancel := detached(r, mutationTimeout)
+	defer cancel()
+	st, err := deploy.FindStack(ctx, h.deploys.Docker, a.ComposeProject)
+	if err != nil {
+		stackError(w, a.ComposeProject, err)
+		return
+	}
+	files := st.Files
+	if files == nil {
+		files = []string{}
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"project": st.Project, "dir": st.Dir, "files": files,
+		"envPath": deploy.StackEnvPath(st)})
+}
+
 // stackEnvPath acha o .env da stack e recusa um .env que, por link, sai da
 // pasta da stack.
 func (h appHandlers) stackEnvPath(w http.ResponseWriter, r *http.Request, a store.App) (string, bool) {

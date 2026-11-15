@@ -1,10 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DetalhePage from "../(painel)/aplicacoes/detalhe/page";
 
+const nav = vi.hoisted(() => ({ search: "id=9" }));
+
 vi.mock("next/navigation", () => ({
-  useSearchParams: () => new URLSearchParams("id=9"),
+  useSearchParams: () => new URLSearchParams(nav.search),
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
 }));
 
@@ -55,7 +57,23 @@ const staticApp = {
   updatedAt: "2026-11-08T12:00:00Z",
 };
 
+const localApp = {
+  ...staticApp,
+  id: 20,
+  slug: "mikos",
+  sourceType: "local",
+  repo: "",
+  buildType: "compose-local",
+  branch: "",
+  publishRoot: "",
+  composeProject: "mikos",
+  updateMode: "pull",
+  updateScript: "",
+  currentDeploy: null,
+};
+
 beforeEach(() => {
+  nav.search = "id=9";
   vi.stubGlobal("WebSocket", FakeWS);
   vi.stubGlobal(
     "fetch",
@@ -85,6 +103,13 @@ beforeEach(() => {
         });
       }
       if (path === "/api/projects") return json({ projects: [] });
+      if (path === "/api/apps/20") return json({ app: localApp });
+      if (path === "/api/apps/20/deploys") return json({ deploys: [] });
+      if (path === "/api/apps/20/env") return json({ names: ["DB_URL"] });
+      if (path === "/api/apps/20/stack") {
+        return json({ project: "mikos", dir: "/srv/mikos", files: ["/srv/mikos/compose.yml"], envPath: "/srv/mikos/.env" });
+      }
+      if (path === "/api/containers") return json({ containers: [] });
       return json({ error: { code: "NOT_FOUND", message: "não" } }, 404);
     }),
   );
@@ -108,5 +133,30 @@ describe("Detalhe da aplicação estática", () => {
     expect(screen.queryByText("Porta interna")).not.toBeInTheDocument();
     expect(screen.queryByText("Endereço local")).not.toBeInTheDocument();
     expect(screen.queryByText("Verificação de saúde")).not.toBeInTheDocument();
+  });
+});
+
+describe("Detalhe da stack compose da VPS", () => {
+  it("tem Atualizar, o cartão Stack, o aviso do .env e o modo de atualização nas configurações", async () => {
+    nav.search = "id=20";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <DetalhePage />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByRole("button", { name: "Atualizar" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Deploy agora" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Parar" })).toBeInTheDocument();
+    expect(await screen.findByText("/srv/mikos")).toBeInTheDocument();
+    expect(screen.queryByText("Porta interna")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Variáveis" }));
+    expect(await screen.findByText("/srv/mikos/.env")).toBeInTheDocument();
+    expect(screen.getByText(/Editando/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Configurações" }));
+    expect(screen.getByRole("checkbox", { name: "Atualizar com um script da stack" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Criar aplicação" })).toBeNull();
   });
 });

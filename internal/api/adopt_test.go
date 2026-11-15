@@ -484,3 +484,22 @@ func TestStackAction_FailureHidesOutput(t *testing.T) {
 		assert.Equal(t, map[string]any{"op": "restart", "ok": false}, m)
 	}
 }
+
+func TestStackInfo(t *testing.T) {
+	a := newAdoptFx(t)
+	id, dir := a.adoptPull(t, "mikos")
+
+	code, b := a.call(t, http.MethodGet, "/api/apps/"+itoa(id)+"/stack", nil)
+	require.Equal(t, http.StatusOK, code, b)
+	assert.Equal(t, "mikos", b["project"])
+	assert.Equal(t, filepath.Clean(dir), b["dir"])
+	assert.Equal(t, []any{filepath.Join(dir, "docker-compose.yml")}, b["files"])
+	assert.Equal(t, filepath.Join(filepath.Clean(dir), ".env"), b["envPath"])
+
+	// Stack sem containers: erro claro, sem pânico.
+	delete(a.stacks, "mikos")
+	code, b = a.call(t, http.MethodGet, "/api/apps/"+itoa(id)+"/stack", nil)
+	require.Equal(t, http.StatusUnprocessableEntity, code, b)
+	assert.Equal(t, "STACK_NOT_FOUND", errCode(b))
+	assert.Empty(t, a.commands())
+}

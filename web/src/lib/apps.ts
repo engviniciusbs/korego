@@ -5,6 +5,7 @@ import { api } from "./api";
 
 export type SourceType = "github" | "git" | "image" | "local";
 export type BuildType = "dockerfile" | "compose" | "railpack" | "image" | "static" | "compose-local";
+export type UpdateMode = "pull" | "script";
 
 /** Padrões do servidor para apps estáticas (valores vazios caem neles). */
 export const STATIC_DEFAULTS = {
@@ -49,6 +50,12 @@ export interface AppView {
   staticImmutablePrefix: string;
   /** Só saída: raiz de publicação de apps estáticas e compose-local. */
   publishRoot: string;
+  /** compose-local: projeto do docker compose (não muda depois da adoção). */
+  composeProject: string;
+  /** compose-local: "pull" (pull + up -d) ou "script". */
+  updateMode: UpdateMode | "";
+  /** compose-local, modo script: caminho relativo à pasta da stack. */
+  updateScript: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -74,6 +81,11 @@ export interface AppInput {
   staticImage: string;
   staticSpa: boolean;
   staticImmutablePrefix: string;
+  /** Só compose-local. */
+  updateMode?: UpdateMode;
+  updateScript?: string;
+  /** Código 2FA (sessão) ao escolher ou mudar o modo script. */
+  code?: string;
 }
 
 export type AppField =
@@ -140,6 +152,34 @@ export function defaultsFor(sourceType: SourceType, buildType: BuildType): AppFo
   }
   d.visible.push("internalPort", "healthTimeoutS");
   return d;
+}
+
+/** Corpo do PUT que regrava a app como está, com as mudanças de `patch`. */
+export function appInputOf(app: AppView, patch: Partial<AppInput> = {}): AppInput {
+  const local = app.sourceType === "local";
+  return {
+    projectId: app.projectId,
+    slug: app.slug,
+    sourceType: app.sourceType,
+    repo: app.repo,
+    image: app.image,
+    buildType: app.buildType,
+    branch: app.branch,
+    dockerfilePath: app.dockerfilePath,
+    composePath: app.composePath,
+    composeService: app.composeService,
+    internalPort: app.internalPort,
+    healthTimeoutS: app.healthTimeoutS,
+    autoDeploy: app.autoDeploy,
+    staticBuildCmd: app.staticBuildCmd,
+    staticOutputDir: app.staticOutputDir,
+    staticBaseDir: app.staticBaseDir,
+    staticImage: app.staticImage,
+    staticSpa: app.staticSpa,
+    staticImmutablePrefix: app.staticImmutablePrefix,
+    ...(local ? { updateMode: app.updateMode || "pull", updateScript: app.updateScript } : {}),
+    ...patch,
+  };
 }
 
 export function useApps(projectId?: number) {

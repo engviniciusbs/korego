@@ -114,6 +114,7 @@ func (rt *routes) mountCore(r chi.Router) {
 		r.Put("/apps/{id}/env", appsH.envSet)
 		// O 2FA destas depende do corpo (modo script, stop): conferido no handler.
 		r.Post("/apps/{id}/stack/{op}", appsH.stackAction)
+		r.Get("/apps/{id}/stack", appsH.stackInfo)
 		r.Post("/adopt/static", appsH.adoptStatic)
 		r.Post("/adopt/compose", appsH.adoptCompose)
 		r.Post("/apps/{id}/deploys", deploysH.create)
