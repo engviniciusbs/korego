@@ -614,7 +614,17 @@ func (p *pipeline) execute(ctx context.Context) {
 // do Redactor.
 func (p *pipeline) prepare(ctx context.Context) error {
 	if p.local() {
-		return nil // a stack usa o próprio .env; não há token nem variáveis da app
+		// A stack usa o próprio .env; não há token nem variáveis da app. Os
+		// valores do .env viram segredos: pull, up e o script podem ecoá-los.
+		// Sem stack ou sem .env, runLocal relata a falha (ou segue sem nada).
+		if st, err := FindStack(ctx, p.s.Docker, p.app.ComposeProject); err == nil {
+			if vals, err := EnvValues(StackEnvPath(st)); err == nil {
+				p.secrets = append(p.secrets, vals...)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				log.Printf("deploy %d: ler o .env da stack para mascarar: %v", p.d.ID, err)
+			}
+		}
+		return nil
 	}
 	enc, err := p.s.DB.AppEnvEncrypted(ctx, p.app.ID)
 	if err != nil {

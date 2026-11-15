@@ -45,6 +45,42 @@ func EnvNames(path string) ([]string, error) {
 	return names, nil
 }
 
+// EnvValues devolve os valores não vazios do arquivo, para mascarar no log
+// (nunca saem do processo). Com aspas, entra o valor sem elas e também o
+// texto cru; sem aspas, o texto até um " #" de comentário.
+func EnvValues(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimRight(l, "\r")
+		if _, ok := envKey(l); !ok {
+			continue
+		}
+		raw := strings.TrimSpace(l[strings.IndexByte(l, '=')+1:])
+		v := raw
+		switch {
+		case len(raw) >= 2 && raw[0] == '\'' && raw[len(raw)-1] == '\'':
+			v = raw[1 : len(raw)-1]
+		case len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"':
+			v = strings.NewReplacer(`\\`, `\`, `\"`, `"`, "\\`", "`", `$$`, `$`).Replace(raw[1 : len(raw)-1])
+		default:
+			if i := strings.Index(raw, " #"); i >= 0 {
+				v = strings.TrimSpace(raw[:i])
+			}
+		}
+		if v != "" {
+			out = append(out, v)
+		}
+		if raw != v && raw != "" {
+			out = append(out, raw)
+		}
+	}
+	return out, nil
+}
+
 // envSafeValue: valores só com estes caracteres vão sem aspas.
 var envSafeValue = regexp.MustCompile(`^[A-Za-z0-9_./:@%+,=-]*$`)
 

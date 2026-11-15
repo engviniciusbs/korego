@@ -65,6 +65,17 @@ func TestQuoteEnv(t *testing.T) {
 	}
 }
 
+func TestEnvValues(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".env")
+	require.NoError(t, os.WriteFile(p, []byte("# X=comentado\nexport A=plain\nB='simples $x'\n"+
+		"C=\"it's $$y\"\nD=\nE=valor # nota\nruim linha\n"), 0o600))
+	got, err := EnvValues(p)
+	require.NoError(t, err)
+	require.Equal(t, []string{"plain", "simples $x", "'simples $x'", "it's $y", `"it's $$y"`, "valor", "valor # nota"}, got)
+	_, err = EnvValues(filepath.Join(t.TempDir(), ".env"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestSetEnv_SeguraLink(t *testing.T) {
 	d := t.TempDir()
 	real := filepath.Join(d, "shared.env")

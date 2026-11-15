@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -252,6 +253,25 @@ func TestLocalUpdate_Script(t *testing.T) {
 	assert.Equal(t, dir, cmds[0].Dir)
 	assert.Empty(t, cmds[0].Env)
 	assert.Equal(t, d.ID, *h.getApp().CurrentDeployID)
+}
+
+func TestLocalUpdate_MasksStackEnv(t *testing.T) {
+	h, dir := localHarness(t, func(a *store.App) { a.UpdateMode, a.UpdateScript = "script", "update.sh" })
+	wf(t, filepath.Join(dir, "update.sh"), "#!/bin/sh\n")
+	wf(t, filepath.Join(dir, ".env"), "DB_PASS='senha-da-stack'\nTOKEN=tok-123456\n")
+	h.runner.hook = func(_ context.Context, _ Cmd, out io.Writer) (bool, error) {
+		_, _ = io.WriteString(out, "conectando com senha-da-stack e tok-123456\n")
+		return true, nil
+	}
+	d, err := h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
+	require.NoError(t, err)
+	got := h.wait(d.ID)
+	require.Equal(t, "running", got.Status, got.Reason)
+	raw, err := os.ReadFile(filepath.Join(h.svc.DataDir, "logs", fmt.Sprintf("deploy-%d.log", d.ID)))
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "senha-da-stack")
+	assert.NotContains(t, string(raw), "tok-123456")
+	assert.Contains(t, string(raw), "conectando com •••• e ••••")
 }
 
 func TestLocalUpdate_ScriptEscapes(t *testing.T) {
