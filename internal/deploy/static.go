@@ -87,10 +87,12 @@ func buildContainerName(deployID int64) string {
 func (p *pipeline) static() bool { return p.app.BuildType == "static" }
 
 // staticRoot valida e devolve a raiz de publicação resolvida (dentro de
-// wwwRoot), criando-a se preciso.
+// wwwRoot), criando-a se preciso. A adoção grava a raiz já resolvida: com
+// wwwRoot atrás de um link (/var/www → /srv/www), ela é comparada também com
+// o wwwRoot resolvido.
 func (p *pipeline) staticRoot() (string, error) {
 	root := filepath.Clean(StaticPublishRoot(p.app))
-	if !filepath.IsAbs(root) || !within(filepath.Clean(wwwRoot), root) || root == filepath.Clean(wwwRoot) {
+	if !filepath.IsAbs(root) || !underWWW(root) {
 		return "", failWith(nil, "raiz de publicação inválida: %s", root)
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -101,6 +103,25 @@ func (p *pipeline) staticRoot() (string, error) {
 		return "", fail("raiz de publicação inválida", err)
 	}
 	return real, nil
+}
+
+// underWWW diz se root é uma subpasta de wwwRoot, pelo caminho como está ou
+// pelos dois resolvidos (o root pode ainda não existir).
+func underWWW(root string) bool {
+	www := filepath.Clean(wwwRoot)
+	if root != www && within(www, root) {
+		return true
+	}
+	realWWW, err := filepath.EvalSymlinks(www)
+	if err != nil {
+		return false
+	}
+	realRoot := root
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		realRoot = r
+	}
+	realWWW, realRoot = filepath.Clean(realWWW), filepath.Clean(realRoot)
+	return realRoot != realWWW && within(realWWW, realRoot)
 }
 
 // runStatic é o pipeline da app estática: clone → build descartável →
@@ -217,7 +238,9 @@ func (p *pipeline) buildStatic(ctx context.Context, root string) (string, error)
 		return "", err
 	}
 	// O .git nunca é publicado (saída "." publicaria o histórico do repositório).
-	_ = os.RemoveAll(filepath.Join(src, ".git"))
+	if err := os.RemoveAll(filepath.Join(src, ".git")); err != nil {
+		return "", fail("falha ao remover o .git antes de publicar", err)
+	}
 	out, err := InsideRoot(src, filepath.Join(src, filepath.FromSlash(base), filepath.FromSlash(outDir)))
 	if err != nil {
 		return "", fail("pasta de saída inválida", err)

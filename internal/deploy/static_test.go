@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -180,6 +181,61 @@ func TestStatic_NoPackageJSONCopiesAsIs(t *testing.T) {
 	assert.FileExists(t, filepath.Join(cur, "index.html"))
 	assert.FileExists(t, filepath.Join(cur, "css", "a.css"))
 	assert.NoDirExists(t, filepath.Join(cur, ".git"), ".git nunca é publicado")
+}
+
+func TestStatic_GitRemovalFailsDeploy(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("depende de permissões POSIX sem root")
+	}
+	h, root := staticHarness(t, map[string]string{"index.html": "<html>"},
+		func(a *store.App) { a.StaticOutputDir = "." })
+	prev := h.runner.hook
+	h.runner.hook = func(ctx context.Context, c Cmd, out io.Writer) (bool, error) {
+		ok, err := prev(ctx, c, out)
+		if isCmd(c, "git", "clone") {
+			git := filepath.Join(c.Args[len(c.Args)-1], ".git")
+			require.NoError(t, os.WriteFile(filepath.Join(git, "HEAD"), []byte("x"), 0o600))
+			require.NoError(t, os.Chmod(git, 0o500)) // RemoveAll não apaga o HEAD
+			t.Cleanup(func() { _ = os.Chmod(git, 0o700) })
+		}
+		return ok, err
+	}
+
+	d, err := h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
+	require.NoError(t, err)
+	got := h.wait(d.ID)
+	assert.Equal(t, "failed", got.Status)
+	assert.Contains(t, got.Reason, ".git")
+	assert.Empty(t, releasesIn(t, root), "nada publicado")
+}
+
+func TestStatic_SymlinkedWWWRoot(t *testing.T) {
+	h, _ := staticHarness(t, map[string]string{"index.html": "<html>"},
+		func(a *store.App) { a.StaticOutputDir = "." })
+	// /var/www é um link para a pasta real; a adoção grava a raiz resolvida.
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "www")
+	require.NoError(t, os.Symlink(real, link))
+	wwwRoot = link
+	app := h.getApp()
+	app.PublishRoot = filepath.Join(real, "blog")
+	require.NoError(t, h.db.UpdateAppConfig(h.ctx, &app))
+	h.app = app
+
+	d, err := h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
+	require.NoError(t, err)
+	got := h.wait(d.ID)
+	require.Equal(t, "running", got.Status, got.Reason)
+	assert.FileExists(t, filepath.Join(currentOf(t, filepath.Join(real, "blog")), "index.html"))
+
+	// Fora do wwwRoot continua recusado, também resolvendo os links.
+	app.PublishRoot = filepath.Join(t.TempDir(), "blog")
+	require.NoError(t, h.db.UpdateAppConfig(h.ctx, &app))
+	d, err = h.svc.Deploy(h.ctx, h.app.ID, "manual", "", "")
+	require.NoError(t, err)
+	got = h.wait(d.ID)
+	assert.Equal(t, "failed", got.Status)
+	assert.Contains(t, got.Reason, "raiz de publicação inválida")
 }
 
 func TestStatic_BuildFailsKeepsCurrent(t *testing.T) {
