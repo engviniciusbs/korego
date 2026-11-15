@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AppView } from "@/lib/apps";
 import { AppForm } from "../app-form";
 
 function json(body: unknown, status = 200) {
@@ -72,7 +73,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderForm(onSaved = vi.fn(), app?: typeof created) {
+function renderForm(onSaved = vi.fn(), app?: AppView) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
@@ -288,14 +289,14 @@ describe("AppForm", () => {
   });
 
   it("editando um site estático o tipo de build fica fixo", () => {
-    renderForm(vi.fn(), { ...created, sourceType: "git", repo: "https://github.com/exemplo/site.git", buildType: "static" });
+    renderForm(vi.fn(), { ...created, sourceType: "git", repo: "https://github.com/exemplo/site.git", buildType: "static", composeProject: "", updateMode: "pull", updateScript: "" } as AppView);
     const select = screen.getByLabelText(/^Tipo de build/);
     expect(select).toBeDisabled();
     expect(select).toHaveValue("static");
   });
 
   it("editando uma app não estática a opção Estático some", () => {
-    renderForm(vi.fn(), { ...created, sourceType: "git", repo: "https://github.com/exemplo/site.git", buildType: "dockerfile" });
+    renderForm(vi.fn(), { ...created, sourceType: "git", repo: "https://github.com/exemplo/site.git", buildType: "dockerfile", composeProject: "", updateMode: "pull", updateScript: "" } as AppView);
     const select = screen.getByLabelText(/^Tipo de build/);
     expect(select).not.toBeDisabled();
     expect(screen.queryByRole("option", { name: "Estático" })).not.toBeInTheDocument();
