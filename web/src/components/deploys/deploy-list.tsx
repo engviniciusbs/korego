@@ -319,7 +319,9 @@ export function DeployList({ app }: { app: AppView }) {
       description={
         app.buildType === "compose"
           ? "Aplicações Compose não têm rollback: faça um novo deploy da versão desejada."
-          : app.buildType === "static"
+          : app.buildType === "compose-local"
+            ? "Sem rollback. Cada atualização roda o pull/up ou o script da stack."
+            : app.buildType === "static"
             ? "Voltar troca o link da raiz para uma versão publicada que ainda existe; as 5 mais recentes são guardadas."
             : "Os 3 deploys mais recentes guardam a imagem e permitem voltar para aquela versão."
       }

@@ -166,7 +166,7 @@ function validate(s: FormState, visible: AppField[], editing: boolean): Errors {
     e.internalPort = "Informe a porta interna da aplicação (1 a 65535).";
   }
   const h = s.healthTimeoutS.trim() === "" ? 0 : Number(s.healthTimeoutS);
-  if (has("healthTimeoutS") && !Number.isInteger(h) || (h !== 0 && (h < 10 || h > 600))) {
+  if (has("healthTimeoutS") && (!Number.isInteger(h) || (h !== 0 && (h < 10 || h > 600)))) {
     e.healthTimeoutS = "Use de 10 a 600 segundos, ou 0 para o padrão (60).";
   }
   return e;
@@ -532,51 +532,51 @@ export function AppForm({ projectId, app, onSaved }: AppFormProps) {
             .
           </Hint>
         ) : (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <Label htmlFor={id("internalPort")} required>
-              Porta interna
-            </Label>
-            <Input
-              id={id("internalPort")}
-              name="internalPort"
-              type="number"
-              inputMode="numeric"
-              min={1}
-              max={65535}
-              mono
-              className="mt-1.5 tabular-nums"
-              value={s.internalPort}
-              placeholder="3000…"
-              autoComplete="off"
-              invalid={Boolean(errors.internalPort)}
-              aria-describedby={describe("internalPort", id("internalPort-hint"))}
-              onChange={(e) => set("internalPort", e.target.value)}
-            />
-            <FieldError id={errId("internalPort")}>{errors.internalPort}</FieldError>
-            <Hint id={id("internalPort-hint")}>Porta em que a aplicação escuta dentro do container.</Hint>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <Label htmlFor={id("internalPort")} required>
+                Porta interna
+              </Label>
+              <Input
+                id={id("internalPort")}
+                name="internalPort"
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={65535}
+                mono
+                className="mt-1.5 tabular-nums"
+                value={s.internalPort}
+                placeholder="3000…"
+                autoComplete="off"
+                invalid={Boolean(errors.internalPort)}
+                aria-describedby={describe("internalPort", id("internalPort-hint"))}
+                onChange={(e) => set("internalPort", e.target.value)}
+              />
+              <FieldError id={errId("internalPort")}>{errors.internalPort}</FieldError>
+              <Hint id={id("internalPort-hint")}>Porta em que a aplicação escuta dentro do container.</Hint>
+            </div>
+            <div>
+              <Label htmlFor={id("healthTimeoutS")}>Verificação de saúde (s)</Label>
+              <Input
+                id={id("healthTimeoutS")}
+                name="healthTimeoutS"
+                type="number"
+                inputMode="numeric"
+                min={0}
+                max={600}
+                mono
+                className="mt-1.5 tabular-nums"
+                value={s.healthTimeoutS}
+                autoComplete="off"
+                invalid={Boolean(errors.healthTimeoutS)}
+                aria-describedby={describe("healthTimeoutS", id("healthTimeoutS-hint"))}
+                onChange={(e) => set("healthTimeoutS", e.target.value)}
+              />
+              <FieldError id={errId("healthTimeoutS")}>{errors.healthTimeoutS}</FieldError>
+              <Hint id={id("healthTimeoutS-hint")}>Quanto esperar a aplicação responder: 10 a 600 s.</Hint>
+            </div>
           </div>
-          <div>
-            <Label htmlFor={id("healthTimeoutS")}>Verificação de saúde (s)</Label>
-            <Input
-              id={id("healthTimeoutS")}
-              name="healthTimeoutS"
-              type="number"
-              inputMode="numeric"
-              min={0}
-              max={600}
-              mono
-              className="mt-1.5 tabular-nums"
-              value={s.healthTimeoutS}
-              autoComplete="off"
-              invalid={Boolean(errors.healthTimeoutS)}
-              aria-describedby={describe("healthTimeoutS", id("healthTimeoutS-hint"))}
-              onChange={(e) => set("healthTimeoutS", e.target.value)}
-            />
-            <FieldError id={errId("healthTimeoutS")}>{errors.healthTimeoutS}</FieldError>
-            <Hint id={id("healthTimeoutS-hint")}>Quanto esperar a aplicação responder: 10 a 600 s.</Hint>
-          </div>
-        </div>
         )}
 
         {s.sourceType === "github" && (

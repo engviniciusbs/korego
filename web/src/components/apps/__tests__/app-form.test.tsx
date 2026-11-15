@@ -257,4 +257,19 @@ describe("AppForm", () => {
     expect(await screen.findByText(/Gerenciar pelo KoreGO/)).toBeInTheDocument();
     expect(screen.getByText(/A pasta \/var\/www\/site já existe\./)).toBeInTheDocument();
   });
+
+  it("saúde fora da faixa não bloqueia o envio depois de escolher Estático", async () => {
+    routes["POST /api/apps"] = () => json({ app: { ...created, sourceType: "git", buildType: "static" } }, 201);
+    renderForm();
+    fireEvent.click(screen.getByRole("radio", { name: /URL Git/ }));
+    fireEvent.change(screen.getByLabelText(/^Verificação de saúde/), { target: { value: "5" } });
+    fireEvent.change(screen.getByLabelText(/^Tipo de build/), { target: { value: "static" } });
+    fireEvent.change(screen.getByLabelText(/^URL do repositório/), {
+      target: { value: "https://github.com/exemplo/site.git" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Nome/), { target: { value: "site" } });
+    fireEvent.click(screen.getByRole("button", { name: "Criar aplicação" }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(JSON.parse(posts()[0][1].body)).toMatchObject({ buildType: "static", healthTimeoutS: 0 });
+  });
 });
