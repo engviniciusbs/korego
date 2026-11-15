@@ -44,12 +44,18 @@ func EnvNames(path string) ([]string, error) {
 	return names, nil
 }
 
+// quoteEnv protege o valor para o compose: aspas simples (sem expansão) quando
+// possível; com ' no valor, aspas duplas com \ e " escapados e $ escrito $$.
 func quoteEnv(v string) string {
 	if !strings.ContainsAny(v, " \t#\"'$") {
 		return v
 	}
+	if !strings.Contains(v, "'") {
+		return "'" + v + "'"
+	}
 	v = strings.ReplaceAll(v, `\`, `\\`)
 	v = strings.ReplaceAll(v, `"`, `\"`)
+	v = strings.ReplaceAll(v, `$`, `$$`)
 	return `"` + v + `"`
 }
 
@@ -64,7 +70,11 @@ func SetEnv(path string, set map[string]string) error {
 			return fmt.Errorf("o valor de %s não pode ter quebra de linha", k)
 		}
 	}
+	if r, e := filepath.EvalSymlinks(path); e == nil {
+		path = r
+	}
 	mode := os.FileMode(0o600)
+	var orig os.FileInfo
 	var content string
 	b, err := os.ReadFile(path)
 	switch {
@@ -72,6 +82,7 @@ func SetEnv(path string, set map[string]string) error {
 		content = string(b)
 		if fi, e := os.Stat(path); e == nil {
 			mode = fi.Mode().Perm()
+			orig = fi
 		}
 	case errors.Is(err, os.ErrNotExist):
 	default:
@@ -129,6 +140,9 @@ func SetEnv(path string, set map[string]string) error {
 	}
 	if err := tmp.Chmod(mode); err != nil {
 		return fail(err)
+	}
+	if orig != nil {
+		chownLike(name, orig)
 	}
 	if err := tmp.Sync(); err != nil {
 		return fail(err)

@@ -67,6 +67,9 @@ func InsideRoot(root, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("raiz inválida: %w", err)
 	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
 	p, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", fmt.Errorf("caminho inválido: %w", err)
@@ -225,8 +228,16 @@ func PruneReleases(publishRoot string, keep int, protect ...string) error {
 			prot[norm(p)] = true
 		}
 	}
-	if cur, err := CurrentRelease(publishRoot); err == nil {
-		prot[filepath.Clean(cur)] = true
+	if _, lerr := os.Lstat(filepath.Join(publishRoot, "current")); lerr == nil {
+		cur, err := CurrentRelease(publishRoot)
+		switch {
+		case err == nil:
+			prot[filepath.Clean(cur)] = true
+		case !os.IsNotExist(err):
+			return fmt.Errorf("não foi possível resolver current: %w", err)
+		}
+	} else if !os.IsNotExist(lerr) {
+		return lerr
 	}
 	var names []string
 	for _, e := range entries {
@@ -268,6 +279,9 @@ func ValidateAdoptRoot(current string) (publishRoot, releaseDir string, err erro
 	root, err := InsideRoot(wwwRoot, filepath.Dir(current))
 	if err != nil {
 		return "", "", err
+	}
+	if wr, werr := filepath.EvalSymlinks(wwwRoot); werr != nil || filepath.Clean(wr) == root {
+		return "", "", errors.New("a raiz de publicação precisa ser uma subpasta de " + wwwRoot)
 	}
 	rel, err := filepath.EvalSymlinks(current)
 	if err != nil {

@@ -6,16 +6,14 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func wf(t *testing.T, p, c string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(p, []byte(c), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+	require.NoError(t, os.WriteFile(p, []byte(c), 0o600))
 }
 
 func TestReleaseName(t *testing.T) {
@@ -86,9 +84,7 @@ func TestPublishRelease_SPAExigeIndex(t *testing.T) {
 func TestPublishRelease_RecusaLinkParaFora(t *testing.T) {
 	src, pub := t.TempDir(), t.TempDir()
 	wf(t, filepath.Join(src, "index.html"), "x")
-	if err := os.Symlink("/etc/passwd", filepath.Join(src, "p.txt")); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.Symlink("/etc/passwd", filepath.Join(src, "p.txt")))
 	name := "20261115133041-9faa1c9"
 	if _, err := PublishRelease(src, pub, name, true); err == nil {
 		t.Fatal("esperava recusa")
@@ -101,8 +97,8 @@ func TestPublishRelease_RecusaLinkParaFora(t *testing.T) {
 func TestSwapCurrent(t *testing.T) {
 	pub := t.TempDir()
 	a, b := filepath.Join(pub, "releases", "20261115000000-aaaaaaa"), filepath.Join(pub, "releases", "20261115000001-bbbbbbb")
-	os.MkdirAll(a, 0o755)
-	os.MkdirAll(b, 0o755)
+	require.NoError(t, os.MkdirAll(a, 0o755))
+	require.NoError(t, os.MkdirAll(b, 0o755))
 	for _, r := range []string{a, b} {
 		if err := SwapCurrent(pub, r); err != nil {
 			t.Fatal(err)
@@ -124,10 +120,10 @@ func TestPruneReleases(t *testing.T) {
 	for i := 1; i <= 7; i++ {
 		n := ReleaseName(time.Date(2026, 11, i, 0, 0, 0, 0, time.UTC), "abcdef0")
 		names = append(names, n)
-		os.MkdirAll(filepath.Join(rel, n), 0o755)
+		require.NoError(t, os.MkdirAll(filepath.Join(rel, n), 0o755))
 	}
-	os.MkdirAll(filepath.Join(rel, "old-site"), 0o755)
-	os.MkdirAll(filepath.Join(rel, "20261114.bak"), 0o755)
+	require.NoError(t, os.MkdirAll(filepath.Join(rel, "old-site"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(rel, "20261114.bak"), 0o755))
 	if err := PruneReleases(pub, 5, filepath.Join(rel, names[0])); err != nil {
 		t.Fatal(err)
 	}
@@ -149,9 +145,9 @@ func TestPruneReleases_ProtegeCurrent(t *testing.T) {
 	for i := 1; i <= 4; i++ {
 		n := ReleaseName(time.Date(2026, 11, i, 0, 0, 0, 0, time.UTC), "abcdef0")
 		names = append(names, n)
-		os.MkdirAll(filepath.Join(rel, n), 0o755)
+		require.NoError(t, os.MkdirAll(filepath.Join(rel, n), 0o755))
 	}
-	SwapCurrent(pub, filepath.Join(rel, names[0]))
+	require.NoError(t, SwapCurrent(pub, filepath.Join(rel, names[0])))
 	if err := PruneReleases(pub, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -174,8 +170,8 @@ func TestValidateAdoptRoot(t *testing.T) {
 
 	root := filepath.Join(www, "hoprs")
 	rel := filepath.Join(root, "releases", "x")
-	os.MkdirAll(rel, 0o755)
-	os.Symlink(rel, filepath.Join(root, "current"))
+	require.NoError(t, os.MkdirAll(rel, 0o755))
+	require.NoError(t, os.Symlink(rel, filepath.Join(root, "current")))
 	pr, rd, err := ValidateAdoptRoot(filepath.Join(root, "current"))
 	if err != nil || pr != root || rd != rel {
 		t.Fatalf("%q %q %v", pr, rd, err)
@@ -183,21 +179,21 @@ func TestValidateAdoptRoot(t *testing.T) {
 
 	// current como pasta real
 	r2 := filepath.Join(www, "real")
-	os.MkdirAll(filepath.Join(r2, "current"), 0o755)
+	require.NoError(t, os.MkdirAll(filepath.Join(r2, "current"), 0o755))
 	if _, _, err := ValidateAdoptRoot(filepath.Join(r2, "current")); err == nil {
 		t.Error("pasta real aceita")
 	}
 	// link para fora de releases/
 	r3 := filepath.Join(www, "out")
-	os.MkdirAll(filepath.Join(r3, "other"), 0o755)
-	os.Symlink(filepath.Join(r3, "other"), filepath.Join(r3, "current"))
+	require.NoError(t, os.MkdirAll(filepath.Join(r3, "other"), 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(r3, "other"), filepath.Join(r3, "current")))
 	if _, _, err := ValidateAdoptRoot(filepath.Join(r3, "current")); err == nil {
 		t.Error("link fora de releases aceito")
 	}
 	// raiz fora de wwwRoot
 	outside := t.TempDir()
-	os.MkdirAll(filepath.Join(outside, "releases", "x"), 0o755)
-	os.Symlink(filepath.Join(outside, "releases", "x"), filepath.Join(outside, "current"))
+	require.NoError(t, os.MkdirAll(filepath.Join(outside, "releases", "x"), 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(outside, "releases", "x"), filepath.Join(outside, "current")))
 	if _, _, err := ValidateAdoptRoot(filepath.Join(outside, "current")); err == nil {
 		t.Error("raiz fora de wwwRoot aceita")
 	}
@@ -206,17 +202,45 @@ func TestValidateAdoptRoot(t *testing.T) {
 func TestInsideRoot(t *testing.T) {
 	base := t.TempDir()
 	stack := filepath.Join(base, "stack")
-	os.MkdirAll(stack, 0o755)
+	require.NoError(t, os.MkdirAll(stack, 0o755))
 	wf(t, filepath.Join(stack, "ok.sh"), "x")
 	wf(t, filepath.Join(base, "x.sh"), "x")
 	if _, err := InsideRoot(stack, filepath.Join(stack, "ok.sh")); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := InsideRoot(stack, "../x.sh"); err == nil {
+		t.Error("../x.sh relativo aceito")
+	}
 	if _, err := InsideRoot(stack, filepath.Join(stack, "../x.sh")); err == nil {
 		t.Error("../x.sh aceito")
 	}
-	os.Symlink(filepath.Join(base, "x.sh"), filepath.Join(stack, "l.sh"))
+	require.NoError(t, os.Symlink(filepath.Join(base, "x.sh"), filepath.Join(stack, "l.sh")))
 	if _, err := InsideRoot(stack, filepath.Join(stack, "l.sh")); err == nil {
 		t.Error("link para fora aceito")
 	}
+}
+
+func TestValidateAdoptRoot_RaizNaoPodeSerWWW(t *testing.T) {
+	www, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	old := wwwRoot
+	wwwRoot = www
+	defer func() { wwwRoot = old }()
+	require.NoError(t, os.MkdirAll(filepath.Join(www, "releases", "x"), 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(www, "releases", "x"), filepath.Join(www, "current")))
+	_, _, err = ValidateAdoptRoot(filepath.Join(www, "current"))
+	require.Error(t, err)
+}
+
+func TestPruneReleases_CurrentIlegivelNaoApagaNada(t *testing.T) {
+	pub := t.TempDir()
+	rel := filepath.Join(pub, "releases")
+	for _, n := range []string{"20261101000000-abcdef0", "20261102000000-abcdef0"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(rel, n), 0o755))
+	}
+	// current aponta para si mesmo: EvalSymlinks falha com "too many links", não not-exist
+	require.NoError(t, os.Symlink(filepath.Join(pub, "current"), filepath.Join(pub, "current")))
+	require.Error(t, PruneReleases(pub, 0))
+	ents, _ := os.ReadDir(rel)
+	require.Len(t, ents, 2)
 }
