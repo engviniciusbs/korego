@@ -150,6 +150,16 @@ export interface DomainHeader {
   value: string;
 }
 
+/** Pasta de uma rota estática como está no disco (só leitura). */
+export interface StaticRoot {
+  path: string;
+  root: string;
+  /** Caminho real, depois de seguir links como current -> releases/<versão>. */
+  resolved: string;
+  exists: boolean;
+  modifiedAt: string | null;
+}
+
 export interface Domain {
   id: number;
   hostname: string;
@@ -167,6 +177,8 @@ export interface Domain {
   headers: DomainHeader[];
   compression: boolean;
   cert: CertInfo;
+  /** Uma por rota estática; ausente em respostas antigas. */
+  staticRoots?: StaticRoot[];
   createdAt: string;
   updatedAt: string;
 }
