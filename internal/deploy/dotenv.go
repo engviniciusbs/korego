@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -44,10 +45,14 @@ func EnvNames(path string) ([]string, error) {
 	return names, nil
 }
 
-// quoteEnv protege o valor para o compose: aspas simples (sem expansão) quando
-// possível; com ' no valor, aspas duplas com \ e " escapados e $ escrito $$.
+// envSafeValue: valores só com estes caracteres vão sem aspas.
+var envSafeValue = regexp.MustCompile(`^[A-Za-z0-9_./:@%+,=-]*$`)
+
+// quoteEnv protege o valor para o compose (e para um script que faça source do
+// .env): fora do conjunto seguro, aspas simples (sem expansão); com ' no
+// valor, aspas duplas com \, " e ` escapados e $ escrito $$.
 func quoteEnv(v string) string {
-	if !strings.ContainsAny(v, " \t#\"'$") {
+	if envSafeValue.MatchString(v) {
 		return v
 	}
 	if !strings.Contains(v, "'") {
@@ -55,6 +60,7 @@ func quoteEnv(v string) string {
 	}
 	v = strings.ReplaceAll(v, `\`, `\\`)
 	v = strings.ReplaceAll(v, `"`, `\"`)
+	v = strings.ReplaceAll(v, "`", "\\`")
 	v = strings.ReplaceAll(v, `$`, `$$`)
 	return `"` + v + `"`
 }

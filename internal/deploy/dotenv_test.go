@@ -48,6 +48,23 @@ func TestSetEnv_Aspas(t *testing.T) {
 	require.Equal(t, want, string(b))
 }
 
+func TestQuoteEnv(t *testing.T) {
+	for in, want := range map[string]string{
+		"abc123":            "abc123",
+		"":                  "",
+		"https://x.io/a?b":  "'https://x.io/a?b'",
+		"a;id>/tmp/x":       "'a;id>/tmp/x'",
+		"x`id`":             "'x`id`'",
+		"$(id)":             "'$(id)'",
+		"a|b&c":             "'a|b&c'",
+		"it's $x":           `"it's $$x"`,
+		"it's `id`":         "\"it's \\`id\\`\"",
+		"user@host:5432/db": "user@host:5432/db",
+	} {
+		require.Equal(t, want, quoteEnv(in), in)
+	}
+}
+
 func TestSetEnv_SeguraLink(t *testing.T) {
 	d := t.TempDir()
 	real := filepath.Join(d, "shared.env")
