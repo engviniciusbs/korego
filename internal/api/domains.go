@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -38,6 +40,7 @@ type domainDTO struct {
 	Headers        []store.Header  `json:"headers"`
 	Compression    bool            `json:"compression"`
 	Cert           proxy.CertInfo  `json:"cert"`
+	StaticRoots    []staticRootDTO `json:"staticRoots"`
 	CreatedAt      time.Time       `json:"createdAt"`
 	UpdatedAt      time.Time       `json:"updatedAt"`
 }
@@ -55,6 +58,33 @@ type routeDTO struct {
 	ImmutablePrefix string `json:"immutablePrefix,omitempty"`
 }
 
+// staticRootDTO descreve a pasta de uma rota estática como está no disco agora.
+// Só leitura: não volta no corpo de edição do domínio.
+type staticRootDTO struct {
+	Path       string     `json:"path"`
+	Root       string     `json:"root"`
+	Resolved   string     `json:"resolved"`
+	Exists     bool       `json:"exists"`
+	ModifiedAt *time.Time `json:"modifiedAt"`
+}
+
+// statRoot segue os links da pasta (ex.: current -> releases/<versão>) e lê a
+// data da última mudança do destino.
+func statRoot(path, root string) staticRootDTO {
+	out := staticRootDTO{Path: path, Root: root}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return out
+	}
+	fi, err := os.Stat(resolved)
+	if err != nil || !fi.IsDir() {
+		return out
+	}
+	mt := fi.ModTime().UTC()
+	out.Resolved, out.Exists, out.ModifiedAt = resolved, true, &mt
+	return out
+}
+
 func toDomainDTO(v domains.DomainView) domainDTO {
 	d := v.Domain
 	out := domainDTO{
@@ -69,6 +99,12 @@ func toDomainDTO(v domains.DomainView) domainDTO {
 			Path: r.Path, TargetType: r.TargetType, AppID: r.AppID, Address: r.Address,
 			MaxBodyBytes: r.MaxBodyBytes, NoBuffering: r.NoBuffering, Root: r.Root, SPA: r.SPA,
 			ImmutablePrefix: r.ImmutablePrefix,
+		}
+	}
+	out.StaticRoots = []staticRootDTO{}
+	for _, r := range d.Routes {
+		if r.TargetType == "static" && r.Root != "" {
+			out.StaticRoots = append(out.StaticRoots, statRoot(r.Path, r.Root))
 		}
 	}
 	if out.Headers == nil {

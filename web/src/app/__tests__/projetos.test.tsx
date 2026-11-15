@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AppDetailPage from "../(painel)/aplicacoes/detalhe/page";
 import ProjectDetailPage from "../(painel)/projetos/detalhe/page";
 import ProjetosPage from "../(painel)/projetos/page";
+import SitePage from "../(painel)/projetos/site/page";
 
 const nav = vi.hoisted(() => ({ search: "", push: vi.fn() }));
 
@@ -211,5 +212,105 @@ describe("Aplicação", () => {
     renderPage(<AppDetailPage />);
     expect(await screen.findByText("Aplicação não encontrada")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Voltar para os projetos/ })).toHaveAttribute("href", "/projetos/");
+  });
+});
+
+const vpsDomain = (over: Record<string, unknown>) => ({
+  id: 6, hostname: "hoprs.online", targetType: "static", appId: null, appSlug: "", address: "",
+  wwwRedirect: "none", forceHttps: true, isPanel: false,
+  routes: [{ path: "/", targetType: "static", root: "/var/www/hoprs/current", maxBodyBytes: 0, noBuffering: false, spa: false }],
+  tls: { mode: "custom", certId: 3, expiresSoon: false }, cloudflareOnly: true, headers: [], compression: true,
+  cert: { state: "active", notAfter: "2041-11-10T13:43:00Z" },
+  staticRoots: [{ path: "/", root: "/var/www/hoprs/current", resolved: "/var/www/hoprs/releases/20261115133041-9faa1c9", exists: true, modifiedAt: "2026-11-15T13:30:41Z" }],
+  createdAt: "", updatedAt: "", ...over,
+});
+
+const vpsContainer = (over: Record<string, unknown>) => ({
+  id: "c1", name: "mikos-caddy-1", image: "caddy:2", state: "running", status: "Up 5 days", health: "",
+  createdAt: "", project: "mikos", service: "caddy", managed: false,
+  ports: [{ ip: "127.0.0.1", privatePort: 80, publicPort: 8081, proto: "tcp" }], ...over,
+});
+
+describe("Sites na VPS", () => {
+  beforeEach(() => {
+    routes["GET /api/domains"] = () =>
+      json({
+        domains: [
+          vpsDomain({}),
+          vpsDomain({
+            id: 4, hostname: "mikos.com.br", targetType: "address", staticRoots: [],
+            routes: [{ path: "/", targetType: "address", address: "127.0.0.1:8081", maxBodyBytes: 0, noBuffering: false, spa: false }],
+          }),
+          vpsDomain({ id: 1, hostname: "painel.com", isPanel: true, staticRoots: [], routes: [] }),
+        ],
+      });
+    routes["GET /api/containers"] = () =>
+      json({
+        containers: [
+          vpsContainer({}),
+          vpsContainer({ id: "c2", name: "mikos-api-1", service: "api", state: "exited", ports: [] }),
+          vpsContainer({ id: "c3", name: "korego-caddy", project: "", managed: true }),
+        ],
+      });
+  });
+
+  it("Projetos mostra as stacks e os estáticos com selo, sem Remover", async () => {
+    renderPage(<ProjetosPage />);
+    const list = await screen.findByRole("list", { name: "Sites na VPS" });
+    const mikos = within(list).getByRole("link", { name: "mikos" }).closest("li") as HTMLElement;
+    expect(within(mikos).getByText("Docker compose")).toBeInTheDocument();
+    expect(within(mikos).getByText("mikos.com.br")).toBeInTheDocument();
+    expect(within(mikos).getByText("1 de 2 containers rodando")).toBeInTheDocument();
+    expect(within(mikos).getByText("Parado")).toBeInTheDocument();
+    expect(within(mikos).queryByRole("button")).toBeNull();
+
+    const hoprs = within(list).getByRole("link", { name: "hoprs.online" });
+    expect(hoprs).toHaveAttribute("href", "/projetos/site/?tipo=estatico&nome=hoprs.online");
+    const card = hoprs.closest("li") as HTMLElement;
+    expect(within(card).getByText("Estático")).toBeInTheDocument();
+    expect(within(card).getByText("20261115133041-9faa1c9")).toBeInTheDocument();
+    expect(within(card).getByText(/pasta \/var\/www\/hoprs\/current/)).toBeInTheDocument();
+
+    expect(within(list).queryByText("painel.com")).toBeNull();
+    expect(within(list).queryByText("korego-caddy")).toBeNull();
+    expect(within(screen.getByRole("link", { name: "Loja" }).closest("li") as HTMLElement).getByText("KoreGO")).toBeInTheDocument();
+  });
+
+  it("pasta que sumiu aparece com aviso", async () => {
+    routes["GET /api/domains"] = () =>
+      json({ domains: [vpsDomain({ staticRoots: [{ path: "/", root: "/var/www/x", resolved: "", exists: false, modifiedAt: null }] })] });
+    renderPage(<ProjetosPage />);
+    expect(await screen.findByText("Pasta não encontrada: /var/www/x")).toBeInTheDocument();
+    expect(screen.getByText("Sem pasta")).toBeInTheDocument();
+  });
+
+  it("sem Docker, os estáticos ainda aparecem com um aviso", async () => {
+    routes["GET /api/containers"] = () => json({ error: { code: "DOCKER_UNAVAILABLE", message: "Docker parado" } }, 503);
+    renderPage(<ProjetosPage />);
+    expect(await screen.findByRole("link", { name: "hoprs.online" })).toBeInTheDocument();
+    expect(screen.getByText("Não foi possível ler os containers.")).toBeInTheDocument();
+  });
+
+  it("a página do site estático mostra a pasta, a versão e o domínio", async () => {
+    nav.search = "tipo=estatico&nome=hoprs.online";
+    renderPage(<SitePage />);
+    expect(await screen.findByRole("heading", { level: 1, name: "hoprs.online" })).toBeInTheDocument();
+    expect(screen.getByText("Versão atual").nextElementSibling).toHaveTextContent("20261115133041-9faa1c9");
+    expect(screen.getByRole("link", { name: /Editar em Domínios/ })).toHaveAttribute("href", "/dominios/");
+    expect(screen.queryByRole("button", { name: /Remover|Apagar/ })).toBeNull();
+  });
+
+  it("a página da stack lista os containers com link para o detalhe", async () => {
+    nav.search = "tipo=compose&nome=mikos";
+    renderPage(<SitePage />);
+    const list = await screen.findByRole("list", { name: "Containers de mikos" });
+    expect(within(list).getByRole("link", { name: "caddy" })).toHaveAttribute("href", "/containers/detalhe/?id=c1");
+    expect(within(list).getByText("exited")).toBeInTheDocument();
+  });
+
+  it("site inexistente mostra não encontrado", async () => {
+    nav.search = "tipo=compose&nome=nada";
+    renderPage(<SitePage />);
+    expect(await screen.findByText("Site não encontrado")).toBeInTheDocument();
   });
 });
