@@ -50,6 +50,8 @@ type Deps struct {
 	Deploys *deploy.Service
 	// DataDir guarda logs e diretórios das aplicações (apagados com a app).
 	DataDir string
+	// WWWRoot é a raiz dos sites estáticos ("" = /var/www); injetável nos testes.
+	WWWRoot string
 	// Runner executa "docker compose down" ao apagar uma app Compose (nil = ExecRunner).
 	Runner deploy.Runner
 	// Box cifra as variáveis de ambiente das aplicações (nil = a do serviço de deploy).

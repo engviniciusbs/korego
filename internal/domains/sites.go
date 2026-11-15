@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/engviniciusbs/korego/internal/deploy"
 	"github.com/engviniciusbs/korego/internal/node/proxy"
 	"github.com/engviniciusbs/korego/internal/store"
 )
@@ -33,10 +34,17 @@ func localUpstream(port int) string {
 // sem deploy): o domínio fica de fora sem log.
 var errNoRootUpstream = errors.New("rota / sem porta")
 
+// appTarget é o destino de uma rota app: um upstream ("" = sem porta) ou, para
+// app estática, uma pasta servida pelo proxy.
+type appTarget struct {
+	Upstream string
+	Static   *proxy.StaticTarget
+}
+
 // siteOf converte um domínio gravado em proxy.Site, sem o PEM do certificado
 // próprio. appUpstream devolve o destino de uma app ("" = sem porta). Rotas
 // app sem porta ficam de fora; se for a rota "/", devolve errNoRootUpstream.
-func siteOf(d store.Domain, appUpstream func(appID int64) string) (proxy.Site, error) {
+func siteOf(d store.Domain, targetOf func(appID int64) appTarget) (proxy.Site, error) {
 	site := proxy.Site{
 		Host: d.Hostname, ForceHTTPS: d.ForceHTTPS, WWWRedirect: wwwMode(d.WWWRedirect),
 		TLS:            proxy.SiteTLS{Mode: d.TLSMode},
@@ -49,9 +57,15 @@ func siteOf(d store.Domain, appUpstream func(appID int64) string) (proxy.Site, e
 		sr := proxy.SiteRoute{Path: r.Path}
 		switch r.TargetType {
 		case TargetApp:
+			var t appTarget
 			if r.AppID != nil {
-				sr.Upstream = appUpstream(*r.AppID)
+				t = targetOf(*r.AppID)
 			}
+			if t.Static != nil {
+				sr.Static = t.Static
+				break
+			}
+			sr.Upstream = t.Upstream
 			if sr.Upstream == "" {
 				if r.Path == "/" {
 					return site, errNoRootUpstream
@@ -136,11 +150,17 @@ func (s *Service) SitesReport(ctx context.Context) ([]proxy.Site, []proxy.Skippe
 	skip := func(d store.Domain, reason string) {
 		skipped = append(skipped, proxy.SkippedSite{Host: d.Hostname, Reason: reason})
 	}
-	appUpstream := func(id int64) string {
-		if a, ok := apps[id]; ok && a.HostPort > 0 {
-			return localUpstream(a.HostPort)
+	appUpstream := func(id int64) appTarget {
+		a, ok := apps[id]
+		switch {
+		case !ok:
+		case a.BuildType == "static":
+			return appTarget{Static: &proxy.StaticTarget{Root: deploy.StaticPublishRoot(a) + "/current",
+				SPA: a.StaticSPA, ImmutablePrefix: a.StaticImmutablePrefix}}
+		case a.HostPort > 0:
+			return appTarget{Upstream: localUpstream(a.HostPort)}
 		}
-		return ""
+		return appTarget{}
 	}
 
 	type cand struct {

@@ -98,7 +98,7 @@ func (rt *routes) mountCore(r chi.Router) {
 		}
 		projectsH := projectHandlers{svc: rt.d.Auth, db: rt.d.DB}
 		appsH := appHandlers{svc: rt.d.Auth, db: rt.d.DB, deploys: rt.d.Deploys, dataDir: rt.d.DataDir,
-			runner: rt.d.Runner, box: box, github: rt.d.GitHubConnected}
+			runner: rt.d.Runner, box: box, github: rt.d.GitHubConnected, wwwRoot: rt.d.WWWRoot}
 		deploysH := deployHandlers{svc: rt.d.Auth, db: rt.d.DB, deploys: rt.d.Deploys, dataDir: rt.d.DataDir}
 		r.Get("/projects", projectsH.list)
 		r.Post("/projects", projectsH.create)

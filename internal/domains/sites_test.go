@@ -279,3 +279,20 @@ func TestSites_PanelUnreadableCertFallsBackToAuto(t *testing.T) {
 	// Regravar o mesmo host não confere o certificado de novo.
 	require.NoError(t, s.SetPanelDomain(ctx, "painel.exemplo.com"))
 }
+
+func TestSites_StaticAppRoute(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestService(t)
+	app := mkApp(t, s.DB, "site", 0)
+	app.BuildType, app.SourceType, app.Repo, app.Branch = "static", "git", "https://github.com/o/r.git", "main"
+	app.StaticSPA, app.StaticImmutablePrefix, app.PublishRoot = true, "/assets/", "/var/www/meusite"
+	require.NoError(t, s.DB.UpdateApp(ctx, &app))
+	d := store.Domain{Hostname: "site.exemplo.com", TargetType: TargetApp, AppID: &app.ID, WWWRedirect: "none"}
+	require.NoError(t, s.DB.InsertDomain(ctx, &d))
+
+	sites, err := s.Sites(ctx)
+	require.NoError(t, err)
+	require.Len(t, sites, 1)
+	assert.Equal(t, []proxy.SiteRoute{{Path: "/", Static: &proxy.StaticTarget{
+		Root: "/var/www/meusite/current", SPA: true, ImmutablePrefix: "/assets/"}}}, sites[0].Routes)
+}
