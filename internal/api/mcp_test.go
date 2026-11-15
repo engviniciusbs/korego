@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -24,8 +25,10 @@ import (
 	"github.com/engviniciusbs/korego/internal/events"
 	"github.com/engviniciusbs/korego/internal/github"
 	"github.com/engviniciusbs/korego/internal/migrate"
+	"github.com/engviniciusbs/korego/internal/node/docker"
 	"github.com/engviniciusbs/korego/internal/node/nodetest"
 	"github.com/engviniciusbs/korego/internal/node/proxy/proxytest"
+	"github.com/engviniciusbs/korego/internal/store"
 )
 
 // allMCPTools é a tabela de ferramentas da tarefa, com todas as Deps.
@@ -345,6 +348,46 @@ func TestMCP_GatedReplayHint(t *testing.T) {
 	assert.Contains(t, txt, "Cada código vale uma vez; se o usuário acabou de usar este, peça o próximo. Após 5 erros, os pedidos deste IP ficam bloqueados por 15 minutos.")
 	_, err = m.db.GetProject(context.Background(), pid2)
 	require.NoError(t, err)
+}
+
+func TestMCP_ComposeStopGated(t *testing.T) {
+	m := newMCPFx(t, true)
+	cs := m.connect(t)
+	dir := t.TempDir()
+	m.dock.ListByLabelFn = func(_ context.Context, key, value string) ([]docker.Container, error) {
+		if key != "com.docker.compose.project" || value != "mikos" {
+			return nil, nil
+		}
+		return []docker.Container{{ID: "c1", Name: "mikos-web-1", CreatedAt: time.Now(), Labels: map[string]string{
+			"com.docker.compose.project":              "mikos",
+			"com.docker.compose.project.working_dir":  dir,
+			"com.docker.compose.project.config_files": filepath.Join(dir, "docker-compose.yml"),
+		}}}, nil
+	}
+	a := store.App{ProjectID: m.project(t), Slug: "mikos", SourceType: "local", BuildType: "compose-local",
+		ComposeProject: "mikos", UpdateMode: "pull"}
+	require.NoError(t, m.db.InsertApp(context.Background(), &a))
+	stops := func() int {
+		m.runner.mu.Lock()
+		defer m.runner.mu.Unlock()
+		n := 0
+		for _, c := range m.runner.cmds {
+			if slices.Contains(c.Args, "stop") {
+				n++
+			}
+		}
+		return n
+	}
+
+	res, txt := callTool(t, cs, "app_compose_action", map[string]any{"id": a.ID, "op": "stop"})
+	require.True(t, res.IsError)
+	assert.True(t, strings.HasPrefix(txt, "CODE_REQUIRED (HTTP 403): "), txt)
+	assert.Zero(t, stops(), "sem código nada para")
+
+	*m.env.now = m.env.now.Add(30 * time.Second)
+	res, txt = callTool(t, cs, "app_compose_action", map[string]any{"id": a.ID, "op": "stop", "code": m.env.code(t, m.totp)})
+	require.False(t, res.IsError, txt)
+	assert.Equal(t, 1, stops())
 }
 
 // imageDeploy cria uma app de imagem e um deploy que fica em "building"
