@@ -24,10 +24,11 @@ type Deploy struct {
 	CreatedAt     time.Time
 	StartedAt     *time.Time
 	FinishedAt    *time.Time
+	ReleaseDir    string
 }
 
 const deployCols = `id, app_id, trigger, status, reason, commit_sha, commit_message, image, host_port,
-	container_id, rollback_of, created_at, started_at, finished_at`
+	container_id, rollback_of, created_at, started_at, finished_at, release_dir`
 
 func unixPtr(n sql.NullInt64) *time.Time {
 	if !n.Valid {
@@ -42,7 +43,7 @@ func scanDeploy(r rowScanner) (Deploy, error) {
 	var rb, started, finished sql.NullInt64
 	var created int64
 	if err := r.Scan(&m.ID, &m.AppID, &m.Trigger, &m.Status, &m.Reason, &m.CommitSHA, &m.CommitMessage,
-		&m.Image, &m.HostPort, &m.ContainerID, &rb, &created, &started, &finished); err != nil {
+		&m.Image, &m.HostPort, &m.ContainerID, &rb, &created, &started, &finished, &m.ReleaseDir); err != nil {
 		return Deploy{}, err
 	}
 	if rb.Valid {
@@ -206,4 +207,13 @@ func (d *DB) LatestImages(ctx context.Context, appID int64, n int) ([]string, er
 		return nil, fmt.Errorf("listar imagens: %w", err)
 	}
 	return out, nil
+}
+
+// SetDeployRelease grava a pasta de release de um deploy estático. Id inexistente → ErrNotFound.
+func (d *DB) SetDeployRelease(ctx context.Context, deployID int64, dir string) error {
+	res, err := d.sql.ExecContext(ctx, `UPDATE deploys SET release_dir = ? WHERE id = ?`, dir, deployID)
+	if err != nil {
+		return fmt.Errorf("gravar release do deploy: %w", err)
+	}
+	return needRows(res, "gravar release do deploy")
 }
