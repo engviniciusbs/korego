@@ -265,9 +265,30 @@ func PruneReleases(publishRoot string, keep int, protect ...string) error {
 	return firstErr
 }
 
+// ReleaseSHA devolve o sha7 do nome de uma versão no padrão
+// <YYYYMMDDHHMMSS>-<sha7>, ou "" se o nome não segue o padrão.
+func ReleaseSHA(name string) string {
+	if !releaseNameRe.MatchString(name) {
+		return ""
+	}
+	return name[len(name)-7:]
+}
+
 // ValidateAdoptRoot confere o layout de adoção: current é um link para
 // <raiz>/releases/<nome>, e a raiz fica dentro de wwwRoot.
 func ValidateAdoptRoot(current string) (publishRoot, releaseDir string, err error) {
+	return ValidateAdoptRootIn(wwwRoot, current)
+}
+
+// ValidateAdoptRootIn é ValidateAdoptRoot com a raiz dos sites explícita
+// ("" = WWWRoot).
+func ValidateAdoptRootIn(wwwRoot, current string) (publishRoot, releaseDir string, err error) {
+	if wwwRoot == "" {
+		wwwRoot = WWWRoot
+	}
+	if !filepath.IsAbs(current) {
+		return "", "", errors.New("current precisa ser um caminho absoluto")
+	}
 	current = filepath.Clean(current)
 	fi, err := os.Lstat(current)
 	if err != nil {

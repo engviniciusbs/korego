@@ -32,6 +32,7 @@ type restArgs struct {
 	query url.Values
 	body  any // nil = sem corpo
 	code  string
+	op    string // substitui {op} no caminho
 }
 
 type restInput interface{ rest() restArgs }
@@ -93,6 +94,26 @@ type gatedBodyInput[T any] struct {
 }
 
 func (in gatedBodyInput[T]) rest() restArgs { return restArgs{body: in.Body, code: in.Code} }
+
+type gatedIDBodyInput[T any] struct {
+	ID   int64  `json:"id" jsonschema:"ID do recurso"`
+	Code string `json:"code,omitempty" jsonschema:"Só quando a ação pede: código de 6 dígitos do autenticador (ou um código de recuperação) que o usuário acabou de digitar. Nunca invente nem reutilize."`
+	Body T      `json:"body" jsonschema:"Corpo da requisição, igual ao da API REST"`
+}
+
+func (in gatedIDBodyInput[T]) rest() restArgs {
+	return restArgs{id: itoa64(in.ID), body: in.Body, code: in.Code}
+}
+
+type composeActionInput struct {
+	ID   int64  `json:"id" jsonschema:"ID da aplicação (stack compose da VPS)"`
+	Op   string `json:"op" jsonschema:"start, stop ou restart"`
+	Code string `json:"code,omitempty" jsonschema:"Obrigatório no stop: código de 6 dígitos do autenticador (ou um código de recuperação) que o usuário acabou de digitar. Nunca invente nem reutilize."`
+}
+
+func (in composeActionInput) rest() restArgs {
+	return restArgs{id: itoa64(in.ID), op: in.Op, code: in.Code}
+}
 
 type rangeInput struct {
 	Range string `json:"range" jsonschema:"Intervalo: 1h, 24h ou 7d"`
@@ -249,6 +270,7 @@ func addREST[In restInput](tb toolBox, t restTool) {
 		}
 		a := in.rest()
 		path := strings.ReplaceAll(t.path, "{id}", url.PathEscape(a.id))
+		path = strings.ReplaceAll(path, "{op}", url.PathEscape(a.op))
 		return toolResult(tb.d.do(ctx, id, t.method, path, a.query, a.body, a.code)), nil, nil
 	})
 }
@@ -317,9 +339,15 @@ func registerMCPTools(s *mcp.Server, d dispatcher) {
 	addREST[idInput](tb, restTool{name: "app_get", method: get, path: "/api/apps/{id}", idDesc: appIDDesc,
 		desc: "Detalhes de uma aplicação (nunca inclui os valores das variáveis)."})
 	addREST[bodyInput[AppInput]](tb, restTool{name: "app_create", method: post, path: "/api/apps",
-		desc: "Cria uma aplicação. sourceType: github (repo dono/nome), git (URL https) ou image; buildType: dockerfile, compose ou image."})
-	addREST[idBodyInput[AppInput]](tb, restTool{name: "app_update", method: put, path: "/api/apps/{id}", idDesc: appIDDesc,
-		desc: "Altera uma aplicação (o slug não muda). Vale no próximo deploy."})
+		desc: "Cria uma aplicação. sourceType: github (repo dono/nome), git (URL https) ou image; buildType: dockerfile, compose, railpack, static ou image. Sites e stacks que já estão na VPS entram por app_adopt_static e app_adopt_compose."})
+	addREST[gatedIDBodyInput[AppInput]](tb, restTool{name: "app_update", method: put, path: "/api/apps/{id}", idDesc: appIDDesc,
+		desc: "Altera uma aplicação (o slug não muda). Vale no próximo deploy. Numa stack compose da VPS, escolher o updateMode script ou mudar o updateScript exige code do autenticador."})
+	addREST[bodyInput[adoptStaticInput]](tb, restTool{name: "app_adopt_static", method: post, path: "/api/adopt/static",
+		desc: "Assume no lugar um site estático da VPS: body.current é o link servido (ex.: /var/www/site/current → releases/<versão>). As versões ficam no disco, os domínios com rota estática para esse current passam para a app e o deploy automático fica desligado."})
+	addREST[gatedBodyInput[AdoptComposeInput]](tb, restTool{name: "app_adopt_compose", method: post, path: "/api/adopt/compose",
+		gated: true, desc: "Gerencia no lugar uma stack compose que já roda na VPS (body.composeProject). updateMode pull (padrão) ou script (body.updateScript, relativo à pasta da stack); o modo script exige code do autenticador. Nada é recriado."})
+	addREST[composeActionInput](tb, restTool{name: "app_compose_action", method: post, path: "/api/apps/{id}/stack/{op}",
+		gated: true, desc: "Inicia, para ou reinicia uma stack compose da VPS (op start, stop ou restart). O stop exige code do autenticador. Para atualizar a stack, use deploy_start."})
 	addREST[gatedIDInput](tb, restTool{name: "app_delete", method: del, path: "/api/apps/{id}", idDesc: appIDDesc,
 		gated: true, desc: "Apaga a aplicação, seus containers, imagens e arquivos (irreversível; exige code do autenticador)."})
 	addREST[idInput](tb, restTool{name: "app_env_names", method: get, path: "/api/apps/{id}/env", idDesc: appIDDesc,

@@ -37,6 +37,7 @@ var allMCPTools = []string{
 	"github_status", "github_repos", "github_disconnect",
 	"project_list", "project_create", "project_update", "project_delete",
 	"app_list", "app_get", "app_create", "app_update", "app_delete", "app_env_names", "app_env_set",
+	"app_adopt_static", "app_adopt_compose", "app_compose_action",
 	"deploy_start", "deploy_list", "deploy_get", "deploy_log", "deploy_cancel", "deploy_rollback", "deploy_wait",
 	"domain_list", "domain_create", "domain_update", "domain_dns", "domain_delete",
 	"proxy_status", "proxy_retry", "proxy_trial_check", "proxy_takeover", "proxy_rollback",

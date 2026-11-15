@@ -98,7 +98,8 @@ func (rt *routes) mountCore(r chi.Router) {
 		}
 		projectsH := projectHandlers{svc: rt.d.Auth, db: rt.d.DB}
 		appsH := appHandlers{svc: rt.d.Auth, db: rt.d.DB, deploys: rt.d.Deploys, dataDir: rt.d.DataDir,
-			runner: rt.d.Runner, box: box, github: rt.d.GitHubConnected, wwwRoot: rt.d.WWWRoot}
+			runner: rt.d.Runner, box: box, github: rt.d.GitHubConnected, wwwRoot: rt.d.WWWRoot,
+			dom: rt.d.Domains, lim: rt.d.TokenLimiter}
 		deploysH := deployHandlers{svc: rt.d.Auth, db: rt.d.DB, deploys: rt.d.Deploys, dataDir: rt.d.DataDir}
 		r.Get("/projects", projectsH.list)
 		r.Post("/projects", projectsH.create)
@@ -111,6 +112,10 @@ func (rt *routes) mountCore(r chi.Router) {
 		r.With(gate).Delete("/apps/{id}", appsH.remove)
 		r.Get("/apps/{id}/env", appsH.envNames)
 		r.Put("/apps/{id}/env", appsH.envSet)
+		// O 2FA destas depende do corpo (modo script, stop): conferido no handler.
+		r.Post("/apps/{id}/stack/{op}", appsH.stackAction)
+		r.Post("/adopt/static", appsH.adoptStatic)
+		r.Post("/adopt/compose", appsH.adoptCompose)
 		r.Post("/apps/{id}/deploys", deploysH.create)
 		r.Get("/apps/{id}/deploys", deploysH.list)
 		r.Post("/apps/{id}/rollback", deploysH.rollback)
