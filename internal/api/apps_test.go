@@ -29,13 +29,19 @@ import (
 type recRunner struct {
 	mu   sync.Mutex
 	cmds []deploy.Cmd
+	// out e err, quando definidos, viram a saída e o erro de cada comando.
+	out string
+	err error
 }
 
-func (r *recRunner) Run(_ context.Context, c deploy.Cmd, _ io.Writer) error {
+func (r *recRunner) Run(_ context.Context, c deploy.Cmd, w io.Writer) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cmds = append(r.cmds, c)
-	return nil
+	if r.out != "" {
+		_, _ = io.WriteString(w, r.out)
+	}
+	return r.err
 }
 
 type appsFx struct {

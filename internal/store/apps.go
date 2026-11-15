@@ -72,8 +72,17 @@ func scanApp(r rowScanner) (App, error) {
 
 // InsertApp grava a aplicação e preenche ID e carimbos. Slug repetido → ErrConflict.
 func (d *DB) InsertApp(ctx context.Context, a *App) error {
+	return insertApp(ctx, d.sql, a)
+}
+
+// execer é *sql.DB ou *sql.Tx.
+type execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertApp(ctx context.Context, x execer, a *App) error {
 	now := time.Now().Unix()
-	res, err := d.sql.ExecContext(ctx,
+	res, err := x.ExecContext(ctx,
 		`INSERT INTO apps (project_id, slug, source_type, repo, image, build_type, branch, dockerfile_path,
 		   compose_path, compose_service, internal_port, health_timeout_s, auto_deploy, host_port,
 		   current_deploy_id, created_at, updated_at, publish_root, static_build_cmd, static_output_dir, static_base_dir, static_image, static_spa,

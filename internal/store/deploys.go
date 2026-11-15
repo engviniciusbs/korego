@@ -57,8 +57,12 @@ func scanDeploy(r rowScanner) (Deploy, error) {
 
 // InsertDeploy grava o deploy e preenche ID e CreatedAt.
 func (d *DB) InsertDeploy(ctx context.Context, m *Deploy) error {
+	return insertDeploy(ctx, d.sql, m)
+}
+
+func insertDeploy(ctx context.Context, x execer, m *Deploy) error {
 	now := time.Now().Unix()
-	res, err := d.sql.ExecContext(ctx,
+	res, err := x.ExecContext(ctx,
 		`INSERT INTO deploys (app_id, trigger, status, reason, commit_sha, commit_message, image, host_port,
 		   container_id, rollback_of, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.AppID, m.Trigger, m.Status, m.Reason, m.CommitSHA, m.CommitMessage, m.Image, m.HostPort,

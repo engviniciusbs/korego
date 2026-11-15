@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -295,10 +296,15 @@ func TestAdoptCompose_NoContainers(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, code, b)
 	assert.Equal(t, "STACK_LABELS", errCode(b))
 
-	a.stack("sistema", "/etc")
-	code, b = a.call(t, http.MethodPost, "/api/adopt/compose", composeBody(pid, "sistema", "sistema"))
-	require.Equal(t, http.StatusUnprocessableEntity, code, b)
-	assert.Equal(t, "STACK_DIR_UNSAFE", errCode(b))
+	toRoot := filepath.Join(t.TempDir(), "raiz")
+	require.NoError(t, os.Symlink("/", toRoot))
+	for i, dir := range []string{"/etc", "/etc/", "/var/.", "/", toRoot, filepath.Join(t.TempDir(), "sumiu")} {
+		p := "sistema" + itoa(int64(i))
+		a.stack(p, dir)
+		code, b = a.call(t, http.MethodPost, "/api/adopt/compose", composeBody(pid, p, p))
+		require.Equal(t, http.StatusUnprocessableEntity, code, "%s: %v", dir, b)
+		assert.Equal(t, "STACK_DIR_UNSAFE", errCode(b), dir)
+	}
 
 	apps, err := a.db.ListApps(context.Background(), nil)
 	require.NoError(t, err)
@@ -456,4 +462,25 @@ func TestMCP_AdoptToolsListed(t *testing.T) {
 	assert.Contains(t, body, "current")
 	assert.NotContains(t, schemaProps(t, schemaProps(t, tools["app_adopt_compose"].InputSchema)["body"]), "code",
 		"o código vai fora do corpo")
+}
+
+func TestStackAction_FailureHidesOutput(t *testing.T) {
+	a := newAdoptFx(t)
+	id, _ := a.adoptPull(t, "mikos")
+	a.runner.mu.Lock()
+	a.runner.out, a.runner.err = "DB_PASSWORD=segredo no log do compose", errors.New("exit status 1")
+	a.runner.mu.Unlock()
+
+	code, b := a.call(t, http.MethodPost, "/api/apps/"+itoa(id)+"/stack/restart", nil)
+	require.Equal(t, http.StatusBadGateway, code, b)
+	assert.Equal(t, "STACK_ACTION_FAILED", errCode(b))
+	msg := b["error"].(map[string]any)["message"].(string)
+	assert.NotContains(t, msg, "segredo")
+	assert.NotContains(t, msg, "exit status")
+	assert.Contains(t, msg, "restart")
+	recs := audits(t, a.env, a.cookie, "app.stack_action")
+	require.NotEmpty(t, recs)
+	for _, m := range recs {
+		assert.Equal(t, map[string]any{"op": "restart", "ok": false}, m)
+	}
 }

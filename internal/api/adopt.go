@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -36,6 +35,19 @@ var composeProjectRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,254}$`)
 var unsafeStackDirs = map[string]bool{
 	"/": true, "/etc": true, "/usr": true, "/bin": true, "/sbin": true, "/lib": true, "/lib64": true,
 	"/boot": true, "/proc": true, "/sys": true, "/dev": true, "/root": true, "/var": true, "/home": true,
+}
+
+// safeStackDir recusa como pasta de stack uma pasta do sistema, também depois
+// de limpar o caminho e seguir links; uma pasta que não resolve é recusada.
+func safeStackDir(dir string) bool {
+	if unsafeStackDirs[filepath.ToSlash(filepath.Clean(dir))] {
+		return false
+	}
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	return !unsafeStackDirs[filepath.ToSlash(filepath.Clean(real))]
 }
 
 // requireCode confere o 2FA de uma ação que só às vezes o exige. Por token,
@@ -136,9 +148,9 @@ func sameRoot(root, current, releaseDir string) bool {
 }
 
 // adoptedDomains acha os domínios com rota estática para o current adotado e
-// monta a versão com essas rotas apontando para a app appID (as demais rotas
-// ficam como estão).
-func adoptedDomains(list []store.Domain, current, releaseDir string, appID int64) []adoptedDomain {
+// monta a versão com essas rotas como "app" sem AppID: store.AdoptStatic as
+// aponta para a app criada (as demais rotas ficam como estão).
+func adoptedDomains(list []store.Domain, current, releaseDir string) []adoptedDomain {
 	var out []adoptedDomain
 	for _, d := range list {
 		if d.IsPanel {
@@ -153,9 +165,8 @@ func adoptedDomains(list []store.Domain, current, releaseDir string, appID int64
 					c := rt
 					first = &c
 				}
-				id := appID
 				rt = store.DomainRoute{ID: rt.ID, DomainID: rt.DomainID, Position: rt.Position, Path: rt.Path,
-					TargetType: "app", AppID: &id}
+					TargetType: "app"}
 			}
 			next.Routes[i] = rt
 		}
@@ -246,6 +257,7 @@ func (h appHandlers) adoptStatic(w http.ResponseWriter, r *http.Request) {
 	adoptMu.Lock()
 	defer adoptMu.Unlock()
 	if taken, err := h.staticRootTaken(ctx, publishRoot); err != nil {
+		fail(map[string]any{"stage": "conflict"})
 		internalError(w, err)
 		return
 	} else if taken {
@@ -255,11 +267,11 @@ func (h appHandlers) adoptStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	list, err := h.db.ListDomains(ctx)
 	if err != nil {
+		fail(map[string]any{"stage": "domains"})
 		internalError(w, err)
 		return
 	}
-	// Sem o id da app ainda: só para copiar SPA e prefixo da rota adotada.
-	if doms := adoptedDomains(list, current, releaseDir, 0); len(doms) > 0 {
+	if doms := adoptedDomains(list, current, releaseDir); len(doms) > 0 {
 		if in.StaticSPA == nil {
 			a.StaticSPA = doms[0].route.SPA
 		}
@@ -268,18 +280,21 @@ func (h appHandlers) adoptStatic(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.PublishRoot, a.AutoDeploy = publishRoot, false
-	if err := h.db.InsertApp(ctx, &a); err != nil {
-		fail(map[string]any{})
+	doms := adoptedDomains(list, current, releaseDir)
+	next := make([]store.Domain, 0, len(doms))
+	hosts := make([]string, 0, len(doms))
+	for _, ad := range doms {
+		next = append(next, ad.next)
+		hosts = append(hosts, ad.orig.Hostname)
+	}
+	dep := store.Deploy{Trigger: "adopt", Status: "running", ReleaseDir: releaseDir,
+		CommitSHA: deploy.ReleaseSHA(filepath.Base(releaseDir)), CommitMessage: "Site adotado da VPS"}
+	if err := h.db.AdoptStatic(ctx, &a, &dep, next); err != nil {
+		fail(map[string]any{"stage": "save"})
 		if errors.Is(err, store.ErrConflict) {
 			WriteError(w, http.StatusConflict, "APP_EXISTS", "Já existe uma aplicação com esse slug.")
 			return
 		}
-		internalError(w, err)
-		return
-	}
-	hosts, err := h.adoptStaticRows(ctx, a, list, current, releaseDir)
-	if err != nil {
-		fail(map[string]any{"stage": "save"})
 		internalError(w, err)
 		return
 	}
@@ -303,55 +318,6 @@ func (h appHandlers) adoptStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	WriteJSON(w, http.StatusCreated, map[string]any{"app": v, "domains": hosts})
-}
-
-// adoptStaticRows grava o deploy "adopt" (versão no ar, deploy atual) e troca
-// as rotas dos domínios. O banco não tem uma transação que cubra tudo: em
-// erro, desfaz o que já gravou (domínios de volta e a app apagada, com os
-// deploys em cascata).
-func (h appHandlers) adoptStaticRows(ctx context.Context, a store.App, list []store.Domain,
-	current, releaseDir string) (hosts []string, err error) {
-	var done []adoptedDomain
-	defer func() {
-		if err == nil {
-			return
-		}
-		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), mutationTimeout)
-		defer cancel()
-		for i := len(done) - 1; i >= 0; i-- {
-			orig := done[i].orig
-			if uerr := h.db.UpdateDomain(bg, &orig); uerr != nil {
-				log.Printf("adoção de %s: desfazer domínio %s: %v", a.Slug, orig.Hostname, uerr)
-			}
-		}
-		if derr := h.db.DeleteApp(bg, a.ID); derr != nil {
-			log.Printf("adoção de %s: desfazer app: %v", a.Slug, derr)
-		}
-	}()
-	d := store.Deploy{AppID: a.ID, Trigger: "adopt", Status: "running",
-		CommitSHA: deploy.ReleaseSHA(filepath.Base(releaseDir)), CommitMessage: "Site adotado da VPS"}
-	if err := h.db.InsertDeploy(ctx, &d); err != nil {
-		return nil, err
-	}
-	if err := h.db.SetDeployRelease(ctx, d.ID, releaseDir); err != nil {
-		return nil, err
-	}
-	if err := h.db.UpdateDeployStatus(ctx, d.ID, "running", "", time.Now()); err != nil {
-		return nil, err
-	}
-	if err := h.db.SetCurrentDeploy(ctx, a.ID, d.ID); err != nil {
-		return nil, err
-	}
-	hosts = []string{}
-	for _, ad := range adoptedDomains(list, current, releaseDir, a.ID) {
-		next := ad.next
-		if err := h.db.UpdateDomain(ctx, &next); err != nil {
-			return nil, fmt.Errorf("domínio %s: %w", ad.orig.Hostname, err)
-		}
-		done = append(done, ad)
-		hosts = append(hosts, ad.orig.Hostname)
-	}
-	return hosts, nil
 }
 
 // AdoptComposeInput é o corpo de POST /api/adopt/compose (sem o código).
@@ -420,10 +386,10 @@ func (h appHandlers) adoptCompose(w http.ResponseWriter, r *http.Request) {
 		stackError(w, project, err)
 		return
 	}
-	if unsafeStackDirs[filepath.ToSlash(st.Dir)] {
+	if !safeStackDir(st.Dir) {
 		fail(map[string]any{"stage": "stack"})
 		WriteError(w, http.StatusUnprocessableEntity, "STACK_DIR_UNSAFE",
-			"A pasta da stack "+project+" é "+st.Dir+", uma pasta do sistema. Mova a stack para uma pasta própria antes de adotá-la.")
+			"A pasta da stack "+project+" é "+st.Dir+", uma pasta do sistema ou inexistente. Mova a stack para uma pasta própria antes de adotá-la.")
 		return
 	}
 	if !h.checkUpdateScript(ctx, w, r, "app.adopted", in.Slug, a) {
@@ -505,14 +471,17 @@ func (h appHandlers) stackAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		rec(false)
 		log.Printf("app %s: stack %s: %v", a.Slug, op, err)
-		WriteError(w, http.StatusBadGateway, "STACK_ACTION_FAILED", "Falha ao rodar docker compose "+op+": "+err.Error())
+		WriteError(w, http.StatusBadGateway, "STACK_ACTION_FAILED",
+			"O docker compose falhou ao executar "+op+"; veja o log do servidor.")
 	}
 }
 
 // stackEnvPath acha o .env da stack e recusa um .env que, por link, sai da
 // pasta da stack.
 func (h appHandlers) stackEnvPath(w http.ResponseWriter, r *http.Request, a store.App) (string, bool) {
-	st, err := deploy.FindStack(r.Context(), h.deploys.Docker, a.ComposeProject)
+	ctx, cancel := detached(r, mutationTimeout)
+	defer cancel()
+	st, err := deploy.FindStack(ctx, h.deploys.Docker, a.ComposeProject)
 	if err != nil {
 		stackError(w, a.ComposeProject, err)
 		return "", false
