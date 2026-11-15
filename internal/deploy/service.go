@@ -303,7 +303,7 @@ func (s *Service) Rollback(ctx context.Context, appID, fromDeployID int64) (stor
 	if err != nil {
 		return store.Deploy{}, err
 	}
-	if app.BuildType == "compose" {
+	if app.BuildType == "compose" || isLocalApp(app) {
 		return store.Deploy{}, ErrRollbackUnsupported
 	}
 	src, err := s.DB.GetDeploy(ctx, fromDeployID)
@@ -400,6 +400,7 @@ func (s *Service) Cancel(ctx context.Context, deployID int64) error {
 //   - se o interrompido já é o deploy atual da app (caiu depois de a rota
 //     trocar), ele volta a running e os outros running da app saem;
 //   - os logs dos interrompidos são marcados como fechados;
+//   - um deploy compose-local interrompido fica failed (a stack não é tocada);
 //   - os queued voltam para a fila, em ordem.
 func (s *Service) Recover(ctx context.Context) error {
 	interrupted, err := s.DB.MarkInterrupted(ctx, s.now())
@@ -410,6 +411,9 @@ func (s *Service) Recover(ctx context.Context) error {
 		app, err := s.DB.GetApp(ctx, d.AppID)
 		if err == nil && app.BuildType == "static" {
 			s.recoverStatic(ctx, app, d)
+		} else if err == nil && isLocalApp(app) {
+			// Stack no lugar: nada a desfazer; o deploy interrompido fica failed.
+			s.publish(d.ID, d.AppID, d.Status, d.Reason)
 		} else if err == nil && app.CurrentDeployID != nil && *app.CurrentDeployID == d.ID {
 			s.promoteInterrupted(ctx, d)
 		} else {
@@ -609,6 +613,9 @@ func (p *pipeline) execute(ctx context.Context) {
 // prepare decifra as variáveis e obtém o token do GitHub; tudo vira segredo
 // do Redactor.
 func (p *pipeline) prepare(ctx context.Context) error {
+	if p.local() {
+		return nil // a stack usa o próprio .env; não há token nem variáveis da app
+	}
 	enc, err := p.s.DB.AppEnvEncrypted(ctx, p.app.ID)
 	if err != nil {
 		return fail("falha ao ler as variáveis", err)
@@ -645,6 +652,9 @@ func (p *pipeline) compose() bool { return p.app.BuildType == "compose" }
 func (p *pipeline) steps(ctx context.Context) error {
 	if p.static() {
 		return p.runStatic(ctx) // sem container, porta, proxy nem limpeza de imagens
+	}
+	if p.local() {
+		return p.runLocal(ctx) // stack existente, atualizada no lugar
 	}
 	if p.d.RollbackOf != nil {
 		p.image = p.d.Image
@@ -688,6 +698,8 @@ func (p *pipeline) steps(ctx context.Context) error {
 func (p *pipeline) source(ctx context.Context) error {
 	s, app := p.s, p.app
 	switch app.SourceType {
+	case "local":
+		return nil // a stack compose-local não busca código (runLocal)
 	case "github", "git":
 		if err := p.fetchSource(ctx); err != nil {
 			return err
