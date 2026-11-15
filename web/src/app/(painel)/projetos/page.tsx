@@ -6,12 +6,13 @@ import { linkCls } from "@/components/apps/form-bits";
 import { projectHref } from "@/components/apps/page-bits";
 import { ProjectDialog } from "@/components/apps/project-dialog";
 import { PageHeader, PanelState } from "@/components/shell/page-header";
+import { AdoptDialog } from "@/components/sites/adopt-dialog";
 import { SiteCard } from "@/components/sites/site-card";
 import { Alert, Badge, Button, Dialog, Panel, Spinner } from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useDeleteProject, useProjects, type Project } from "@/lib/projects";
-import { useDetectedSites } from "@/lib/sites";
+import { useDetectedSites, type DetectedSite } from "@/lib/sites";
 
 const countLabel = (n: number) => `${n} ${n === 1 ? "aplicação" : "aplicações"}`;
 const NOT_EMPTY = "Remova as aplicações do projeto antes.";
@@ -64,7 +65,7 @@ function ProjectCard({ p, onRemove }: { p: Project; onRemove: () => void }) {
   );
 }
 
-function VpsSites() {
+function VpsSites({ onAdopt }: { onAdopt: (s: DetectedSite) => void }) {
   const sites = useDetectedSites();
   if (sites.isPending) {
     return (
@@ -106,7 +107,7 @@ function VpsSites() {
       {list.length > 0 && (
         <ul aria-label="Sites na VPS" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {list.map((s) => (
-            <SiteCard key={`${s.kind}:${s.name}`} s={s} />
+            <SiteCard key={`${s.kind}:${s.name}`} s={s} onAdopt={onAdopt} />
           ))}
         </ul>
       )}
@@ -119,6 +120,9 @@ export default function ProjetosPage() {
   const remove = useDeleteProject();
   const [creating, setCreating] = useState(false);
   const [removing, setRemoving] = useState<Project | null>(null);
+  // Fica aqui, fora da lista: o site adotado sai de "Na VPS" assim que os
+  // dados são relidos, mas o passo final do diálogo continua aberto.
+  const [adopting, setAdopting] = useState<DetectedSite | null>(null);
 
   const list = [...(projects.data ?? [])].sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
 
@@ -185,10 +189,13 @@ export default function ProjetosPage() {
       )}
 
       <div className="mt-8">
-        <VpsSites />
+        <VpsSites onAdopt={setAdopting} />
       </div>
 
       {creating && <ProjectDialog onClose={() => setCreating(false)} />}
+      {adopting && (
+        <AdoptDialog key={`${adopting.kind}:${adopting.name}`} site={adopting} onClose={() => setAdopting(null)} />
+      )}
 
       <Dialog
         open={removing !== null}

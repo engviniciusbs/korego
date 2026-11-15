@@ -1,12 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
 import { linkCls } from "@/components/apps/form-bits";
 import { Badge, Button } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { formatDateTime } from "@/lib/format";
-import { AdoptDialog } from "./adopt-dialog";
 import { SITE_KIND_LABEL, rootVersion, siteHref, type DetectedSite } from "@/lib/sites";
 
 /** Como o site é atualizado, em uma linha. */
@@ -51,12 +49,15 @@ function StaticLine({ s }: { s: DetectedSite }) {
   );
 }
 
-export function SiteCard({ s }: { s: DetectedSite }) {
+/**
+ * Cartão de um site da VPS. `onAdopt` abre "Gerenciar pelo KoreGO": o diálogo
+ * fica com quem lista os cartões, porque o site sai da lista ao ser adotado.
+ */
+export function SiteCard({ s, onAdopt }: { s: DetectedSite; onAdopt?: (s: DetectedSite) => void }) {
   const stopped = (s.kind === "compose" || s.kind === "avulso") && s.containers.some((c) => c.state !== "running");
   const missing = s.kind === "estatico" && s.roots.some((r) => !r.exists);
   // Só estáticos com a pasta no lugar e stacks compose podem ser adotados.
   const adoptable = s.kind === "compose" || (s.kind === "estatico" && s.roots.length > 0 && !missing);
-  const [adopting, setAdopting] = useState(false);
   return (
     <li className="group flex min-w-0 flex-col border border-line bg-surface motion-safe:transition-colors hover:border-line-strong">
       <div className="flex-1 space-y-1.5 px-4 pt-3.5 pb-3 shadow-[inset_2px_0_0_0_var(--color-line-strong)] group-hover:shadow-[inset_2px_0_0_0_var(--color-accent)]">
@@ -91,13 +92,12 @@ export function SiteCard({ s }: { s: DetectedSite }) {
         <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-fg-muted tabular-nums [overflow-wrap:anywhere]">
           {summary(s)}
         </span>
-        {adoptable && (
-          <Button size="sm" variant="ghost" onClick={() => setAdopting(true)}>
+        {adoptable && onAdopt && (
+          <Button size="sm" variant="ghost" onClick={() => onAdopt(s)}>
             Gerenciar pelo KoreGO<span className="sr-only"> ({s.name})</span>
           </Button>
         )}
       </div>
-      {adopting && <AdoptDialog site={s} onClose={() => setAdopting(false)} />}
     </li>
   );
 }

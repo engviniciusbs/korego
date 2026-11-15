@@ -79,8 +79,13 @@ function LatestDeploy({ app, onOpen }: { app: AppView; onOpen: () => void }) {
       Ver em Deploys
     </button>
   );
+  const local = app.buildType === "compose-local";
   if (isActive(last.status)) {
-    return (
+    return local ? (
+      <Alert variant="info" title={`Última atualização (#${last.id}) em andamento: ${statusLabel(last.status)}.`}>
+        <p>A stack é atualizada no lugar, pelo pull/up ou pelo script.{more}</p>
+      </Alert>
+    ) : (
       <Alert variant="info" title={`Deploy #${last.id} em andamento: ${statusLabel(last.status)}.`}>
         <p>A versão atual continua no ar até o novo deploy ficar saudável.{more}</p>
       </Alert>
@@ -88,10 +93,10 @@ function LatestDeploy({ app, onOpen }: { app: AppView; onOpen: () => void }) {
   }
   if (last.status === "failed") {
     return (
-      <Alert variant="danger" title={`O deploy #${last.id} falhou.`}>
+      <Alert variant="danger" title={local ? `A última atualização (#${last.id}) falhou.` : `O deploy #${last.id} falhou.`}>
         <p>
           {last.reason || "Sem detalhes."}
-          {app.currentDeploy ? " A versão anterior continua no ar." : ""}
+          {app.currentDeploy && !local ? " A versão anterior continua no ar." : ""}
           {more}
         </p>
       </Alert>
@@ -344,13 +349,24 @@ function DangerZone({ app }: { app: AppView }) {
 /** Aviso do .env editado de uma stack compose-local. */
 function StackEnvNotice({ app }: { app: AppView }) {
   const info = useStackInfo(app.id);
-  if (!info.data) return null;
+  if (info.isPending) return null;
   return (
     <Alert variant="info" className="mb-4">
-      Editando{" "}
-      <span className="font-mono" translate="no">
-        {info.data.envPath}
-      </span>
+      {info.data ? (
+        <>
+          Editando{" "}
+          <span className="font-mono" translate="no">
+            {info.data.envPath}
+          </span>
+        </>
+      ) : (
+        <>
+          Editando o .env da stack{" "}
+          <span className="font-mono" translate="no">
+            {app.composeProject}
+          </span>
+        </>
+      )}
       . Gravar não reinicia a stack: use Reiniciar ou Atualizar para aplicar.
     </Alert>
   );
