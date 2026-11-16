@@ -123,6 +123,7 @@ func currentOf(t *testing.T, root string) string {
 }
 
 func TestStatic_DeployPublishesAndSwaps(t *testing.T) {
+	linuxOnly(t)
 	h, root := staticHarness(t, map[string]string{"package.json": "{}", "package-lock.json": "{}"}, nil)
 	buildWrites(t, h, nil)
 	require.NoError(t, h.db.SetAppEnv(h.ctx, h.app.ID, map[string]string{"VITE_API": mustEnc(t, h, "segredo-da-api")}, nil))
@@ -210,6 +211,7 @@ func TestStatic_GitRemovalFailsDeploy(t *testing.T) {
 }
 
 func TestStatic_SymlinkedWWWRoot(t *testing.T) {
+	linuxOnly(t)
 	h, _ := staticHarness(t, map[string]string{"index.html": "<html>"},
 		func(a *store.App) { a.StaticOutputDir = "." })
 	// /var/www é um link para a pasta real; a adoção grava a raiz resolvida.
@@ -239,6 +241,7 @@ func TestStatic_SymlinkedWWWRoot(t *testing.T) {
 }
 
 func TestStatic_BuildFailsKeepsCurrent(t *testing.T) {
+	linuxOnly(t)
 	h, root := staticHarness(t, map[string]string{"package.json": "{}"}, nil)
 	buildWrites(t, h, func(context.Context) error { return errors.New("exit status 1") })
 	old := seedRelease(t, h, root, "20261101000000-1111111", true)
@@ -256,6 +259,7 @@ func TestStatic_BuildFailsKeepsCurrent(t *testing.T) {
 }
 
 func TestStatic_PublishFailsRemovesRelease(t *testing.T) {
+	linuxOnly(t)
 	// saída sem index.html (SPA): PublishRelease falha e não sobra pasta.
 	h, root := staticHarness(t, map[string]string{"dist/a.txt": "x"}, nil)
 	old := seedRelease(t, h, root, "20261101000000-1111111", true)
@@ -292,6 +296,7 @@ func TestStatic_OutputOutsideCloneFails(t *testing.T) {
 }
 
 func TestStatic_CancelDuringBuild(t *testing.T) {
+	linuxOnly(t)
 	h, root := staticHarness(t, map[string]string{"package.json": "{}"}, nil)
 	started := make(chan struct{})
 	buildWrites(t, h, func(ctx context.Context) error {
@@ -319,6 +324,7 @@ func TestStatic_CancelDuringBuild(t *testing.T) {
 }
 
 func TestStatic_Rollback(t *testing.T) {
+	linuxOnly(t)
 	h, root := staticHarness(t, nil, nil)
 	a := seedRelease(t, h, root, "20261101000000-aaaaaaa", false)
 	b := seedRelease(t, h, root, "20261102000000-bbbbbbb", true)
@@ -352,6 +358,7 @@ func TestStatic_RollbackGone(t *testing.T) {
 }
 
 func TestStatic_PruneKeepsFiveAndForeign(t *testing.T) {
+	linuxOnly(t)
 	h, root := staticHarness(t, map[string]string{"package.json": "{}"}, nil)
 	buildWrites(t, h, nil)
 	for i := 1; i <= 6; i++ {
@@ -373,6 +380,7 @@ func TestStatic_PruneKeepsFiveAndForeign(t *testing.T) {
 }
 
 func TestStatic_RecoverInterrupted(t *testing.T) {
+	linuxOnly(t)
 	t.Run("current é a versão do deploy", func(t *testing.T) {
 		h, root := staticHarness(t, nil, nil)
 		old := seedRelease(t, h, root, "20261101000000-1111111", true)
@@ -439,6 +447,7 @@ func TestStaticPublishRoot(t *testing.T) {
 }
 
 func TestStatic_CancelAfterPublishRemovesRelease(t *testing.T) {
+	linuxOnly(t)
 	h, root := staticHarness(t, map[string]string{"package.json": "{}"}, nil)
 	var built atomic.Bool
 	var id atomic.Int64

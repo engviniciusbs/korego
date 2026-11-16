@@ -323,6 +323,7 @@ func TestAdoptCompose_ScriptNeedsCode(t *testing.T) {
 }
 
 func TestAdoptCompose_NoContainers(t *testing.T) {
+	linuxOnly(t)
 	a := newAdoptFx(t)
 	pid := a.project(t)
 
@@ -439,6 +440,7 @@ func TestUpdateScriptChange_Gated(t *testing.T) {
 }
 
 func TestLocalEnv_NamesOnly(t *testing.T) {
+	linuxOnly(t)
 	a := newAdoptFx(t)
 	id, dir := a.adoptPull(t, "mikos")
 	envPath := filepath.Join(dir, ".env")

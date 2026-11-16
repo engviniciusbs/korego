@@ -21,6 +21,7 @@ func TestEnvNames(t *testing.T) {
 }
 
 func TestSetEnv(t *testing.T) {
+	linuxOnly(t)
 	p := filepath.Join(t.TempDir(), ".env")
 	require.NoError(t, os.WriteFile(p, []byte(envSample), 0o640))
 	require.NoError(t, SetEnv(p, map[string]string{"C": "novo", "E": "com espaço"}))
@@ -101,6 +102,7 @@ func TestSetEnv_ExportEArquivoSemQuebraFinal(t *testing.T) {
 }
 
 func TestSetEnv_ArquivoAusente(t *testing.T) {
+	linuxOnly(t)
 	p := filepath.Join(t.TempDir(), ".env")
 	require.NoError(t, SetEnv(p, map[string]string{"A": "1"}))
 	fi, err := os.Stat(p)

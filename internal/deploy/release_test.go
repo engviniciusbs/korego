@@ -48,6 +48,7 @@ func TestDetectBuildCommand(t *testing.T) {
 }
 
 func TestPublishRelease(t *testing.T) {
+	linuxOnly(t)
 	src, pub := t.TempDir(), t.TempDir()
 	wf(t, filepath.Join(src, "index.html"), "<h1>")
 	wf(t, filepath.Join(src, "assets/a.js"), "x")
@@ -95,6 +96,7 @@ func TestPublishRelease_RecusaLinkParaFora(t *testing.T) {
 }
 
 func TestSwapCurrent(t *testing.T) {
+	linuxOnly(t)
 	pub := t.TempDir()
 	a, b := filepath.Join(pub, "releases", "20261115000000-aaaaaaa"), filepath.Join(pub, "releases", "20261115000001-bbbbbbb")
 	require.NoError(t, os.MkdirAll(a, 0o755))
