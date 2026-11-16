@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useId, useState, type FormEvent, type ReactNode } from "react";
 import { AppForm, COMPOSE_WARNING } from "@/components/apps/app-form";
 import { EnvEditor } from "@/components/apps/env-editor";
+import { StackPanel, UpdateModeForm } from "@/components/apps/stack-panel";
 import { DeployList } from "@/components/deploys/deploy-list";
 import { linkCls } from "@/components/apps/form-bits";
 import {
@@ -21,6 +22,7 @@ import {
 } from "@/components/apps/page-bits";
 import { PageHeader } from "@/components/shell/page-header";
 import { Alert, Button, Dialog, Input, Label, Panel, Tabs, tabId, tabPanelId } from "@/components/ui";
+import { useStackInfo } from "@/lib/adopt";
 import { ApiError } from "@/lib/api";
 import { useApp, useDeleteApp, type AppView } from "@/lib/apps";
 import { cn } from "@/lib/cn";
@@ -42,8 +44,10 @@ const BUILD_LABEL: Record<string, string> = {
   compose: "Docker Compose",
   railpack: "Railpack",
   image: "Imagem pronta",
+  static: "Estático",
+  "compose-local": "Compose da VPS",
 };
-const SOURCE_LABEL: Record<string, string> = { github: "GitHub", git: "URL Git", image: "Imagem" };
+const SOURCE_LABEL: Record<string, string> = { github: "GitHub", git: "URL Git", image: "Imagem", local: "VPS" };
 
 function Fact({ label, children, mono = true }: { label: string; children: ReactNode; mono?: boolean }) {
   return (
@@ -75,8 +79,13 @@ function LatestDeploy({ app, onOpen }: { app: AppView; onOpen: () => void }) {
       Ver em Deploys
     </button>
   );
+  const local = app.buildType === "compose-local";
   if (isActive(last.status)) {
-    return (
+    return local ? (
+      <Alert variant="info" title={`Última atualização (#${last.id}) em andamento: ${statusLabel(last.status)}.`}>
+        <p>A stack é atualizada no lugar, pelo pull/up ou pelo script.{more}</p>
+      </Alert>
+    ) : (
       <Alert variant="info" title={`Deploy #${last.id} em andamento: ${statusLabel(last.status)}.`}>
         <p>A versão atual continua no ar até o novo deploy ficar saudável.{more}</p>
       </Alert>
@@ -84,10 +93,10 @@ function LatestDeploy({ app, onOpen }: { app: AppView; onOpen: () => void }) {
   }
   if (last.status === "failed") {
     return (
-      <Alert variant="danger" title={`O deploy #${last.id} falhou.`}>
+      <Alert variant="danger" title={local ? `A última atualização (#${last.id}) falhou.` : `O deploy #${last.id} falhou.`}>
         <p>
           {last.reason || "Sem detalhes."}
-          {app.currentDeploy ? " A versão anterior continua no ar." : ""}
+          {app.currentDeploy && !local ? " A versão anterior continua no ar." : ""}
           {more}
         </p>
       </Alert>
@@ -100,6 +109,11 @@ function Overview({ app, onDeployed, onOpenDeploys }: { app: AppView; onDeployed
   const deploy = useStartDeploy();
   const d = app.currentDeploy;
   const finished = d?.finishedAt ? formatDateTime(d.finishedAt) : null;
+  const isStatic = app.buildType === "static";
+  const isLocal = app.buildType === "compose-local";
+  // A versão atual é a última parte da pasta publicada pelo deploy atual.
+  const deploys = useDeploys(app.id);
+  const currentRelease = deploys.data?.find((x) => x.id === d?.id)?.releaseDir?.split("/").filter(Boolean).pop();
   return (
     <div className="space-y-4">
       <LatestDeploy app={app} onOpen={onOpenDeploys} />
@@ -115,7 +129,7 @@ function Overview({ app, onDeployed, onOpenDeploys }: { app: AppView; onDeployed
             loading={deploy.isPending}
             onClick={() => deploy.mutate(app.id, { onSuccess: onDeployed })}
           >
-            Deploy agora
+            {isLocal ? "Atualizar" : "Deploy agora"}
           </Button>
         }
       >
@@ -144,31 +158,61 @@ function Overview({ app, onDeployed, onOpenDeploys }: { app: AppView; onDeployed
               <Dash label="nenhum deploy ainda" />
             )}
           </Fact>
-          <Fact label="Endereço local">
-            {app.url ? (
-              <span translate="no">{app.url}</span>
-            ) : (
-              <span className="font-sans text-fg-subtle">publicado após o primeiro deploy</span>
-            )}
-          </Fact>
+          {isStatic ? (
+            <>
+              <Fact label="Raiz publicada">
+                <span translate="no">{app.publishRoot || `/var/www/${app.slug}`}</span>
+              </Fact>
+              <Fact label="Versão atual">
+                {currentRelease ? (
+                  <span translate="no">{currentRelease}</span>
+                ) : (
+                  <span className="font-sans text-fg-subtle">publicada após o primeiro deploy</span>
+                )}
+              </Fact>
+            </>
+          ) : isLocal ? (
+            <Fact label="Atualização">
+              <span translate="no">
+                {app.updateMode === "script" ? `script ${app.updateScript}` : "docker compose pull e up -d"}
+              </span>
+            </Fact>
+          ) : (
+            <Fact label="Endereço local">
+              {app.url ? (
+                <span translate="no">{app.url}</span>
+              ) : (
+                <span className="font-sans text-fg-subtle">publicado após o primeiro deploy</span>
+              )}
+            </Fact>
+          )}
           <Fact label="Origem">
             <span translate="no">
-              {SOURCE_LABEL[app.sourceType] ?? app.sourceType} · {app.sourceType === "image" ? app.image : app.repo}
+              {SOURCE_LABEL[app.sourceType] ?? app.sourceType} ·{" "}
+              {app.sourceType === "image" ? app.image : isLocal ? `projeto compose ${app.composeProject}` : app.repo}
               {app.branch && app.sourceType !== "image" ? ` @ ${app.branch}` : ""}
             </span>
           </Fact>
           <Fact label="Build">{BUILD_LABEL[app.buildType] ?? app.buildType}</Fact>
-          <Fact label="Porta interna">
-            <span className="tabular-nums">{app.internalPort}</span>
-          </Fact>
-          <Fact label="Verificação de saúde">
-            <span className="tabular-nums">{app.healthTimeoutS} s</span>
-          </Fact>
-          <Fact label="Deploy automático" mono={false}>
-            {app.sourceType === "github" ? (app.autoDeploy ? "a cada push" : "desligado") : "só com GitHub"}
-          </Fact>
+          {!isStatic && !isLocal && (
+            <>
+              <Fact label="Porta interna">
+                <span className="tabular-nums">{app.internalPort}</span>
+              </Fact>
+              <Fact label="Verificação de saúde">
+                <span className="tabular-nums">{app.healthTimeoutS} s</span>
+              </Fact>
+            </>
+          )}
+          {!isLocal && (
+            <Fact label="Deploy automático" mono={false}>
+              {app.sourceType === "github" ? (app.autoDeploy ? "a cada push" : "desligado") : "só com GitHub"}
+            </Fact>
+          )}
         </dl>
       </Panel>
+
+      {isLocal && <StackPanel app={app} />}
 
       <Panel
         title="Domínios"
@@ -242,7 +286,9 @@ function DangerZone({ app }: { app: AppView }) {
     <Panel title="Zona de perigo" variant="danger" size="sm">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="max-w-prose text-[13px] text-fg-muted">
-          Remove os containers, as imagens e as variáveis da aplicação. Domínios precisam ser removidos antes.
+          {app.buildType === "compose-local"
+            ? "O KoreGO deixa de gerenciar a stack: os containers e os arquivos dela ficam como estão. Domínios precisam ser removidos antes."
+            : "Remove os containers, as imagens e as variáveis da aplicação. Domínios precisam ser removidos antes."}
         </p>
         <Button
           variant="danger"
@@ -271,7 +317,9 @@ function DangerZone({ app }: { app: AppView }) {
             <span className="font-mono text-fg" translate="no">
               {app.slug}
             </span>{" "}
-            sai do ar e é apagada com o histórico de deploys e as variáveis.
+            {app.buildType === "compose-local"
+              ? "sai do KoreGO com o histórico de deploys; a stack continua rodando na VPS."
+              : "sai do ar e é apagada com o histórico de deploys e as variáveis."}
           </p>
           <div>
             <Label htmlFor={`${uid}-confirm`} className="normal-case tracking-normal">
@@ -293,6 +341,34 @@ function DangerZone({ app }: { app: AppView }) {
         </form>
       </Dialog>
     </Panel>
+  );
+}
+
+// --- Variáveis -----------------------------------------------------------------
+
+/** Aviso do .env editado de uma stack compose-local. */
+function StackEnvNotice({ app }: { app: AppView }) {
+  const info = useStackInfo(app.id);
+  if (info.isPending) return null;
+  return (
+    <Alert variant="info" className="mb-4">
+      {info.data ? (
+        <>
+          Editando{" "}
+          <span className="font-mono" translate="no">
+            {info.data.envPath}
+          </span>
+        </>
+      ) : (
+        <>
+          Editando o .env da stack{" "}
+          <span className="font-mono" translate="no">
+            {app.composeProject}
+          </span>
+        </>
+      )}
+      . Gravar não reinicia a stack: use Reiniciar ou Atualizar para aplicar.
+    </Alert>
   );
 }
 
@@ -351,7 +427,7 @@ function AppDetail({ id, initialTab }: { id: number; initialTab: Tab }) {
           <span className="flex flex-wrap items-center gap-2">
             <AppStatus app={a} />
             <span className="font-mono text-[11px] text-fg-subtle" translate="no">
-              {a.sourceType === "image" ? a.image : a.repo}
+              {a.sourceType === "image" ? a.image : a.sourceType === "local" ? a.composeProject : a.repo}
             </span>
           </span>
         }
@@ -366,12 +442,17 @@ function AppDetail({ id, initialTab }: { id: number; initialTab: Tab }) {
         {tab === "deploys" && <DeployList app={a} />}
         {envOpened && (
           <div hidden={tab !== "variaveis"}>
+            {a.buildType === "compose-local" && <StackEnvNotice app={a} />}
             <EnvEditor appId={a.id} />
           </div>
         )}
         {tab === "configuracoes" && (
           <div className="max-w-3xl space-y-4">
-            <AppForm key={a.id} projectId={a.projectId} app={a} onSaved={() => undefined} />
+            {a.buildType === "compose-local" ? (
+              <UpdateModeForm key={a.id} app={a} />
+            ) : (
+              <AppForm key={a.id} projectId={a.projectId} app={a} onSaved={() => undefined} />
+            )}
             <DangerZone app={a} />
           </div>
         )}

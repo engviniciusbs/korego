@@ -253,13 +253,27 @@ func (d *DB) UpdateDomain(ctx context.Context, m *Domain) error {
 	if err != nil {
 		return fmt.Errorf("atualizar domínio: %w", err)
 	}
-	routes := effectiveRoutes(m)
-	lt, la, laddr := legacyTarget(routes)
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("atualizar domínio: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := updateDomainTx(ctx, tx, m, headers, tlsMode, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("atualizar domínio: %w", err)
+	}
+	m.TLSMode = tlsMode
+	m.UpdatedAt = time.Unix(now, 0)
+	return nil
+}
+
+// updateDomainTx grava o domínio (headers e tlsMode já normalizados) e
+// substitui as rotas dentro de tx. Id inexistente → ErrNotFound.
+func updateDomainTx(ctx context.Context, tx *sql.Tx, m *Domain, headers, tlsMode string, now int64) error {
+	routes := effectiveRoutes(m)
+	lt, la, laddr := legacyTarget(routes)
 	res, err := tx.ExecContext(ctx,
 		`UPDATE domains SET hostname = ?, target_type = ?, app_id = ?, address = ?, www_redirect = ?,
 		   force_https = ?, is_panel = ?, tls_mode = ?, cert_id = ?, cloudflare_only = ?,
@@ -282,15 +296,7 @@ func (d *DB) UpdateDomain(ctx context.Context, m *Domain) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM domain_routes WHERE domain_id = ?`, m.ID); err != nil {
 		return fmt.Errorf("atualizar domínio: %w", err)
 	}
-	if err := insertRoutes(ctx, tx, m.ID, routes); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("atualizar domínio: %w", err)
-	}
-	m.TLSMode = tlsMode
-	m.UpdatedAt = time.Unix(now, 0)
-	return nil
+	return insertRoutes(ctx, tx, m.ID, routes)
 }
 
 // DeleteDomain remove o domínio (as rotas saem em cascata). Id inexistente → ErrNotFound.

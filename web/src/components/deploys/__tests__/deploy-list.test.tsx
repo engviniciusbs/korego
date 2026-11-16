@@ -138,6 +138,37 @@ describe("DeployList", () => {
     expect(screen.queryByRole("button", { name: /Voltar para esta versão/ })).toBeNull();
   });
 
+  it("estático: Voltar fica desabilitado, com dica, sem releaseDir", async () => {
+    routes["GET /api/apps/5/deploys"] = () =>
+      json({
+        deploys: [
+          dep(3, { image: "", releaseDir: "/var/www/loja-web/releases/20261110120000-abcdef0" }),
+          dep(2, { image: "", releaseDir: "" }),
+          dep(1, { image: "", status: "failed", releaseDir: "" }),
+        ],
+      });
+    renderList(app({ buildType: "static", currentDeploy: { id: 3, status: "running", commitSha: "", finishedAt: null } }));
+    await screen.findByRole("row", { name: /Deploy #3\b/ });
+    expect(rollbackIn(3)).toBeNull();
+    expect(rollbackIn(1)).toBeNull();
+    const gone = rollbackIn(2);
+    expect(gone).toBeDisabled();
+    expect(gone).toHaveAttribute("title", expect.stringContaining("não existe mais"));
+  });
+
+  it("estático: Voltar habilitado com releaseDir", async () => {
+    routes["GET /api/apps/5/deploys"] = () =>
+      json({
+        deploys: [
+          dep(3, { image: "", releaseDir: "/var/www/loja-web/releases/b" }),
+          dep(2, { image: "", releaseDir: "/var/www/loja-web/releases/a" }),
+        ],
+      });
+    renderList(app({ buildType: "static", currentDeploy: { id: 3, status: "running", commitSha: "", finishedAt: null } }));
+    await screen.findByRole("row", { name: /Deploy #3\b/ });
+    expect(rollbackIn(2)).toBeEnabled();
+  });
+
   it("cancelar pede confirmação e chama a API", async () => {
     routes["POST /api/deploys/6/cancel"] = () => new Response(null, { status: 204 });
     renderList(app());

@@ -205,7 +205,7 @@ const placeholderUpstream = "127.0.0.1:1"
 // proxy.BuildConfig. As checagens acima dão o campo e o código; esta pega o
 // que escapar delas, para nada que o proxy recusaria chegar ao banco.
 func (s *Service) buildCheck(d store.Domain, pemText string) error {
-	site, err := siteOf(d, func(int64) string { return placeholderUpstream })
+	site, err := siteOf(d, func(int64) appTarget { return appTarget{Upstream: placeholderUpstream} })
 	if err == nil {
 		site.TLS.CertPEM = pemText
 		cf := s.cfRanges()

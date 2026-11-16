@@ -1,5 +1,6 @@
 "use client";
 
+import { useApps, type AppView } from "./apps";
 import { useContainers, type Container } from "./containers";
 import { useDomains, type Domain, type StaticRoot } from "./domains";
 
@@ -65,12 +66,26 @@ const groupKey = (c: Container) => (c.project ? `compose:${c.project}` : `avulso
 /** Um domínio que aponta para uma app do KoreGO não entra na lista. */
 const pointsToApp = (d: Domain) => (d.routes ?? []).some((r) => r.targetType === "app");
 
-export function detectSites(domains: Domain[], containers: Container[]): DetectedSite[] {
+/** Grupo dos containers de stacks já adotadas: seus domínios também saem da lista. */
+const ADOPTED = "adotado";
+
+/**
+ * Monta os sites da VPS. `apps` tira da lista as stacks adotadas (apps
+ * compose-local) e os domínios que chegam nelas pela porta.
+ */
+export function detectSites(domains: Domain[], containers: Container[], apps: AppView[] = []): DetectedSite[] {
   const groups = new Map<string, DetectedSite>();
   const byPort = new Map<number, string>();
+  const adopted = new Set(
+    apps.filter((a) => a.buildType === "compose-local" && a.composeProject).map((a) => a.composeProject),
+  );
 
   for (const c of containers) {
     if (c.managed) continue;
+    if (c.project && adopted.has(c.project)) {
+      for (const p of containerPorts(c)) if (!byPort.has(p)) byPort.set(p, ADOPTED);
+      continue;
+    }
     const key = groupKey(c);
     let g = groups.get(key);
     if (!g) {
@@ -89,6 +104,7 @@ export function detectSites(domains: Domain[], containers: Container[]): Detecte
     const key = domainPorts(d)
       .map((p) => byPort.get(p))
       .find((k) => k !== undefined);
+    if (key === ADOPTED) continue;
     if (key) {
       groups.get(key)!.domains.push(d);
       continue;
@@ -119,11 +135,16 @@ export function findSite(sites: DetectedSite[], kind: SiteKind, name: string): D
 export function useDetectedSites() {
   const domains = useDomains();
   const containers = useContainers();
+  const apps = useApps();
   // Sem Docker, os estáticos ainda aparecem; o erro dos containers vira aviso.
   const containersReady = containers.data !== undefined || containers.isError;
-  const isPending = domains.isPending || !containersReady;
+  // Sem a lista de apps, nenhuma stack é tida como adotada.
+  const appsReady = apps.data !== undefined || apps.isError;
+  const isPending = domains.isPending || !containersReady || !appsReady;
   const data =
-    domains.data && containersReady ? detectSites(domains.data, containers.data ?? []) : undefined;
+    domains.data && containersReady && appsReady
+      ? detectSites(domains.data, containers.data ?? [], apps.data ?? [])
+      : undefined;
   return {
     data,
     isPending: isPending && !domains.isError,
@@ -134,6 +155,7 @@ export function useDetectedSites() {
     refetch: () => {
       void domains.refetch();
       void containers.refetch();
+      void apps.refetch();
     },
   };
 }

@@ -29,13 +29,19 @@ import (
 type recRunner struct {
 	mu   sync.Mutex
 	cmds []deploy.Cmd
+	// out e err, quando definidos, viram a saída e o erro de cada comando.
+	out string
+	err error
 }
 
-func (r *recRunner) Run(_ context.Context, c deploy.Cmd, _ io.Writer) error {
+func (r *recRunner) Run(_ context.Context, c deploy.Cmd, w io.Writer) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cmds = append(r.cmds, c)
-	return nil
+	if r.out != "" {
+		_, _ = io.WriteString(w, r.out)
+	}
+	return r.err
 }
 
 type appsFx struct {
@@ -429,4 +435,117 @@ func TestAppsAPI_EnvAuditCapped(t *testing.T) {
 	assert.Contains(t, body, `"setCount":80`)
 	assert.NotContains(t, body, "V1079")
 	assert.NotContains(t, body, "valor-secreto")
+}
+
+func staticApp(pid int64, slug string) map[string]any {
+	return map[string]any{"projectId": pid, "slug": slug, "sourceType": "git", "repo": "https://github.com/o/r.git",
+		"branch": "main", "buildType": "static", "internalPort": 3000}
+}
+
+func TestAppsAPI_CreateStatic(t *testing.T) {
+	www := t.TempDir()
+	f := newAppsFx(t, func(_ *appsFx, d *api.Deps) { d.WWWRoot = www })
+	pid := f.project(t)
+
+	code, b := f.call(t, http.MethodPost, "/api/apps", staticApp(pid, "site"))
+	require.Equal(t, http.StatusCreated, code, b)
+	app := b["app"].(map[string]any)
+	assert.EqualValues(t, 0, app["internalPort"])
+	assert.Equal(t, "dist", app["staticOutputDir"])
+	assert.Equal(t, ".", app["staticBaseDir"])
+	assert.Equal(t, "node:22-alpine", app["staticImage"])
+	assert.Equal(t, "/assets/", app["staticImmutablePrefix"])
+	assert.Equal(t, "", app["publishRoot"], "publishRoot é só de leitura")
+	assert.Equal(t, "", app["url"])
+
+	// publishRoot não é aceito na entrada (campos desconhecidos são recusados).
+	bad := staticApp(pid, "site1")
+	bad["publishRoot"] = "/etc"
+	code, _ = f.call(t, http.MethodPost, "/api/apps", bad)
+	assert.Equal(t, http.StatusBadRequest, code)
+
+	bad = staticApp(pid, "site2")
+	bad["staticOutputDir"] = "../x"
+	code, _ = f.call(t, http.MethodPost, "/api/apps", bad)
+	assert.Equal(t, http.StatusBadRequest, code)
+
+	bad = staticApp(pid, "site3")
+	bad["staticImmutablePrefix"] = "assets"
+	code, _ = f.call(t, http.MethodPost, "/api/apps", bad)
+	assert.Equal(t, http.StatusBadRequest, code)
+
+	// O prefixo segue a regra do proxy: segmentos [a-z0-9._~-].
+	for i, p := range []string{"/_next/x y/", "/Assets/", "/", "/a//b/", "/a$/"} {
+		bad = staticApp(pid, "pfx"+strconv.Itoa(i))
+		bad["staticImmutablePrefix"] = p
+		code, b = f.call(t, http.MethodPost, "/api/apps", bad)
+		assert.Equal(t, http.StatusBadRequest, code, p)
+		assert.Equal(t, "staticImmutablePrefix", b["error"].(map[string]any)["field"], p)
+	}
+	ok := staticApp(pid, "pfxok")
+	ok["staticImmutablePrefix"] = "/_next/static/"
+	code, b = f.call(t, http.MethodPost, "/api/apps", ok)
+	require.Equal(t, http.StatusCreated, code, b)
+	assert.Equal(t, "/_next/static/", b["app"].(map[string]any)["staticImmutablePrefix"])
+
+	bad = staticApp(pid, "site4")
+	bad["staticBuildCmd"] = "a\nb"
+	code, _ = f.call(t, http.MethodPost, "/api/apps", bad)
+	assert.Equal(t, http.StatusBadRequest, code)
+
+	require.NoError(t, os.Mkdir(filepath.Join(www, "ja"), 0o755))
+	code, b = f.call(t, http.MethodPost, "/api/apps", staticApp(pid, "ja"))
+	assert.Equal(t, http.StatusConflict, code)
+	assert.Equal(t, "PUBLISH_ROOT_EXISTS", b["error"].(map[string]any)["code"])
+}
+
+func TestAppsAPI_UpdateCannotSwitchStatic(t *testing.T) {
+	f := newAppsFx(t, func(_ *appsFx, d *api.Deps) { d.WWWRoot = t.TempDir() })
+	pid := f.project(t)
+
+	dockerfile := staticApp(pid, "web")
+	dockerfile["buildType"] = "dockerfile"
+	code, b := f.call(t, http.MethodPost, "/api/apps", dockerfile)
+	require.Equal(t, http.StatusCreated, code, b)
+	code, b = f.call(t, http.MethodPut, "/api/apps/"+itoa(appID(b)), staticApp(pid, "web"))
+	require.Equal(t, http.StatusBadRequest, code, b)
+	assert.Equal(t, "buildType", b["error"].(map[string]any)["field"])
+
+	code, b = f.call(t, http.MethodPost, "/api/apps", staticApp(pid, "site"))
+	require.Equal(t, http.StatusCreated, code, b)
+	path := "/api/apps/" + itoa(appID(b))
+	back := staticApp(pid, "site")
+	back["buildType"] = "dockerfile"
+	code, b = f.call(t, http.MethodPut, path, back)
+	require.Equal(t, http.StatusBadRequest, code, b)
+	assert.Equal(t, "buildType", b["error"].(map[string]any)["field"])
+	code, b = f.call(t, http.MethodPut, path, imageApp(pid, "site"))
+	require.Equal(t, http.StatusBadRequest, code, b)
+
+	code, b = f.call(t, http.MethodGet, path, nil)
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "static", b["app"].(map[string]any)["buildType"])
+
+	// Continuar estático segue valendo.
+	same := staticApp(pid, "site")
+	same["staticSpa"] = true
+	code, b = f.call(t, http.MethodPut, path, same)
+	require.Equal(t, http.StatusOK, code, b)
+}
+
+func TestAppsAPI_DeleteStaticKeepsFiles(t *testing.T) {
+	www := t.TempDir()
+	f := newAppsFx(t, func(_ *appsFx, d *api.Deps) { d.WWWRoot = www })
+	pid := f.project(t)
+	code, b := f.call(t, http.MethodPost, "/api/apps", staticApp(pid, "site"))
+	require.Equal(t, http.StatusCreated, code, b)
+	root := filepath.Join(www, "site")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "releases", "x"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "releases", "x", "index.html"), []byte("oi"), 0o644))
+
+	code, _ = f.call(t, http.MethodDelete, "/api/apps/"+itoa(appID(b)), nil)
+	require.Equal(t, http.StatusNoContent, code)
+	_, err := os.Stat(filepath.Join(root, "releases", "x", "index.html"))
+	assert.NoError(t, err)
+	assert.Empty(t, f.runner.cmds)
 }

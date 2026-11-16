@@ -4,7 +4,7 @@ KoreGO é um gerenciador de VPS auto-hospedado: um único binário Go que serve 
 
 ## Estado
 
-**Etapa 3 (Proxy avançado e migração do nginx)** concluída, sobre a **Etapa 2 (Publicar)**, a **Etapa 1 (Observar)** e a **Etapa 0 (Fundação)**: binário único com painel embutido, primeiro acesso com criação do administrador (senha + 2FA obrigatório), sessões, auditoria, visão geral do servidor e autoatualização com verificação de checksum e rollback. A Etapa 1 acrescentou métricas ao vivo, containers Docker e PM2; a Etapa 2, publicação de aplicações, domínios com HTTPS automático e deploy pelo GitHub (veja "Publicar"); a Etapa 3 dá aos domínios rotas por caminho, pastas estáticas, certificados próprios, modo "Só Cloudflare", cabeçalhos e compressão, e troca o nginx pelo Caddy do KoreGO com ensaio, volta automática e botão de voltar (veja "Domínios avançados" e "Migrar do nginx"). Por cima, o painel expõe um servidor **MCP** em `/mcp` com tokens de API, para que agentes como o Claude Code operem o KoreGO (veja "Agentes (MCP)").
+**Etapa 3 (Proxy avançado e migração do nginx)** concluída, sobre a **Etapa 2 (Publicar)**, a **Etapa 1 (Observar)** e a **Etapa 0 (Fundação)**: binário único com painel embutido, primeiro acesso com criação do administrador (senha + 2FA obrigatório), sessões, auditoria, visão geral do servidor e autoatualização com verificação de checksum e rollback. A Etapa 1 acrescentou métricas ao vivo, containers Docker e PM2; a Etapa 2, publicação de aplicações, domínios com HTTPS automático e deploy pelo GitHub (veja "Publicar"); a Etapa 3 dá aos domínios rotas por caminho, pastas estáticas, certificados próprios, modo "Só Cloudflare", cabeçalhos e compressão, e troca o nginx pelo Caddy do KoreGO com ensaio, volta automática e botão de voltar (veja "Domínios avançados" e "Migrar do nginx"). A **v0.8** acrescentou apps de **sites estáticos** (build em container, versões em pastas e troca atômica) e a **adoção** de sites e stacks que já estão na VPS (veja "Sites estáticos" e "Trazer sites da VPS"). Por cima, o painel expõe um servidor **MCP** em `/mcp` com tokens de API, para que agentes como o Claude Code operem o KoreGO (veja "Agentes (MCP)").
 
 Roadmap:
 
@@ -12,6 +12,7 @@ Roadmap:
 - **Etapa 2 (Publicar)**: aplicações, deploy, domínios e HTTPS (pronta).
 - **Etapa 3 (Proxy avançado)**: rotas, pastas estáticas, certificados próprios, Só Cloudflare e migração do nginx (pronta).
 - **Agentes (MCP)**: servidor MCP e tokens de API (pronto).
+- **v0.8 (Sites estáticos e adoção)**: tipo de deploy Estático e adoção de sites e stacks compose da VPS (pronta).
 
 ## Instalação
 
@@ -131,6 +132,65 @@ A Etapa 3 amplia o editor de domínio (**Domínios → Adicionar domínio** ou *
 - **Cabeçalhos de resposta**: até 30 por domínio, enviados em todas as rotas. **Modelo segurança** acrescenta `Strict-Transport-Security`, `X-Content-Type-Options`, `Referrer-Policy` e `Permissions-Policy`. Sempre, em todo domínio, o cabeçalho `Server` é removido e o upstream recebe `X-Real-IP`.
 - **Compressão**: zstd e gzip, conforme o navegador aceitar. Ligada por padrão nos domínios novos e desligada nos que vieram da Etapa 2.
 
+## Sites estáticos
+
+O tipo de deploy **Estático** (**Aplicações → Nova**, tipo "Estático") constrói o site num container descartável e publica só os arquivos gerados, sem deixar nenhum container rodando. O domínio aponta para uma rota estática (veja "Domínios avançados").
+
+- **Build**: o repositório é montado em `/app` num `docker run --rm` (limite de 2 CPUs e 2 GB de memória), com as variáveis da app como `-e` e o comando executado por `sh -c`.
+- **Padrões** (todos editáveis no formulário):
+
+  | Campo | Padrão |
+  | --- | --- |
+  | Imagem | `node:22-alpine` |
+  | Pasta de saída | `dist` |
+  | Diretório base | `.` |
+  | Cache imutável | `/assets/` |
+
+- **Comando de build**: se você deixar vazio, o KoreGO escolhe pelo lockfile do diretório base:
+  - `pnpm-lock.yaml`: `corepack enable && pnpm install --frozen-lockfile && pnpm run build`;
+  - `yarn.lock`: `corepack enable && yarn install --frozen-lockfile && yarn build`;
+  - `package-lock.json`: `npm ci && npm run build`;
+  - sem `package.json`: não há build, e a pasta de saída é copiada como está.
+- **Raiz de publicação**: uma app nova publica em `/var/www/<slug>` (recusada se a pasta já existir). O caminho precisa ficar dentro de `/var/www`, mesmo depois de resolver os symlinks. Os arquivos publicados ficam com dono root, pastas `0755` e arquivos `0644`, e a raiz precisa ter `index.html` (com **SPA** desligado, basta qualquer `.html` na raiz).
+- **Versões**: cada deploy vira uma pasta `releases/<AAAAMMDDHHMMSS>-<sha7>` (data em UTC e os 7 primeiros caracteres do commit), e `current` é um link para a versão no ar. A troca é atômica (link temporário e `rename`), então não há instante sem site.
+- **Limpeza (prune)**: ficam as 5 versões mais recentes. Só são apagadas pastas cujo nome casa exatamente com `AAAAMMDDHHMMSS-sha7`; qualquer outra pasta em `releases/` é ignorada. A versão no ar e a do deploy anterior nunca são apagadas.
+- **Rollback**: voltar para uma versão só religa o `current` para a pasta da versão anterior, sem novo build.
+- **Remover a app** não apaga a raiz de publicação nem as versões.
+
+## Trazer sites da VPS
+
+Sites que já funcionam na VPS (pastas estáticas atrás do Caddy, stacks `docker compose`) aparecem em **Projetos → Na VPS**, detectados a partir dos domínios e dos containers. Cada cartão tem o botão **Gerenciar pelo KoreGO**, que cria uma app no lugar, sem recriar nem mover nada.
+
+### Site estático
+
+1. Abra **Projetos → Na VPS** e clique em **Gerenciar pelo KoreGO** no site.
+2. Escolha o projeto e o nome (slug), informe o repositório e a branch e confira os campos de build.
+3. **Desligue o seu workflow do GitHub Actions** que hoje publica o site; senão ele e o KoreGO disputariam o mesmo `current`.
+4. Só depois marque a caixa de **deploy automático**. Ela vem desligada, e o KoreGO nunca liga sozinho.
+
+Na adoção, a raiz de publicação é a pasta pai do `current`, e o `current` precisa ser um link para `<raiz>/releases/<nome>`. As versões que já estão no disco continuam lá (as de fora do padrão de nome nunca são apagadas pelo prune), e os domínios com rota estática para esse `current` passam a pertencer à app. O deploy seguinte passa a seguir o padrão de nomes acima, e a adoção aparece no histórico como deploy com gatilho `adopt`.
+
+### Stack compose
+
+A stack é **gerenciada no lugar**: a pasta e os arquivos compose são lidos, a cada uso, dos rótulos `com.docker.compose.project.working_dir` e `com.docker.compose.project.config_files` do container mais recente do projeto, e nunca são gravados. A stack precisa ter ao menos um container. Na página da app, o cartão **Stack** mostra a pasta, os arquivos e os containers, e permite iniciar, reiniciar e parar. Dá para ler e gravar o `.env` da stack pelo painel: só os nomes aparecem, os valores nunca saem pela API, a gravação é atômica, mantém comentários, ordem e permissões, e não reinicia nada.
+
+O **Atualizar** (deploy) tem dois modos:
+
+- **Pull** (padrão): `docker compose pull` e depois `up -d`.
+- **Script**: executa um script seu, no caminho relativo à pasta da stack (por exemplo `deploy.sh`), com essa pasta como diretório de trabalho. Um caminho que sai da pasta (`../x.sh`, ou um link que aponta para fora) é recusado ao salvar e de novo ao executar.
+
+Remover uma app compose adotada **não** roda `down` e não apaga arquivos: os containers continuam como estavam.
+
+### Ações com 2FA
+
+Além das já listadas em "Ações com 2FA" do MCP, pedem o código do autenticador:
+
+- **parar uma stack**;
+- **escolher ou mudar o modo script**, ou o caminho do script, na adoção e na edição;
+- **remover apps** (qualquer tipo).
+
+Iniciar e reiniciar uma stack, e adotar no modo pull, não pedem código.
+
 ## Migrar do nginx
 
 Quando outro servidor (nginx ou apache2) segura as portas 80/443, o KoreGO não briga por elas: o Caddy roda em **modo ensaio**, em `127.0.0.1:18080` e `127.0.0.1:18443`, e o painel mostra "Ensaio: o Caddy roda em portas de teste enquanto nginx (pid …) ocupa 80/443". Você cadastra e confere tudo com o nginx ainda no ar e só então troca. O KoreGO nunca para o nginx por conta própria, só quando você pede, e não lê os arquivos do nginx: os sites são cadastrados no painel. O ensaio também não termina sozinho: se o nginx sair do ar por um instante (um reload, ou o KoreGO subindo antes dele no boot), o Caddy continua no ensaio e o painel avisa que as portas estão livres; só **Assumir as portas** põe o Caddy em 80/443.
@@ -215,6 +275,7 @@ claude mcp add --transport http -s user korego https://painel.exemplo.com/mcp --
 Ações irreversíveis exigem o código 2FA atual a cada chamada; o agente precisa pedi-lo a você. Como cada código só vale uma vez, duas ações seguidas pedem dois códigos diferentes. São elas:
 
 - apagar aplicação, projeto, domínio ou certificado;
+- parar uma stack compose adotada, e escolher ou mudar o modo script de atualização (também na adoção);
 - remover um container;
 - assumir o proxy (troca do nginx) e voltar atrás;
 - aplicar uma atualização do KoreGO;
@@ -224,6 +285,10 @@ Ações irreversíveis exigem o código 2FA atual a cada chamada; o agente preci
 Após 5 códigos errados, todos os pedidos por token vindos do mesmo IP ficam bloqueados por 15 minutos.
 
 Atenção: editar o domínio do próprio painel pelo agente não exige 2FA e pode cortar o acesso dele (por exemplo, com "Só Cloudflare" ou troca de certificado). Se isso acontecer, recupere o acesso pela porta 8000 ou pelo painel.
+
+### Adoção pelo MCP
+
+Três ferramentas cobrem a v0.8: `app_adopt_static` (assume um site estático da VPS a partir do link `current`), `app_adopt_compose` (gerencia no lugar uma stack compose; o modo `script` exige `code`) e `app_compose_action` (`start`, `stop` ou `restart` de uma stack; o `stop` exige `code`). Para atualizar uma stack, use `deploy_start`. `app_create` também aceita `buildType` `static`.
 
 ### Somente pelo painel
 

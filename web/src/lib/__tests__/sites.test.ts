@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { AppView } from "../apps";
 import type { Container } from "../containers";
 import type { Domain, DomainRoute } from "../domains";
 import { detectSites, rootVersion, siteHref } from "../sites";
@@ -90,5 +91,24 @@ describe("detectSites", () => {
 
   it("siteHref codifica o nome", () => {
     expect(siteHref({ kind: "estatico", name: "a b.com" })).toBe("/projetos/site/?tipo=estatico&nome=a%20b.com");
+  });
+
+  it("stack adotada (app compose-local) some com os domínios dela", () => {
+    const apps = [{ id: 11, buildType: "compose-local", composeProject: "mikos" } as AppView];
+    const after = detectSites(domains, containers, apps);
+    const names = after.map((s) => s.name);
+    expect(names).not.toContain("mikos");
+    expect(names).not.toContain("mikos.com.br");
+    expect(names).not.toContain("www.mikos.com.br");
+    expect(names).toContain("viniciusbsarmento");
+  });
+
+  it("estático adotado some: a rota vira app", () => {
+    const adopted = domains.map((d) =>
+      d.hostname === "hoprs.online"
+        ? { ...d, routes: [route({ targetType: "app", appId: 12 })], staticRoots: [] }
+        : d,
+    );
+    expect(detectSites(adopted, containers).map((s) => s.name)).not.toContain("hoprs.online");
   });
 });

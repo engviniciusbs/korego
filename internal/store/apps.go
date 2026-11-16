@@ -28,23 +28,40 @@ type App struct {
 	CurrentDeployID *int64
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+
+	// Sites estáticos (build_type static) e apps locais adotadas da VPS.
+	PublishRoot           string
+	StaticBuildCmd        string
+	StaticOutputDir       string
+	StaticBaseDir         string
+	StaticImage           string
+	StaticSPA             bool
+	StaticImmutablePrefix string
+	ComposeProject        string
+	UpdateMode            string // "" | pull | script
+	UpdateScript          string
 }
 
 const appCols = `id, project_id, slug, source_type, repo, image, build_type, branch, dockerfile_path,
 	compose_path, compose_service, internal_port, health_timeout_s, auto_deploy, host_port,
-	current_deploy_id, created_at, updated_at`
+	current_deploy_id, created_at, updated_at, publish_root, static_build_cmd, static_output_dir,
+	static_base_dir, static_image, static_spa, static_immutable_prefix, compose_project,
+	update_mode, update_script`
 
 func scanApp(r rowScanner) (App, error) {
 	var a App
-	var auto int
+	var auto, spa int
 	var cur sql.NullInt64
 	var created, updated int64
 	if err := r.Scan(&a.ID, &a.ProjectID, &a.Slug, &a.SourceType, &a.Repo, &a.Image, &a.BuildType,
 		&a.Branch, &a.DockerfilePath, &a.ComposePath, &a.ComposeService, &a.InternalPort,
-		&a.HealthTimeoutS, &auto, &a.HostPort, &cur, &created, &updated); err != nil {
+		&a.HealthTimeoutS, &auto, &a.HostPort, &cur, &created, &updated,
+		&a.PublishRoot, &a.StaticBuildCmd, &a.StaticOutputDir, &a.StaticBaseDir, &a.StaticImage, &spa,
+		&a.StaticImmutablePrefix, &a.ComposeProject, &a.UpdateMode, &a.UpdateScript); err != nil {
 		return App{}, err
 	}
 	a.AutoDeploy = auto != 0
+	a.StaticSPA = spa != 0
 	if cur.Valid {
 		v := cur.Int64
 		a.CurrentDeployID = &v
@@ -55,15 +72,27 @@ func scanApp(r rowScanner) (App, error) {
 
 // InsertApp grava a aplicação e preenche ID e carimbos. Slug repetido → ErrConflict.
 func (d *DB) InsertApp(ctx context.Context, a *App) error {
+	return insertApp(ctx, d.sql, a)
+}
+
+// execer é *sql.DB ou *sql.Tx.
+type execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertApp(ctx context.Context, x execer, a *App) error {
 	now := time.Now().Unix()
-	res, err := d.sql.ExecContext(ctx,
+	res, err := x.ExecContext(ctx,
 		`INSERT INTO apps (project_id, slug, source_type, repo, image, build_type, branch, dockerfile_path,
 		   compose_path, compose_service, internal_port, health_timeout_s, auto_deploy, host_port,
-		   current_deploy_id, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		   current_deploy_id, created_at, updated_at, publish_root, static_build_cmd, static_output_dir, static_base_dir, static_image, static_spa,
+		   static_immutable_prefix, compose_project, update_mode, update_script)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.ProjectID, a.Slug, a.SourceType, a.Repo, a.Image, a.BuildType, a.Branch, a.DockerfilePath,
 		a.ComposePath, a.ComposeService, a.InternalPort, a.HealthTimeoutS, b2i(a.AutoDeploy), a.HostPort,
-		nullInt(a.CurrentDeployID), now, now)
+		nullInt(a.CurrentDeployID), now, now,
+		a.PublishRoot, a.StaticBuildCmd, a.StaticOutputDir, a.StaticBaseDir, a.StaticImage, b2i(a.StaticSPA),
+		a.StaticImmutablePrefix, a.ComposeProject, a.UpdateMode, a.UpdateScript)
 	if err != nil {
 		if isUnique(err) {
 			return fmt.Errorf("aplicação %q: %w", a.Slug, ErrConflict)
@@ -86,9 +115,13 @@ func (d *DB) UpdateApp(ctx context.Context, a *App) error {
 	res, err := d.sql.ExecContext(ctx,
 		`UPDATE apps SET project_id = ?, slug = ?, source_type = ?, repo = ?, image = ?, build_type = ?,
 		   branch = ?, dockerfile_path = ?, compose_path = ?, compose_service = ?, internal_port = ?,
-		   health_timeout_s = ?, auto_deploy = ?, host_port = ?, updated_at = ? WHERE id = ?`,
+		   health_timeout_s = ?, auto_deploy = ?, host_port = ?, publish_root = ?, static_build_cmd = ?, static_output_dir = ?, static_base_dir = ?,
+		   static_image = ?, static_spa = ?, static_immutable_prefix = ?, compose_project = ?,
+		   update_mode = ?, update_script = ?, updated_at = ? WHERE id = ?`,
 		a.ProjectID, a.Slug, a.SourceType, a.Repo, a.Image, a.BuildType, a.Branch, a.DockerfilePath,
 		a.ComposePath, a.ComposeService, a.InternalPort, a.HealthTimeoutS, b2i(a.AutoDeploy), a.HostPort,
+		a.PublishRoot, a.StaticBuildCmd, a.StaticOutputDir, a.StaticBaseDir, a.StaticImage, b2i(a.StaticSPA),
+		a.StaticImmutablePrefix, a.ComposeProject, a.UpdateMode, a.UpdateScript,
 		now, a.ID)
 	if err != nil {
 		if isUnique(err) {
@@ -111,9 +144,14 @@ func (d *DB) UpdateAppConfig(ctx context.Context, a *App) error {
 	res, err := d.sql.ExecContext(ctx,
 		`UPDATE apps SET project_id = ?, slug = ?, source_type = ?, repo = ?, image = ?, build_type = ?,
 		   branch = ?, dockerfile_path = ?, compose_path = ?, compose_service = ?, internal_port = ?,
-		   health_timeout_s = ?, auto_deploy = ?, updated_at = ? WHERE id = ?`,
+		   health_timeout_s = ?, auto_deploy = ?, publish_root = ?, static_build_cmd = ?, static_output_dir = ?, static_base_dir = ?,
+		   static_image = ?, static_spa = ?, static_immutable_prefix = ?, compose_project = ?,
+		   update_mode = ?, update_script = ?, updated_at = ? WHERE id = ?`,
 		a.ProjectID, a.Slug, a.SourceType, a.Repo, a.Image, a.BuildType, a.Branch, a.DockerfilePath,
-		a.ComposePath, a.ComposeService, a.InternalPort, a.HealthTimeoutS, b2i(a.AutoDeploy), now, a.ID)
+		a.ComposePath, a.ComposeService, a.InternalPort, a.HealthTimeoutS, b2i(a.AutoDeploy),
+		a.PublishRoot, a.StaticBuildCmd, a.StaticOutputDir, a.StaticBaseDir, a.StaticImage, b2i(a.StaticSPA),
+		a.StaticImmutablePrefix, a.ComposeProject, a.UpdateMode, a.UpdateScript,
+		now, a.ID)
 	if err != nil {
 		if isUnique(err) {
 			return fmt.Errorf("aplicação %q: %w", a.Slug, ErrConflict)
@@ -144,6 +182,16 @@ func (d *DB) GetApp(ctx context.Context, id int64) (App, error) {
 // GetAppBySlug devolve a aplicação pelo slug ou ErrNotFound.
 func (d *DB) GetAppBySlug(ctx context.Context, slug string) (App, error) {
 	return d.getApp(ctx, `WHERE slug = ?`, slug)
+}
+
+// AppByComposeProject devolve a app adotada pelo nome do projeto compose ou ErrNotFound.
+func (d *DB) AppByComposeProject(ctx context.Context, project string) (App, error) {
+	return d.getApp(ctx, `WHERE compose_project = ?`, project)
+}
+
+// AppByPublishRoot devolve a app estática pela pasta publicada ou ErrNotFound.
+func (d *DB) AppByPublishRoot(ctx context.Context, root string) (App, error) {
+	return d.getApp(ctx, `WHERE publish_root = ?`, root)
 }
 
 func (d *DB) getApp(ctx context.Context, where string, arg any) (App, error) {

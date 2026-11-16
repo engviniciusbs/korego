@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AppDetailPage from "../(painel)/aplicacoes/detalhe/page";
@@ -262,7 +262,8 @@ describe("Sites na VPS", () => {
     expect(within(mikos).getByText("mikos.com.br")).toBeInTheDocument();
     expect(within(mikos).getByText("1 de 2 containers rodando")).toBeInTheDocument();
     expect(within(mikos).getByText("Parado")).toBeInTheDocument();
-    expect(within(mikos).queryByRole("button")).toBeNull();
+    expect(within(mikos).queryByRole("button", { name: /Remover/ })).toBeNull();
+    expect(within(mikos).getByRole("button", { name: /Gerenciar pelo KoreGO/ })).toBeInTheDocument();
 
     const hoprs = within(list).getByRole("link", { name: "hoprs.online" });
     expect(hoprs).toHaveAttribute("href", "/projetos/site/?tipo=estatico&nome=hoprs.online");
@@ -274,6 +275,70 @@ describe("Sites na VPS", () => {
     expect(within(list).queryByText("painel.com")).toBeNull();
     expect(within(list).queryByText("korego-caddy")).toBeNull();
     expect(within(screen.getByRole("link", { name: "Loja" }).closest("li") as HTMLElement).getByText("KoreGO")).toBeInTheDocument();
+  });
+
+  it("stack adotada some de Na VPS e aparece no projeto", async () => {
+    const adopted = app({
+      id: 8, slug: "mikos", sourceType: "local", buildType: "compose-local", composeProject: "mikos",
+      updateMode: "pull", updateScript: "", image: "", internalPort: 0, hostPort: 0, url: "",
+      currentDeploy: null, domains: [],
+    });
+    routes["GET /api/apps"] = () => json({ apps: [app(), adopted] });
+    renderPage(<ProjetosPage />);
+    const list = await screen.findByRole("list", { name: "Sites na VPS" });
+    expect(within(list).getByRole("link", { name: "hoprs.online" })).toBeInTheDocument();
+    expect(within(list).queryByRole("link", { name: "mikos" })).toBeNull();
+    expect(within(list).queryByText("mikos.com.br")).toBeNull();
+    cleanup();
+
+    nav.search = "id=1";
+    renderPage(<ProjectDetailPage />);
+    expect(await screen.findByRole("link", { name: "mikos" })).toHaveAttribute("href", "/aplicacoes/detalhe/?id=8&aba=visao");
+  });
+
+  it("adotar o estático pelo cartão: o passo final sobrevive à releitura e liga o deploy a cada push", async () => {
+    routes["GET /api/github"] = () =>
+      json({ connected: true, app: { slug: "korego", owner: "exemplo", htmlUrl: "", installUrl: "" }, installations: [{ id: 1, account: "exemplo" }], panelReady: true });
+    routes["GET /api/github/repos"] = () => json({ repos: [{ fullName: "exemplo/hoprs", defaultBranch: "main", installationId: 1 }] });
+    const adopted = app({
+      id: 12, slug: "hoprs-online", sourceType: "github", repo: "exemplo/hoprs", buildType: "static", branch: "main",
+      image: "", internalPort: 0, hostPort: 0, url: "", currentDeploy: null, domains: ["hoprs.online"],
+      publishRoot: "/var/www/hoprs", staticOutputDir: "dist", staticBaseDir: ".", staticImage: "node:22-alpine",
+      staticSpa: false, staticImmutablePrefix: "/assets/", staticBuildCmd: "", composeProject: "", updateMode: "", updateScript: "",
+    });
+    routes["POST /api/adopt/static"] = () => {
+      // Depois da adoção, a rota do domínio vira "app": o site sai de Na VPS.
+      routes["GET /api/domains"] = () =>
+        json({
+          domains: [
+            vpsDomain({
+              staticRoots: [],
+              routes: [{ path: "/", targetType: "app", appId: 12, maxBodyBytes: 0, noBuffering: false, spa: false }],
+            }),
+          ],
+        });
+      routes["GET /api/apps"] = () => json({ apps: [app(), adopted] });
+      return json({ app: adopted, domains: ["hoprs.online"] }, 201);
+    };
+    routes["PUT /api/apps/12"] = (init) => json({ app: { ...adopted, ...JSON.parse(init?.body ?? "{}") } });
+
+    renderPage(<ProjetosPage />);
+    const list = await screen.findByRole("list", { name: "Sites na VPS" });
+    const card = within(list).getByRole("link", { name: "hoprs.online" }).closest("li") as HTMLElement;
+    fireEvent.click(within(card).getByRole("button", { name: /Gerenciar pelo KoreGO/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /exemplo\/hoprs/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Adotar site" }));
+
+    expect(await screen.findByText("Site adotado")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("link", { name: "hoprs.online" })).toBeNull());
+    expect(screen.getByText("Site adotado")).toBeInTheDocument();
+    const box = screen.getByRole("checkbox", { name: "Já desliguei o workflow do Actions; publicar a cada push" });
+    fireEvent.click(box);
+    fireEvent.click(screen.getByRole("button", { name: "Ir para a aplicação" }));
+    await waitFor(() => expect(nav.push).toHaveBeenCalledWith("/aplicacoes/detalhe/?id=12"));
+    const put = fetchMock.mock.calls.find(([u, i]) => u === "/api/apps/12" && i?.method === "PUT");
+    expect(JSON.parse(put![1].body).autoDeploy).toBe(true);
+    expect(screen.queryByText("Site adotado")).toBeNull();
   });
 
   it("pasta que sumiu aparece com aviso", async () => {

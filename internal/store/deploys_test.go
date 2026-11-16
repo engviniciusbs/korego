@@ -133,3 +133,15 @@ func TestDeploys_LatestImagesDistinct(t *testing.T) {
 	got, _ = db.LatestImages(ctx, a.ID, 10)
 	require.Equal(t, []string{"img:4", "img:3", "img:2", "img:1"}, got)
 }
+
+func TestDeploys_ReleaseDir(t *testing.T) {
+	db := OpenMemory(t)
+	ctx := context.Background()
+	a := mkApp(t, db, "web")
+	d := mkDeploy(t, db, a.ID, "queued", "")
+	require.NoError(t, db.SetDeployRelease(ctx, d.ID, "/var/www/web/releases/1"))
+	got, err := db.GetDeploy(ctx, d.ID)
+	require.NoError(t, err)
+	require.Equal(t, "/var/www/web/releases/1", got.ReleaseDir)
+	require.ErrorIs(t, db.SetDeployRelease(ctx, 999, "x"), ErrNotFound)
+}

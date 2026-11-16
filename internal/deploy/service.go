@@ -303,7 +303,7 @@ func (s *Service) Rollback(ctx context.Context, appID, fromDeployID int64) (stor
 	if err != nil {
 		return store.Deploy{}, err
 	}
-	if app.BuildType == "compose" {
+	if app.BuildType == "compose" || isLocalApp(app) {
 		return store.Deploy{}, ErrRollbackUnsupported
 	}
 	src, err := s.DB.GetDeploy(ctx, fromDeployID)
@@ -312,6 +312,9 @@ func (s *Service) Rollback(ctx context.Context, appID, fromDeployID int64) (stor
 	}
 	if src.AppID != appID {
 		return store.Deploy{}, fmt.Errorf("deploy %d: %w", fromDeployID, store.ErrNotFound)
+	}
+	if app.BuildType == "static" {
+		return s.rollbackStatic(ctx, src)
 	}
 	keep, err := s.DB.LatestImages(ctx, appID, 3)
 	if err != nil {
@@ -329,9 +332,31 @@ func (s *Service) Rollback(ctx context.Context, appID, fromDeployID int64) (stor
 	return d, nil
 }
 
+// rollbackStatic cria um deploy que só aponta o current de volta para a
+// versão publicada por src (sem buscar código nem construir).
+func (s *Service) rollbackStatic(ctx context.Context, src store.Deploy) (store.Deploy, error) {
+	if !releaseExists(src.ReleaseDir) {
+		return store.Deploy{}, ErrReleaseGone
+	}
+	from := src.ID
+	d := store.Deploy{AppID: src.AppID, Trigger: "rollback", Status: "queued", ReleaseDir: src.ReleaseDir,
+		CommitSHA: src.CommitSHA, CommitMessage: src.CommitMessage, RollbackOf: &from}
+	if err := s.insertAndEnqueue(ctx, &d); err != nil {
+		return store.Deploy{}, err
+	}
+	return d, nil
+}
+
 func (s *Service) insertAndEnqueue(ctx context.Context, d *store.Deploy) error {
 	if err := s.DB.InsertDeploy(ctx, d); err != nil {
 		return err
+	}
+	// InsertDeploy não grava release_dir: grava antes de entrar na fila.
+	if d.ReleaseDir != "" {
+		if err := s.DB.SetDeployRelease(ctx, d.ID, d.ReleaseDir); err != nil {
+			s.setStatus(context.WithoutCancel(ctx), d.ID, d.AppID, "failed", "falha ao gravar a versão do deploy")
+			return err
+		}
 	}
 	s.publish(d.ID, d.AppID, d.Status, d.Reason)
 	s.enqueue(*d)
@@ -375,6 +400,7 @@ func (s *Service) Cancel(ctx context.Context, deployID int64) error {
 //   - se o interrompido já é o deploy atual da app (caiu depois de a rota
 //     trocar), ele volta a running e os outros running da app saem;
 //   - os logs dos interrompidos são marcados como fechados;
+//   - um deploy compose-local interrompido fica failed (a stack não é tocada);
 //   - os queued voltam para a fila, em ordem.
 func (s *Service) Recover(ctx context.Context) error {
 	interrupted, err := s.DB.MarkInterrupted(ctx, s.now())
@@ -383,7 +409,12 @@ func (s *Service) Recover(ctx context.Context) error {
 	}
 	for _, d := range interrupted {
 		app, err := s.DB.GetApp(ctx, d.AppID)
-		if err == nil && app.CurrentDeployID != nil && *app.CurrentDeployID == d.ID {
+		if err == nil && app.BuildType == "static" {
+			s.recoverStatic(ctx, app, d)
+		} else if err == nil && isLocalApp(app) {
+			// Stack no lugar: nada a desfazer; o deploy interrompido fica failed.
+			s.publish(d.ID, d.AppID, d.Status, d.Reason)
+		} else if err == nil && app.CurrentDeployID != nil && *app.CurrentDeployID == d.ID {
 			s.promoteInterrupted(ctx, d)
 		} else {
 			s.publish(d.ID, d.AppID, d.Status, d.Reason)
@@ -514,7 +545,8 @@ type pipeline struct {
 	composeAllocated bool // a porta da app Compose foi alocada neste deploy
 	portSwapped      bool // apps.host_port já aponta para o novo, rota ainda não confirmada
 	oldPort          int
-	live             bool // o deploy já é o atual: nada mais é desfeito
+	live             bool   // o deploy já é o atual: nada mais é desfeito
+	newRelease       string // versão estática criada por este deploy, apagada se ele não for ao ar
 }
 
 func (s *Service) run(ctx context.Context, id int64) {
@@ -581,6 +613,19 @@ func (p *pipeline) execute(ctx context.Context) {
 // prepare decifra as variáveis e obtém o token do GitHub; tudo vira segredo
 // do Redactor.
 func (p *pipeline) prepare(ctx context.Context) error {
+	if p.local() {
+		// A stack usa o próprio .env; não há token nem variáveis da app. Os
+		// valores do .env viram segredos: pull, up e o script podem ecoá-los.
+		// Sem stack ou sem .env, runLocal relata a falha (ou segue sem nada).
+		if st, err := FindStack(ctx, p.s.Docker, p.app.ComposeProject); err == nil {
+			if vals, err := EnvValues(StackEnvPath(st)); err == nil {
+				p.secrets = append(p.secrets, vals...)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				log.Printf("deploy %d: ler o .env da stack para mascarar: %v", p.d.ID, err)
+			}
+		}
+		return nil
+	}
 	enc, err := p.s.DB.AppEnvEncrypted(ctx, p.app.ID)
 	if err != nil {
 		return fail("falha ao ler as variáveis", err)
@@ -615,6 +660,12 @@ func (p *pipeline) prepare(ctx context.Context) error {
 func (p *pipeline) compose() bool { return p.app.BuildType == "compose" }
 
 func (p *pipeline) steps(ctx context.Context) error {
+	if p.static() {
+		return p.runStatic(ctx) // sem container, porta, proxy nem limpeza de imagens
+	}
+	if p.local() {
+		return p.runLocal(ctx) // stack existente, atualizada no lugar
+	}
 	if p.d.RollbackOf != nil {
 		p.image = p.d.Image
 		p.out.line(fmt.Sprintf("Rollback do deploy #%d com a imagem %s", *p.d.RollbackOf, p.image))
@@ -657,47 +708,18 @@ func (p *pipeline) steps(ctx context.Context) error {
 func (p *pipeline) source(ctx context.Context) error {
 	s, app := p.s, p.app
 	switch app.SourceType {
+	case "local":
+		return nil // a stack compose-local não busca código (runLocal)
 	case "github", "git":
-		p.out.step("==> Buscando código")
-		url := app.Repo
-		if app.SourceType == "github" {
-			if !ValidRepo(app.Repo) {
-				return failWith(nil, "repositório inválido: %s", app.Repo)
-			}
-			url = "https://github.com/" + app.Repo + ".git"
+		if err := p.fetchSource(ctx); err != nil {
+			return err
 		}
-		src := Source{URL: url, Branch: app.Branch, Token: p.token}
-		var sha, msg string
-		var err error
-		if p.compose() {
-			if !ValidSlug(app.Slug) {
-				return failWith(nil, "slug inválido: %s", app.Slug)
-			}
-			if err := os.MkdirAll(filepath.Join(s.DataDir, "apps"), 0o700); err != nil {
-				return fail("falha ao criar o diretório da aplicação", err)
-			}
-			p.dir = AppDir(s.DataDir, app.Slug)
-			sha, msg, err = fetchInto(ctx, s.Runner, p.dir, src, p.out, s.AllowFileURLs)
-			if err == nil {
-				err = os.Chmod(p.dir, 0o700)
-			}
-		} else {
-			if err := os.MkdirAll(filepath.Join(s.DataDir, "builds"), 0o700); err != nil {
-				return fail("falha ao criar o diretório de build", err)
-			}
-			p.dir = s.buildDir(p.d.ID)
-			sha, msg, err = fetch(ctx, s.Runner, p.dir, src, p.out, s.AllowFileURLs)
-		}
-		if err != nil {
-			return fail("falha ao buscar o código", err)
-		}
-		p.sha, p.msg = sha, msg
 		p.out.step("==> Construindo")
 		r := s.Runner
 		if p.compose() {
 			r = envRunner{r: s.Runner, env: p.env}
 		} else {
-			p.image = ImageForApp(app, sha, "")
+			p.image = ImageForApp(app, p.sha, "")
 		}
 		if err := Build(ctx, r, app, p.dir, p.image, p.out); err != nil {
 			if errors.Is(err, ErrRailpackMissing) {
@@ -718,6 +740,46 @@ func (p *pipeline) source(ctx context.Context) error {
 	default:
 		return failWith(nil, "origem desconhecida: %s", app.SourceType)
 	}
+	return nil
+}
+
+// fetchSource busca o código (git/github) em p.dir e grava p.sha e p.msg.
+func (p *pipeline) fetchSource(ctx context.Context) error {
+	s, app := p.s, p.app
+	p.out.step("==> Buscando código")
+	url := app.Repo
+	if app.SourceType == "github" {
+		if !ValidRepo(app.Repo) {
+			return failWith(nil, "repositório inválido: %s", app.Repo)
+		}
+		url = "https://github.com/" + app.Repo + ".git"
+	}
+	src := Source{URL: url, Branch: app.Branch, Token: p.token}
+	var sha, msg string
+	var err error
+	if p.compose() {
+		if !ValidSlug(app.Slug) {
+			return failWith(nil, "slug inválido: %s", app.Slug)
+		}
+		if err := os.MkdirAll(filepath.Join(s.DataDir, "apps"), 0o700); err != nil {
+			return fail("falha ao criar o diretório da aplicação", err)
+		}
+		p.dir = AppDir(s.DataDir, app.Slug)
+		sha, msg, err = fetchInto(ctx, s.Runner, p.dir, src, p.out, s.AllowFileURLs)
+		if err == nil {
+			err = os.Chmod(p.dir, 0o700)
+		}
+	} else {
+		if err := os.MkdirAll(filepath.Join(s.DataDir, "builds"), 0o700); err != nil {
+			return fail("falha ao criar o diretório de build", err)
+		}
+		p.dir = s.buildDir(p.d.ID)
+		sha, msg, err = fetch(ctx, s.Runner, p.dir, src, p.out, s.AllowFileURLs)
+	}
+	if err != nil {
+		return fail("falha ao buscar o código", err)
+	}
+	p.sha, p.msg = sha, msg
 	return nil
 }
 
@@ -1015,6 +1077,12 @@ func (p *pipeline) abort(ctx context.Context, status, reason string) {
 	if p.composeAllocated {
 		s.releaseComposePort(bg, p.app.ID, p.port)
 		p.composeAllocated = false
+	}
+	if p.newRelease != "" {
+		if err := os.RemoveAll(p.newRelease); err != nil {
+			log.Printf("deploy %d: apagar versão nova: %v", p.d.ID, err)
+		}
+		p.newRelease = ""
 	}
 	reason = redactString(reason, p.secrets)
 	if status == "cancelled" {

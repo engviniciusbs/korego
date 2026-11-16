@@ -174,3 +174,27 @@ func parseID(s string) (int64, error) {
 	}
 	return n, nil
 }
+
+func TestDeploysAPI_ReleaseDirAndReleaseGone(t *testing.T) {
+	f := newAppsFx(t)
+	code, b := f.call(t, http.MethodPost, "/api/apps", map[string]any{"projectId": f.project(t), "slug": "site",
+		"sourceType": "git", "repo": "https://example.com/x.git", "branch": "main", "buildType": "static"})
+	require.Equal(t, http.StatusCreated, code, b)
+	aid := itoa(appID(b))
+	appid, _ := parseID(aid)
+
+	gone := "/var/www/site/releases/20261101000000-abcdef0"
+	m := &store.Deploy{AppID: appid, Trigger: "manual", Status: "superseded"}
+	require.NoError(t, f.db.InsertDeploy(context.Background(), m))
+	require.NoError(t, f.db.SetDeployRelease(context.Background(), m.ID, gone))
+
+	code, b = f.call(t, http.MethodGet, "/api/apps/"+aid+"/deploys", nil)
+	require.Equal(t, http.StatusOK, code)
+	list := b["deploys"].([]any)
+	require.Len(t, list, 1)
+	assert.Equal(t, gone, list[0].(map[string]any)["releaseDir"])
+
+	code, b = f.call(t, http.MethodPost, "/api/apps/"+aid+"/rollback", map[string]any{"deployId": m.ID})
+	require.Equal(t, http.StatusConflict, code, b)
+	assert.Equal(t, "RELEASE_GONE", errCode(b))
+}

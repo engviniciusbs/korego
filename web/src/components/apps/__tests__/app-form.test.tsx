@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AppView } from "@/lib/apps";
 import { AppForm } from "../app-form";
 
 function json(body: unknown, status = 200) {
@@ -27,6 +28,13 @@ const created = {
   internalPort: 80,
   healthTimeoutS: 60,
   autoDeploy: false,
+  staticBuildCmd: "",
+  staticOutputDir: "",
+  staticBaseDir: "",
+  staticImage: "",
+  staticSpa: false,
+  staticImmutablePrefix: "",
+  publishRoot: "",
   hostPort: 0,
   currentDeploy: null,
   domains: [],
@@ -65,11 +73,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderForm(onSaved = vi.fn()) {
+function renderForm(onSaved = vi.fn(), app?: AppView) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <AppForm projectId={1} onSaved={onSaved} />
+      <AppForm projectId={1} app={app} onSaved={onSaved} />
     </QueryClientProvider>,
   );
   return onSaved;
@@ -199,5 +207,99 @@ describe("AppForm", () => {
     fireEvent.click(screen.getByRole("radio", { name: /URL Git/ }));
     fireEvent.change(screen.getByLabelText(/^Tipo de build/), { target: { value: "compose" } });
     expect(screen.getByText(warning)).toBeInTheDocument();
+  });
+
+  it("Estático mostra os padrões, esconde porta e saúde e envia sem porta", async () => {
+    routes["POST /api/apps"] = () => json({ app: { ...created, sourceType: "git", buildType: "static" } }, 201);
+    renderForm();
+    fireEvent.click(screen.getByRole("radio", { name: /URL Git/ }));
+    fireEvent.change(screen.getByLabelText(/^Tipo de build/), { target: { value: "static" } });
+
+    expect(screen.getByLabelText(/^Pasta de saída/)).toHaveValue("dist");
+    expect(screen.getByLabelText(/^Diretório base/)).toHaveValue(".");
+    expect(screen.getByLabelText(/^Imagem do build/)).toHaveValue("node:22-alpine");
+    expect(screen.getByLabelText(/^Prefixo imutável/)).toHaveValue("/assets/");
+    expect(screen.getByLabelText(/^Comando de build/)).toHaveValue("");
+    expect(screen.queryByLabelText(/^Porta interna/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Verificação de saúde/)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/^URL do repositório/), {
+      target: { value: "https://github.com/exemplo/site.git" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Nome/), { target: { value: "site" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /página única/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Criar aplicação" }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    const body = JSON.parse(posts()[0][1].body);
+    expect(body).toMatchObject({
+      buildType: "static",
+      sourceType: "git",
+      internalPort: 0,
+      staticOutputDir: "dist",
+      staticBaseDir: ".",
+      staticImage: "node:22-alpine",
+      staticImmutablePrefix: "/assets/",
+      staticSpa: true,
+    });
+    expect(body).not.toHaveProperty("publishRoot");
+  });
+
+  it("409 PUBLISH_ROOT_EXISTS explica como usar Gerenciar pelo KoreGO", async () => {
+    routes["POST /api/apps"] = () =>
+      json({ error: { code: "PUBLISH_ROOT_EXISTS", message: "A pasta /var/www/site já existe." } }, 409);
+    renderForm();
+    fireEvent.click(screen.getByRole("radio", { name: /URL Git/ }));
+    fireEvent.change(screen.getByLabelText(/^Tipo de build/), { target: { value: "static" } });
+    fireEvent.change(screen.getByLabelText(/^URL do repositório/), {
+      target: { value: "https://github.com/exemplo/site.git" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Nome/), { target: { value: "site" } });
+    fireEvent.click(screen.getByRole("button", { name: "Criar aplicação" }));
+    expect(await screen.findByText(/Gerenciar pelo KoreGO/)).toBeInTheDocument();
+    expect(screen.getByText(/A pasta \/var\/www\/site já existe\./)).toBeInTheDocument();
+  });
+
+  it("saúde fora da faixa não bloqueia o envio depois de escolher Estático", async () => {
+    routes["POST /api/apps"] = () => json({ app: { ...created, sourceType: "git", buildType: "static" } }, 201);
+    renderForm();
+    fireEvent.click(screen.getByRole("radio", { name: /URL Git/ }));
+    fireEvent.change(screen.getByLabelText(/^Verificação de saúde/), { target: { value: "5" } });
+    fireEvent.change(screen.getByLabelText(/^Tipo de build/), { target: { value: "static" } });
+    fireEvent.change(screen.getByLabelText(/^URL do repositório/), {
+      target: { value: "https://github.com/exemplo/site.git" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Nome/), { target: { value: "site" } });
+    fireEvent.click(screen.getByRole("button", { name: "Criar aplicação" }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(JSON.parse(posts()[0][1].body)).toMatchObject({ buildType: "static", healthTimeoutS: 0 });
+  });
+
+  it("prefixo imutável fora da regra do proxy não é enviado", async () => {
+    renderForm();
+    fireEvent.click(screen.getByRole("radio", { name: /URL Git/ }));
+    fireEvent.change(screen.getByLabelText(/^Tipo de build/), { target: { value: "static" } });
+    fireEvent.change(screen.getByLabelText(/^URL do repositório/), {
+      target: { value: "https://github.com/exemplo/site.git" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Nome/), { target: { value: "site" } });
+    fireEvent.change(screen.getByLabelText(/^Prefixo imutável/), { target: { value: "/Assets/" } });
+    fireEvent.click(screen.getByRole("button", { name: "Criar aplicação" }));
+    expect(await screen.findByText(/Prefixo inválido/)).toBeInTheDocument();
+    expect(posts()).toHaveLength(0);
+  });
+
+  it("editando um site estático o tipo de build fica fixo", () => {
+    renderForm(vi.fn(), { ...created, sourceType: "git", repo: "https://github.com/exemplo/site.git", buildType: "static", composeProject: "", updateMode: "pull", updateScript: "" } as AppView);
+    const select = screen.getByLabelText(/^Tipo de build/);
+    expect(select).toBeDisabled();
+    expect(select).toHaveValue("static");
+  });
+
+  it("editando uma app não estática a opção Estático some", () => {
+    renderForm(vi.fn(), { ...created, sourceType: "git", repo: "https://github.com/exemplo/site.git", buildType: "dockerfile", composeProject: "", updateMode: "pull", updateScript: "" } as AppView);
+    const select = screen.getByLabelText(/^Tipo de build/);
+    expect(select).not.toBeDisabled();
+    expect(screen.queryByRole("option", { name: "Estático" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Dockerfile" })).toBeInTheDocument();
   });
 });

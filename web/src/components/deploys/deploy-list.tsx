@@ -15,7 +15,7 @@ import { formatDateTime } from "@/lib/format";
 
 export const deployHref = (id: number) => `/deploys/detalhe/?id=${id}`;
 
-const TRIGGER_LABEL: Record<string, string> = { manual: "Manual", webhook: "Push", push: "Push", rollback: "Rollback" };
+const TRIGGER_LABEL: Record<string, string> = { manual: "Manual", webhook: "Push", push: "Push", rollback: "Rollback", adopt: "Adoção" };
 export const triggerLabel = (t: string) => TRIGGER_LABEL[t] ?? t;
 
 /** Quantos deploys antigos mantêm a imagem (o servidor guarda as 3 mais recentes). */
@@ -47,7 +47,15 @@ export function actionErrorMessage(err: unknown): string {
 
 /** Deploys que aceitam "Voltar para esta versão": os 3 mais recentes com imagem, fora o atual. */
 export function rollbackTargets(app: AppView, deploys: Deploy[]): Set<number> {
-  if (app.buildType === "compose") return new Set();
+  if (app.buildType === "compose" || app.buildType === "compose-local") return new Set();
+  if (app.buildType === "static") {
+    // Estático volta pela pasta da versão: o botão aparece em todo deploy que já foi ao ar.
+    return new Set(
+      deploys
+        .filter((d) => (d.status === "running" || d.status === "superseded") && d.id !== app.currentDeploy?.id)
+        .map((d) => d.id),
+    );
+  }
   const ids = [...deploys]
     .sort((a, b) => b.id - a.id)
     .filter((d) => (d.status === "running" || d.status === "superseded") && d.image)
@@ -100,16 +108,22 @@ export function CancelDeployButton({ deploy, size = "sm" }: { deploy: Pick<Deplo
   );
 }
 
+export const NO_RELEASE_HINT = "A versão publicada deste deploy não existe mais, então não dá para voltar para ela.";
+
 function RollbackButton({ app, deploy }: { app: AppView; deploy: Deploy }) {
   const router = useRouter();
   const rollback = useRollback();
   const [open, setOpen] = useState(false);
   const [leaving, setLeaving] = useState(false);
+  const isStatic = app.buildType === "static";
+  const noRelease = isStatic && !deploy.releaseDir;
   return (
     <>
       <Button
         size="sm"
         variant="ghost"
+        disabled={noRelease}
+        title={noRelease ? NO_RELEASE_HINT : undefined}
         onClick={() => {
           rollback.reset();
           setOpen(true);
@@ -137,7 +151,7 @@ function RollbackButton({ app, deploy }: { app: AppView; deploy: Deploy }) {
         }
       >
         <p>
-          Um novo deploy sobe a imagem desta versão
+          {isStatic ? "O site volta para a versão publicada" : "Um novo deploy sobe a imagem desta versão"}
           {deploy.commitSha ? (
             <>
               {" "}
@@ -148,8 +162,9 @@ function RollbackButton({ app, deploy }: { app: AppView; deploy: Deploy }) {
               )
             </>
           ) : null}{" "}
-          sem construir de novo. A versão atual sai do ar quando a nova ficar saudável. As variáveis usadas são as de
-          agora.
+          {isStatic
+            ? "trocando o link da raiz, sem construir de novo. A troca é imediata."
+            : "sem construir de novo. A versão atual sai do ar quando a nova ficar saudável. As variáveis usadas são as de agora."}
         </p>
         {rollback.isError && <Alert variant="danger">{actionErrorMessage(rollback.error)}</Alert>}
       </Dialog>
@@ -304,7 +319,11 @@ export function DeployList({ app }: { app: AppView }) {
       description={
         app.buildType === "compose"
           ? "Aplicações Compose não têm rollback: faça um novo deploy da versão desejada."
-          : "Os 3 deploys mais recentes guardam a imagem e permitem voltar para aquela versão."
+          : app.buildType === "compose-local"
+            ? "Sem rollback. Cada atualização roda o pull/up ou o script da stack."
+            : app.buildType === "static"
+            ? "Voltar troca o link da raiz para uma versão publicada que ainda existe; as 5 mais recentes são guardadas."
+            : "Os 3 deploys mais recentes guardam a imagem e permitem voltar para aquela versão."
       }
     >
       {body}
